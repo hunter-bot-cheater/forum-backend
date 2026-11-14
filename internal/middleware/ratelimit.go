@@ -51,8 +51,9 @@ redis.call('HSET', key, 'tokens', tokens, 'last_ms', now_ms)
 -- TTL 至少 1 秒，且大于补满整桶所需时间的两倍，避免活跃 key 被提前清掉。
 local ttl_ms = math.max(1000, math.ceil(capacity * 2000 / rate))  -- 从空桶补满所需时间，乘 2 就是 TTL
 redis.call('PEXPIRE', key, ttl_ms)  --每次用户发起请求,PEXPIRE 都会把这个 Key 的存活时间续期到这个长度
-return { allowed, retry_ms }    --一旦用户超过（补满时间 * 2）没有再发请求，说明这个 IP 已经是“死粉”了，或者攻击已经停止了。
-此时 Key 自动过期销毁，完美释放内存
+-- 一旦用户超过「补满时间 * 2」没有再发请求，这个 IP 就算没有活动了，
+-- 对应的 Key 会自动过期销毁，释放内存。
+return { allowed, retry_ms }
 `
 
 // RateLimit 令牌桶限流。参数在构造时校验，出错让服务启动期失败。
@@ -90,7 +91,7 @@ func RateLimit(rdb *redis.Client, cfg RateLimitConfig) gin.HandlerFunc {
 			// tokens < 1 时 retry_ms 至少为 1，向上取整后必然 >= 1 秒。
 			retrySec := (retryMs + 999) / 1000
 			c.Header("Retry-After", strconv.FormatInt(retrySec, 10))
-			response.Error(c, http.StatusTooManyRequests, "请求太频繁，请稍后再试")
+			response.ErrorWithCode(c, http.StatusTooManyRequests, response.ErrCodeRateLimited, "请求太频繁，请稍后再试")
 			c.Abort()
 			return
 		}

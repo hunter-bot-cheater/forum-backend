@@ -47,7 +47,7 @@ func InitDB(cfg *MySQLConfig) (*gorm.DB, error) {
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
 
-	if err := db.AutoMigrate(&model.User{}, &model.Article{}, &model.Comment{},&model.ArticleLike{}, &model.OutboxEvent{}, &model.Notification{}); err != nil {
+	if err := db.AutoMigrate(&model.User{}, &model.Article{}, &model.Comment{}, &model.ArticleLike{}, &model.OutboxEvent{}, &model.Notification{}, &model.FloorEvent{}, &model.FloorPrize{}); err != nil {
 		return nil, fmt.Errorf("failed to auto-migrate database: %w", err)
 	}
 	return db, nil

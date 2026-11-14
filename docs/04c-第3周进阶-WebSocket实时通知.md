@@ -946,7 +946,7 @@ handler 已经在 4.3 的 `ws.go` 里写好了，路由也加过了。这里只�
 func New(db *gorm.DB, jwtManager *jwt.Manager, rdb *redis.Client) (*gin.Engine, error)
 ```
 
-本章要加 `hub`，变成四个参数。下一章（敏感词过滤）还要加 `filter`，再下一章（全文搜索）还要加 `search`，最后是六个。
+本章要加 `hub`，变成四个参数。后续若再加依赖，也只是往 `Deps` 结构体里加字段，调用点只补一个键值对，不会重蹈位置参数的覆辙。
 
 六个位置参数的问题不在长短，在于**顺序错了编译器不报错**。`*gorm.DB` 和 `*redis.Client` 都是指针，写反了照样编译通过，运行时报 panic。参数越多，这种错误的概率越高。
 
@@ -1358,7 +1358,7 @@ curl -s http://127.0.0.1:8080/api/ws/stats
 | 单测 | `internal/realtime` 六个用例全 PASS，含真实 socket 一条 |
 | 依赖版本 | `github.com/gorilla/websocket v1.5.3` |
 | 破坏性改动 | `router.New` 签名改成 `New(Deps)`，`NewNotificationWorker` 多一个 `hub` 参数 |
-| 04a 章影响 | 7.1 的 `main.go` 完整文件已过时，以本章 7.3 的增量与 04e 章末尾的最终版为准 |
+| 04a 章影响 | 7.1 的 `main.go` 完整文件已过时，以本章 7.3 的增量与 07 章「启动链路」一节的最终版为准 |
 | 未验证 | 多实例扇出、真实浏览器页面、Nginx 代理下的心跳续期、`go test -race`（本机 `CGO_ENABLED` 受限） |
 
 ## 11. 参考来源
@@ -1371,4 +1371,4 @@ curl -s http://127.0.0.1:8080/api/ws/stats
 
 **本套文档内部**：00 章「目标 API 合同」「数据与业务规则」「上线前总检查」，04a 章 5.2（`NotificationWorker` 的消费循环）、7.1（`signal.NotifyContext` 与 `WaitGroup`），04b 章 2.1（`main.go` 的通用注解块），05 章（测试与发布准备），06 章讲稿 6（本章的面试表达）。
 
-> 下一步：[`04d-第3周进阶-敏感词过滤与前缀树.md`](04d-第3周进阶-敏感词过滤与前缀树.md)。本章改动的 `NewNotificationWorker` 签名与 `router.Deps` 会被 04d、04e 继续扩写，先把 8.3 的勾选项跑完再往下。
+> 下一步：进阶专题的测试与发布准备见 05 章，简历讲稿见 06 章。本章改动的 `NewNotificationWorker` 签名与 `router.Deps` 已稳定，先把 8.3 的勾选项跑完再往下。

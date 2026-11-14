@@ -44,13 +44,13 @@ const docTemplate = `{
                         "schema": {
                             "allOf": [
                                 {
-                                    "$ref": "#/definitions/handler.SwaggerEnvelope"
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
                                 },
                                 {
                                     "type": "object",
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/definitions/handler.articleListResp"
+                                            "$ref": "#/definitions/article.articleListResp"
                                         }
                                     }
                                 }
@@ -88,7 +88,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/handler.createArticleReq"
+                            "$ref": "#/definitions/article.createArticleReq"
                         }
                     }
                 ],
@@ -98,13 +98,13 @@ const docTemplate = `{
                         "schema": {
                             "allOf": [
                                 {
-                                    "$ref": "#/definitions/handler.SwaggerEnvelope"
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
                                 },
                                 {
                                     "type": "object",
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/definitions/handler.articleResp"
+                                            "$ref": "#/definitions/article.articleResp"
                                         }
                                     }
                                 }
@@ -149,13 +149,13 @@ const docTemplate = `{
                         "schema": {
                             "allOf": [
                                 {
-                                    "$ref": "#/definitions/handler.SwaggerEnvelope"
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
                                 },
                                 {
                                     "type": "object",
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/definitions/handler.hotListResp"
+                                            "$ref": "#/definitions/hot.HotListResp"
                                         }
                                     }
                                 }
@@ -195,13 +195,13 @@ const docTemplate = `{
                         "schema": {
                             "allOf": [
                                 {
-                                    "$ref": "#/definitions/handler.SwaggerEnvelope"
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
                                 },
                                 {
                                     "type": "object",
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/definitions/handler.articleResp"
+                                            "$ref": "#/definitions/article.articleResp"
                                         }
                                     }
                                 }
@@ -259,13 +259,13 @@ const docTemplate = `{
                         "schema": {
                             "allOf": [
                                 {
-                                    "$ref": "#/definitions/handler.SwaggerEnvelope"
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
                                 },
                                 {
                                     "type": "object",
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/definitions/handler.commentListResp"
+                                            "$ref": "#/definitions/comment.commentListResp"
                                         }
                                     }
                                 }
@@ -310,7 +310,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/handler.createCommentReq"
+                            "$ref": "#/definitions/comment.createCommentReq"
                         }
                     }
                 ],
@@ -320,13 +320,13 @@ const docTemplate = `{
                         "schema": {
                             "allOf": [
                                 {
-                                    "$ref": "#/definitions/handler.SwaggerEnvelope"
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
                                 },
                                 {
                                     "type": "object",
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/definitions/handler.commentResp"
+                                            "$ref": "#/definitions/comment.commentResp"
                                         }
                                     }
                                 }
@@ -383,13 +383,13 @@ const docTemplate = `{
                         "schema": {
                             "allOf": [
                                 {
-                                    "$ref": "#/definitions/handler.SwaggerEnvelope"
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
                                 },
                                 {
                                     "type": "object",
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/definitions/handler.likeResp"
+                                            "$ref": "#/definitions/like.likeResp"
                                         }
                                     }
                                 }
@@ -438,13 +438,13 @@ const docTemplate = `{
                         "schema": {
                             "allOf": [
                                 {
-                                    "$ref": "#/definitions/handler.SwaggerEnvelope"
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
                                 },
                                 {
                                     "type": "object",
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/definitions/handler.likeResp"
+                                            "$ref": "#/definitions/like.likeResp"
                                         }
                                     }
                                 }
@@ -489,7 +489,7 @@ const docTemplate = `{
                         "schema": {
                             "allOf": [
                                 {
-                                    "$ref": "#/definitions/handler.SwaggerEnvelope"
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
                                 },
                                 {
                                     "type": "object",
@@ -529,6 +529,255 @@ const docTemplate = `{
                 }
             }
         },
+        "/floor-events": {
+            "post": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "floors"
+                ],
+                "summary": "创建抢楼活动",
+                "parameters": [
+                    {
+                        "description": "活动配置",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/floor.createEventReq"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/floor.eventResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "配置不合法",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/floor-events/{id}": {
+            "get": {
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "floors"
+                ],
+                "summary": "抢楼活动详情与中奖名单",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "活动 ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/floor.eventResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "id 格式不正确",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "活动不存在",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/floor-events/{id}/grab": {
+            "post": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "floors"
+                ],
+                "summary": "抢一次楼",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "活动 ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "抢楼内容",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/floor.grabReq"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/floor.grabResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "参数不合法",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "活动不存在",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "409": {
+                        "description": "活动未在进行中，或这一楼已被抢走",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/floor-events/{id}/mine": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "floors"
+                ],
+                "summary": "我抢到的中奖楼层",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "活动 ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "type": "array",
+                                            "items": {
+                                                "$ref": "#/definitions/floor.winnerResp"
+                                            }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/login": {
             "post": {
                 "consumes": [
@@ -548,7 +797,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/handler.registerReq"
+                            "$ref": "#/definitions/user.registerReq"
                         }
                     }
                 ],
@@ -558,13 +807,13 @@ const docTemplate = `{
                         "schema": {
                             "allOf": [
                                 {
-                                    "$ref": "#/definitions/handler.SwaggerEnvelope"
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
                                 },
                                 {
                                     "type": "object",
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/definitions/handler.loginResp"
+                                            "$ref": "#/definitions/user.loginResp"
                                         }
                                     }
                                 }
@@ -614,13 +863,13 @@ const docTemplate = `{
                         "schema": {
                             "allOf": [
                                 {
-                                    "$ref": "#/definitions/handler.SwaggerEnvelope"
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
                                 },
                                 {
                                     "type": "object",
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/definitions/handler.notificationListResp"
+                                            "$ref": "#/definitions/notification.notificationListResp"
                                         }
                                     }
                                 }
@@ -654,7 +903,7 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "$ref": "#/definitions/handler.SwaggerEnvelope"
+                            "$ref": "#/definitions/httputil.SwaggerEnvelope"
                         }
                     },
                     "401": {
@@ -685,7 +934,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/handler.registerReq"
+                            "$ref": "#/definitions/user.registerReq"
                         }
                     }
                 ],
@@ -695,13 +944,13 @@ const docTemplate = `{
                         "schema": {
                             "allOf": [
                                 {
-                                    "$ref": "#/definitions/handler.SwaggerEnvelope"
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
                                 },
                                 {
                                     "type": "object",
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/definitions/handler.userResp"
+                                            "$ref": "#/definitions/user.userResp"
                                         }
                                     }
                                 }
@@ -738,13 +987,13 @@ const docTemplate = `{
                         "schema": {
                             "allOf": [
                                 {
-                                    "$ref": "#/definitions/handler.SwaggerEnvelope"
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
                                 },
                                 {
                                     "type": "object",
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/definitions/handler.onlineStatsResp"
+                                            "$ref": "#/definitions/ws.onlineStatsResp"
                                         }
                                     }
                                 }
@@ -756,26 +1005,14 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "handler.SwaggerEnvelope": {
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "integer"
-                },
-                "data": {},
-                "message": {
-                    "type": "string"
-                }
-            }
-        },
-        "handler.articleListResp": {
+        "article.articleListResp": {
             "type": "object",
             "properties": {
                 "list": {
                     "description": "articleListResp.List 声明成切片，",
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/handler.articleResp"
+                        "$ref": "#/definitions/article.articleResp"
                     }
                 },
                 "page": {
@@ -785,16 +1022,15 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "total": {
-                    "description": "handler 里用 make([]articleResp, 0, len(...)) 初始化，无结果时输出 []",
                     "type": "integer"
                 }
             }
         },
-        "handler.articleResp": {
+        "article.articleResp": {
             "type": "object",
             "properties": {
                 "author": {
-                    "$ref": "#/definitions/handler.userBrief"
+                    "$ref": "#/definitions/article.userBrief"
                 },
                 "content": {
                     "type": "string"
@@ -810,13 +1046,35 @@ const docTemplate = `{
                 }
             }
         },
-        "handler.commentListResp": {
+        "article.createArticleReq": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": "string"
+                }
+            }
+        },
+        "article.userBrief": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer"
+                },
+                "username": {
+                    "type": "string"
+                }
+            }
+        },
+        "comment.commentListResp": {
             "type": "object",
             "properties": {
                 "list": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/handler.commentResp"
+                        "$ref": "#/definitions/comment.commentResp"
                     }
                 },
                 "page": {
@@ -830,7 +1088,7 @@ const docTemplate = `{
                 }
             }
         },
-        "handler.commentResp": {
+        "comment.commentResp": {
             "type": "object",
             "properties": {
                 "article_id": {
@@ -840,7 +1098,7 @@ const docTemplate = `{
                     "description": "Author 用指针，omitempty 才生效",
                     "allOf": [
                         {
-                            "$ref": "#/definitions/handler.userBrief"
+                            "$ref": "#/definitions/comment.userBrief"
                         }
                     ]
                 },
@@ -855,10 +1113,41 @@ const docTemplate = `{
                 }
             }
         },
-        "handler.createArticleReq": {
+        "comment.createCommentReq": {
             "type": "object",
             "properties": {
                 "content": {
+                    "type": "string"
+                }
+            }
+        },
+        "comment.userBrief": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer"
+                },
+                "username": {
+                    "type": "string"
+                }
+            }
+        },
+        "floor.createEventReq": {
+            "type": "object",
+            "properties": {
+                "article_id": {
+                    "type": "integer"
+                },
+                "ends_at": {
+                    "type": "string"
+                },
+                "lucky_floors": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
+                },
+                "starts_at": {
                     "type": "string"
                 },
                 "title": {
@@ -866,7 +1155,42 @@ const docTemplate = `{
                 }
             }
         },
-        "handler.createCommentReq": {
+        "floor.eventResp": {
+            "type": "object",
+            "properties": {
+                "article_id": {
+                    "type": "integer"
+                },
+                "ends_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "lucky_floors": {
+                    "type": "array",
+                    "items": {
+                        "type": "integer"
+                    }
+                },
+                "next_floor": {
+                    "type": "integer"
+                },
+                "starts_at": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": "string"
+                },
+                "winners": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/floor.winnerResp"
+                    }
+                }
+            }
+        },
+        "floor.grabReq": {
             "type": "object",
             "properties": {
                 "content": {
@@ -874,7 +1198,38 @@ const docTemplate = `{
                 }
             }
         },
-        "handler.hotArticleResp": {
+        "floor.grabResp": {
+            "type": "object",
+            "properties": {
+                "floor": {
+                    "type": "integer"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "won": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "floor.winnerResp": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "floor": {
+                    "type": "integer"
+                },
+                "user_id": {
+                    "type": "integer"
+                }
+            }
+        },
+        "hot.HotArticleResp": {
             "type": "object",
             "properties": {
                 "article_id": {
@@ -891,18 +1246,36 @@ const docTemplate = `{
                 }
             }
         },
-        "handler.hotListResp": {
+        "hot.HotListResp": {
             "type": "object",
             "properties": {
                 "list": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/handler.hotArticleResp"
+                        "$ref": "#/definitions/hot.HotArticleResp"
                     }
                 }
             }
         },
-        "handler.likeResp": {
+        "httputil.SwaggerEnvelope": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "integer"
+                },
+                "data": {},
+                "error_code": {
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "request_id": {
+                    "type": "string"
+                }
+            }
+        },
+        "like.likeResp": {
             "type": "object",
             "properties": {
                 "article_id": {
@@ -919,24 +1292,13 @@ const docTemplate = `{
                 }
             }
         },
-        "handler.loginResp": {
-            "type": "object",
-            "properties": {
-                "token": {
-                    "type": "string"
-                },
-                "user": {
-                    "$ref": "#/definitions/handler.userResp"
-                }
-            }
-        },
-        "handler.notificationListResp": {
+        "notification.notificationListResp": {
             "type": "object",
             "properties": {
                 "list": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/handler.notificationResp"
+                        "$ref": "#/definitions/notification.notificationResp"
                     }
                 },
                 "page": {
@@ -953,7 +1315,7 @@ const docTemplate = `{
                 }
             }
         },
-        "handler.notificationResp": {
+        "notification.notificationResp": {
             "type": "object",
             "properties": {
                 "actor_id": {
@@ -985,18 +1347,18 @@ const docTemplate = `{
                 }
             }
         },
-        "handler.onlineStatsResp": {
+        "user.loginResp": {
             "type": "object",
             "properties": {
-                "online_conns": {
-                    "type": "integer"
+                "token": {
+                    "type": "string"
                 },
-                "online_users": {
-                    "type": "integer"
+                "user": {
+                    "$ref": "#/definitions/user.userResp"
                 }
             }
         },
-        "handler.registerReq": {
+        "user.registerReq": {
             "type": "object",
             "required": [
                 "password",
@@ -1012,18 +1374,7 @@ const docTemplate = `{
                 }
             }
         },
-        "handler.userBrief": {
-            "type": "object",
-            "properties": {
-                "id": {
-                    "type": "integer"
-                },
-                "username": {
-                    "type": "string"
-                }
-            }
-        },
-        "handler.userResp": {
+        "user.userResp": {
             "type": "object",
             "properties": {
                 "created_at": {
@@ -1037,6 +1388,17 @@ const docTemplate = `{
                 },
                 "username": {
                     "type": "string"
+                }
+            }
+        },
+        "ws.onlineStatsResp": {
+            "type": "object",
+            "properties": {
+                "online_conns": {
+                    "type": "integer"
+                },
+                "online_users": {
+                    "type": "integer"
                 }
             }
         }
@@ -1057,7 +1419,7 @@ var SwaggerInfo = &swag.Spec{
 	BasePath:         "/api",
 	Schemes:          []string{},
 	Title:            "Forum Backend API",
-	Description:      "社区论坛后端学习项目，统一响应格式为 { code, message, data }",
+	Description:      "社区论坛后端学习项目，统一响应格式为 { code, message, data }；失败响应额外带 error_code 与 request_id",
 	InfoInstanceName: "swagger",
 	SwaggerTemplate:  docTemplate,
 	LeftDelim:        "{{",

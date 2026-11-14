@@ -13,8 +13,10 @@ import { useUserStore } from '@/store/modules/user'
 // 一个 axios 实例 + 请求拦截器统一带 token + 响应拦截器统一拆包 {code,message,data}。
 //
 // 后端响应约定（见 backend/pkg/response）：
-//   成功：HTTP 200，{"code":0,"message":"ok","data":{...}}
-//   失败：HTTP 非 2xx（400/401/404/429...），{"code":1,"message":"...","data":null}
+//   成功：HTTP 200，{"code":0,"message":"ok","data":{...}}，不带下面两个错误字段
+//   失败：HTTP 非 2xx（400/401/404/405/429...），
+//         {"code":1,"message":"...","data":null,"error_code":"...","request_id":"..."}
+//   error_code 是机读错误码，改中文文案不会变；request_id 也放在 X-Request-ID 响应头。
 // 所以响应拦截器成功时直接返回 res.data（即真正的业务数据），
 // 页面里拿到的是 data 字段本身，不用再 res.data.data.data 层层取。
 const service: AxiosInstance = axios.create({
@@ -62,6 +64,12 @@ service.interceptors.response.use(
     } else {
       ElMessage.error(message)
     }
+    // 把机读错误码与追踪号挂到错误对象上，页面可按 errorCode 分支，
+    // 用户报障时能直接把 requestId 给后端查日志。
+    Object.assign(error, {
+      errorCode: resp?.data?.error_code,
+      requestId: resp?.data?.request_id || resp?.headers?.['x-request-id'],
+    })
     return Promise.reject(error)
   },
 )

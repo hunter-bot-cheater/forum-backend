@@ -18,7 +18,7 @@ func JWTAuth(jwtManager *jwt.Manager) gin.HandlerFunc {
 		scheme, tokenString, ok := strings.Cut(authorization, " ")
 		if !ok || !strings.EqualFold(scheme, "Bearer") || strings.TrimSpace(tokenString) == "" {
 			// 无 token 是常见客户端错误，Gin 的访问日志会记录 401，不额外打印错误日志。
-			response.Error(c, http.StatusUnauthorized, "未登录")
+			response.ErrorWithCode(c, http.StatusUnauthorized, response.ErrCodeUnauthorized, "未登录")
 			c.Abort()
 			return
 		}
@@ -26,7 +26,7 @@ func JWTAuth(jwtManager *jwt.Manager) gin.HandlerFunc {
 		userID, err := jwtManager.Parse(strings.TrimSpace(tokenString))
 		if err != nil {
 			// 过期或无效 token 也属于预期的 401，不记录 token 内容或重复错误日志。
-			response.Error(c, http.StatusUnauthorized, "登录已过期，请重新登录")
+			response.ErrorWithCode(c, http.StatusUnauthorized, response.ErrCodeTokenInvalid, "登录已过期，请重新登录")
 			c.Abort()
 			return
 		}

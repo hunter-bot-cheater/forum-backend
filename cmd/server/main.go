@@ -2,7 +2,7 @@
 
 // @title           Forum Backend API
 // @version         1.0
-// @description     社区论坛后端学习项目，统一响应格式为 { code, message, data }
+// @description     社区论坛后端学习项目，统一响应格式为 { code, message, data }；失败响应额外带 error_code 与 request_id
 // @host            localhost:8080
 // @BasePath        /api
 // @securityDefinitions.apikey Bearer
@@ -24,9 +24,9 @@ import (
 	"time"
 
 	"forum-backend/internal/config"
+	"forum-backend/internal/notification"
 	"forum-backend/internal/realtime"
 	"forum-backend/internal/router"
-	"forum-backend/internal/worker"
 	"forum-backend/pkg/jwt"
 )
 
@@ -67,8 +67,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	relay := worker.NewRelay(db, rdb)
-	notifier := worker.NewNotificationWorker(db, rdb, hub)
+	relay := notification.NewRelay(db, rdb)
+	notifier := notification.NewNotificationWorker(db, rdb, hub)
 
 	var wg sync.WaitGroup
 	wg.Add(2)

@@ -1,32 +1,23 @@
 basePath: /api
 definitions:
-  handler.SwaggerEnvelope:
-    properties:
-      code:
-        type: integer
-      data: {}
-      message:
-        type: string
-    type: object
-  handler.articleListResp:
+  article.articleListResp:
     properties:
       list:
         description: articleListResp.List 声明成切片，
         items:
-          $ref: '#/definitions/handler.articleResp'
+          $ref: '#/definitions/article.articleResp'
         type: array
       page:
         type: integer
       page_size:
         type: integer
       total:
-        description: handler 里用 make([]articleResp, 0, len(...)) 初始化，无结果时输出 []
         type: integer
     type: object
-  handler.articleResp:
+  article.articleResp:
     properties:
       author:
-        $ref: '#/definitions/handler.userBrief'
+        $ref: '#/definitions/article.userBrief'
       content:
         type: string
       created_at:
@@ -36,11 +27,25 @@ definitions:
       title:
         type: string
     type: object
-  handler.commentListResp:
+  article.createArticleReq:
+    properties:
+      content:
+        type: string
+      title:
+        type: string
+    type: object
+  article.userBrief:
+    properties:
+      id:
+        type: integer
+      username:
+        type: string
+    type: object
+  comment.commentListResp:
     properties:
       list:
         items:
-          $ref: '#/definitions/handler.commentResp'
+          $ref: '#/definitions/comment.commentResp'
         type: array
       page:
         type: integer
@@ -49,13 +54,13 @@ definitions:
       total:
         type: integer
     type: object
-  handler.commentResp:
+  comment.commentResp:
     properties:
       article_id:
         type: integer
       author:
         allOf:
-        - $ref: '#/definitions/handler.userBrief'
+        - $ref: '#/definitions/comment.userBrief'
         description: Author 用指针，omitempty 才生效
       content:
         type: string
@@ -64,19 +69,82 @@ definitions:
       id:
         type: integer
     type: object
-  handler.createArticleReq:
+  comment.createCommentReq:
     properties:
       content:
+        type: string
+    type: object
+  comment.userBrief:
+    properties:
+      id:
+        type: integer
+      username:
+        type: string
+    type: object
+  floor.createEventReq:
+    properties:
+      article_id:
+        type: integer
+      ends_at:
+        type: string
+      lucky_floors:
+        items:
+          type: integer
+        type: array
+      starts_at:
         type: string
       title:
         type: string
     type: object
-  handler.createCommentReq:
+  floor.eventResp:
+    properties:
+      article_id:
+        type: integer
+      ends_at:
+        type: string
+      id:
+        type: integer
+      lucky_floors:
+        items:
+          type: integer
+        type: array
+      next_floor:
+        type: integer
+      starts_at:
+        type: string
+      title:
+        type: string
+      winners:
+        items:
+          $ref: '#/definitions/floor.winnerResp'
+        type: array
+    type: object
+  floor.grabReq:
     properties:
       content:
         type: string
     type: object
-  handler.hotArticleResp:
+  floor.grabResp:
+    properties:
+      floor:
+        type: integer
+      message:
+        type: string
+      won:
+        type: boolean
+    type: object
+  floor.winnerResp:
+    properties:
+      content:
+        type: string
+      created_at:
+        type: string
+      floor:
+        type: integer
+      user_id:
+        type: integer
+    type: object
+  hot.HotArticleResp:
     properties:
       article_id:
         type: integer
@@ -87,14 +155,26 @@ definitions:
       title:
         type: string
     type: object
-  handler.hotListResp:
+  hot.HotListResp:
     properties:
       list:
         items:
-          $ref: '#/definitions/handler.hotArticleResp'
+          $ref: '#/definitions/hot.HotArticleResp'
         type: array
     type: object
-  handler.likeResp:
+  httputil.SwaggerEnvelope:
+    properties:
+      code:
+        type: integer
+      data: {}
+      error_code:
+        type: string
+      message:
+        type: string
+      request_id:
+        type: string
+    type: object
+  like.likeResp:
     properties:
       article_id:
         type: integer
@@ -105,18 +185,11 @@ definitions:
       liked:
         type: boolean
     type: object
-  handler.loginResp:
-    properties:
-      token:
-        type: string
-      user:
-        $ref: '#/definitions/handler.userResp'
-    type: object
-  handler.notificationListResp:
+  notification.notificationListResp:
     properties:
       list:
         items:
-          $ref: '#/definitions/handler.notificationResp'
+          $ref: '#/definitions/notification.notificationResp'
         type: array
       page:
         type: integer
@@ -127,7 +200,7 @@ definitions:
       unread_count:
         type: integer
     type: object
-  handler.notificationResp:
+  notification.notificationResp:
     properties:
       actor_id:
         type: integer
@@ -148,14 +221,14 @@ definitions:
       type:
         type: string
     type: object
-  handler.onlineStatsResp:
+  user.loginResp:
     properties:
-      online_conns:
-        type: integer
-      online_users:
-        type: integer
+      token:
+        type: string
+      user:
+        $ref: '#/definitions/user.userResp'
     type: object
-  handler.registerReq:
+  user.registerReq:
     properties:
       password:
         type: string
@@ -166,14 +239,7 @@ definitions:
     - password
     - username
     type: object
-  handler.userBrief:
-    properties:
-      id:
-        type: integer
-      username:
-        type: string
-    type: object
-  handler.userResp:
+  user.userResp:
     properties:
       created_at:
         type: string
@@ -184,10 +250,17 @@ definitions:
       username:
         type: string
     type: object
+  ws.onlineStatsResp:
+    properties:
+      online_conns:
+        type: integer
+      online_users:
+        type: integer
+    type: object
 host: localhost:8080
 info:
   contact: {}
-  description: 社区论坛后端学习项目，统一响应格式为 { code, message, data }
+  description: 社区论坛后端学习项目，统一响应格式为 { code, message, data }；失败响应额外带 error_code 与 request_id
   title: Forum Backend API
   version: "1.0"
 paths:
@@ -209,10 +282,10 @@ paths:
           description: OK
           schema:
             allOf:
-            - $ref: '#/definitions/handler.SwaggerEnvelope'
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/handler.articleListResp'
+                  $ref: '#/definitions/article.articleListResp'
               type: object
         "400":
           description: 分页参数越界
@@ -230,7 +303,7 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/handler.createArticleReq'
+          $ref: '#/definitions/article.createArticleReq'
       produces:
       - application/json
       responses:
@@ -238,10 +311,10 @@ paths:
           description: OK
           schema:
             allOf:
-            - $ref: '#/definitions/handler.SwaggerEnvelope'
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/handler.articleResp'
+                  $ref: '#/definitions/article.articleResp'
               type: object
         "400":
           description: 请求体格式不正确
@@ -271,10 +344,10 @@ paths:
           description: OK
           schema:
             allOf:
-            - $ref: '#/definitions/handler.SwaggerEnvelope'
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/handler.articleResp'
+                  $ref: '#/definitions/article.articleResp'
               type: object
         "400":
           description: id 格式不正确
@@ -310,10 +383,10 @@ paths:
           description: OK
           schema:
             allOf:
-            - $ref: '#/definitions/handler.SwaggerEnvelope'
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/handler.commentListResp'
+                  $ref: '#/definitions/comment.commentListResp'
               type: object
         "400":
           description: id 或分页参数不正确
@@ -336,7 +409,7 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/handler.createCommentReq'
+          $ref: '#/definitions/comment.createCommentReq'
       produces:
       - application/json
       responses:
@@ -344,10 +417,10 @@ paths:
           description: OK
           schema:
             allOf:
-            - $ref: '#/definitions/handler.SwaggerEnvelope'
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/handler.commentResp'
+                  $ref: '#/definitions/comment.commentResp'
               type: object
         "400":
           description: id 或请求体格式不正确
@@ -381,10 +454,10 @@ paths:
           description: OK
           schema:
             allOf:
-            - $ref: '#/definitions/handler.SwaggerEnvelope'
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/handler.likeResp'
+                  $ref: '#/definitions/like.likeResp'
               type: object
         "401":
           description: 未登录
@@ -409,10 +482,10 @@ paths:
           description: OK
           schema:
             allOf:
-            - $ref: '#/definitions/handler.SwaggerEnvelope'
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/handler.likeResp'
+                  $ref: '#/definitions/like.likeResp'
               type: object
         "401":
           description: 未登录
@@ -441,10 +514,10 @@ paths:
           description: OK
           schema:
             allOf:
-            - $ref: '#/definitions/handler.SwaggerEnvelope'
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/handler.hotListResp'
+                  $ref: '#/definitions/hot.HotListResp'
               type: object
         "400":
           description: limit 非法
@@ -468,7 +541,7 @@ paths:
           description: OK
           schema:
             allOf:
-            - $ref: '#/definitions/handler.SwaggerEnvelope'
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
                   type: object
@@ -494,6 +567,153 @@ paths:
       summary: 删除自己的评论
       tags:
       - comments
+  /floor-events:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: 活动配置
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/floor.createEventReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/floor.eventResp'
+              type: object
+        "400":
+          description: 配置不合法
+          schema:
+            type: string
+        "401":
+          description: 未登录
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 创建抢楼活动
+      tags:
+      - floors
+  /floor-events/{id}:
+    get:
+      parameters:
+      - description: 活动 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/floor.eventResp'
+              type: object
+        "400":
+          description: id 格式不正确
+          schema:
+            type: string
+        "404":
+          description: 活动不存在
+          schema:
+            type: string
+      summary: 抢楼活动详情与中奖名单
+      tags:
+      - floors
+  /floor-events/{id}/grab:
+    post:
+      consumes:
+      - application/json
+      parameters:
+      - description: 活动 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 抢楼内容
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/floor.grabReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/floor.grabResp'
+              type: object
+        "400":
+          description: 参数不合法
+          schema:
+            type: string
+        "401":
+          description: 未登录
+          schema:
+            type: string
+        "404":
+          description: 活动不存在
+          schema:
+            type: string
+        "409":
+          description: 活动未在进行中，或这一楼已被抢走
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 抢一次楼
+      tags:
+      - floors
+  /floor-events/{id}/mine:
+    get:
+      parameters:
+      - description: 活动 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/floor.winnerResp'
+                  type: array
+              type: object
+        "401":
+          description: 未登录
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 我抢到的中奖楼层
+      tags:
+      - floors
   /login:
     post:
       consumes:
@@ -504,7 +724,7 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/handler.registerReq'
+          $ref: '#/definitions/user.registerReq'
       produces:
       - application/json
       responses:
@@ -512,10 +732,10 @@ paths:
           description: OK
           schema:
             allOf:
-            - $ref: '#/definitions/handler.SwaggerEnvelope'
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/handler.loginResp'
+                  $ref: '#/definitions/user.loginResp'
               type: object
         "401":
           description: 凭据错误
@@ -542,10 +762,10 @@ paths:
           description: OK
           schema:
             allOf:
-            - $ref: '#/definitions/handler.SwaggerEnvelope'
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/handler.notificationListResp'
+                  $ref: '#/definitions/notification.notificationListResp'
               type: object
         "401":
           description: 未登录
@@ -564,7 +784,7 @@ paths:
         "200":
           description: OK
           schema:
-            $ref: '#/definitions/handler.SwaggerEnvelope'
+            $ref: '#/definitions/httputil.SwaggerEnvelope'
         "401":
           description: 未登录
           schema:
@@ -584,7 +804,7 @@ paths:
         name: body
         required: true
         schema:
-          $ref: '#/definitions/handler.registerReq'
+          $ref: '#/definitions/user.registerReq'
       produces:
       - application/json
       responses:
@@ -592,10 +812,10 @@ paths:
           description: OK
           schema:
             allOf:
-            - $ref: '#/definitions/handler.SwaggerEnvelope'
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/handler.userResp'
+                  $ref: '#/definitions/user.userResp'
               type: object
         "400":
           description: 请求体格式不正确
@@ -617,10 +837,10 @@ paths:
           description: OK
           schema:
             allOf:
-            - $ref: '#/definitions/handler.SwaggerEnvelope'
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/handler.onlineStatsResp'
+                  $ref: '#/definitions/ws.onlineStatsResp'
               type: object
       summary: 当前在线人数与连接数
       tags:

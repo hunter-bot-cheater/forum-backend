@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"forum-backend/internal/config"
-	"forum-backend/internal/service"
+	"forum-backend/internal/hot"
 )
 
 func main() {
@@ -58,7 +58,7 @@ func run() int {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	rec := service.NewReconciler(db, rdb)
+	rec := hot.NewReconciler(db, rdb)
 
 	rep, err := rec.Check(ctx, *topN)
 	if err != nil {
@@ -102,7 +102,7 @@ func run() int {
 	return 0
 }
 
-func printReport(rep *service.ReconcileReport) {
+func printReport(rep *hot.ReconcileReport) {
 	pretty, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {
 		log.Printf("序列化报告失败: %v", err)
