@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install swag
+        run: go install github.com/swaggo/swag/cmd/swag@v1.16.6
+      - name: Generate API docs
+        run: $(go env GOPATH)/bin/swag init -g cmd/server/main.go -o api/swagger --parseInternal
+      - name: Check docs are up to date
+        run: git add -N api/swagger && git diff --exit-code -- api/swagger
+      - run: go vet ./...
+      - run: go test ./...

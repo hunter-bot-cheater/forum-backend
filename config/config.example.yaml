@@ -1,0 +1,32 @@
+# 这是 config.yaml 的安全模板（会被提交到 Git）。
+# 使用方式：克隆仓库后，把本文件复制为 config/config.yaml，填上你自己的值。
+# config/config.yaml 已写入 .gitignore，不会上传，避免泄露密码。
+# 也可以用环境变量覆盖敏感项（见 internal/config/config.go 的 BindEnv）：
+#   export MYSQL_PASSWORD=xxx
+#   export REDIS_PASSWORD=xxx
+#   export JWT_SECRET=xxx
+
+server:
+  port: 8080
+
+mysql:
+  host: 127.0.0.1
+  port: 3306
+  user: root
+  # 本地开发填你自己的 MySQL 密码；不要写真实密码进被提交的配置。
+  # 部署建议用环境变量 MYSQL_PASSWORD 覆盖。
+  password: "your_mysql_password"
+  dbname: forum
+
+redis:
+  addr: 127.0.0.1:6379
+  # 同上，真实密码请用环境变量 REDIS_PASSWORD 覆盖。
+  password: "your_redis_password"
+  db: 0
+
+jwt:
+  # 必填且要足够长的随机字符串；也可用环境变量 JWT_SECRET 覆盖。
+  # 留空会导致启动直接报错（internal/config 强制校验），这是故意的，
+  # 防止用空密钥去签名 token（等于没有鉴权）。
+  secret: "replace_with_a_long_random_secret"
+  expire: 24 # 小时

@@ -1,0 +1,74 @@
+import axios, {
+  type AxiosInstance,
+  type AxiosRequestConfig,
+  type AxiosResponse,
+  type InternalAxiosRequestConfig,
+} from 'axios'
+import { ElMessage } from 'element-plus'
+import { getToken, removeToken } from '@/utils/auth'
+import router from '@/router'
+import { useUserStore } from '@/store/modules/user'
+
+// 这套结构照搬 vue3-element-admin 的 src/utils/request.ts：
+// 一个 axios 实例 + 请求拦截器统一带 token + 响应拦截器统一拆包 {code,message,data}。
+//
+// 后端响应约定（见 backend/pkg/response）：
+//   成功：HTTP 200，{"code":0,"message":"ok","data":{...}}
+//   失败：HTTP 非 2xx（400/401/404/429...），{"code":1,"message":"...","data":null}
+// 所以响应拦截器成功时直接返回 res.data（即真正的业务数据），
+// 页面里拿到的是 data 字段本身，不用再 res.data.data.data 层层取。
+const service: AxiosInstance = axios.create({
+  baseURL: '/api',
+  timeout: 10000,
+})
+
+service.interceptors.request.use(
+  (config: InternalAxiosRequestConfig) => {
+    const token = getToken()
+    if (token) {
+      config.headers.set('Authorization', `Bearer ${token}`)
+    }
+    return config
+  },
+  (error) => Promise.reject(error),
+)
+
+service.interceptors.response.use(
+  (response: AxiosResponse) => {
+    const res = response.data
+    if (res && res.code === 0) {
+      return res.data
+    }
+    ElMessage.error(res?.message || '请求失败')
+    return Promise.reject(new Error(res?.message || 'Error'))
+  },
+  (error) => {
+    const resp = error.response
+    const status = resp?.status
+    const message = resp?.data?.message || error.message || '请求失败'
+    if (status === 401) {
+      // 登录过期或没带 token：清掉本地状态，跳回登录页。
+      removeToken()
+      useUserStore().resetToken()
+      ElMessage.error('登录已过期，请重新登录')
+      router.replace('/login')
+    } else if (status === 429) {
+      // 限流：后端按客户端 IP 分桶（Capacity=10, Rate=2），首页会并发多个请求。
+      // 不要把 429 自动重试——重试本身也吃令牌，越重试越晚恢复。
+      const retryAfter = resp?.headers?.['retry-after']
+      ElMessage.error(
+        retryAfter ? `请求过于频繁，请 ${retryAfter} 秒后重试` : '请求过于频繁，请稍后重试',
+      )
+    } else {
+      ElMessage.error(message)
+    }
+    return Promise.reject(error)
+  },
+)
+
+// 带类型的请求封装：页面里 request<ArticleResp>({...}) 直接得到业务数据的 Promise。
+function request<T = any>(config: AxiosRequestConfig): Promise<T> {
+  return service(config) as unknown as Promise<T>
+}
+
+export default request

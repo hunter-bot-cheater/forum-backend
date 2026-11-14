@@ -1,0 +1,58 @@
+# ============ 依赖与构建产物 ============
+# Go 编译产物
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# 前端依赖与构建产物（web/ 是独立的 Vue 工程）
+web/node_modules/
+web/dist/
+web/dist-prod/
+web/.env
+web/.env.local
+web/*.log
+
+# 调试/临时构建目录
+dist_probe/
+tmp/
+
+# 覆盖率
+coverage.out
+
+# Go vendor（若使用 go mod vendor）
+/vendor/
+
+# ============ 密钥与本地配置（含敏感信息，禁止提交） ============
+# 真实配置含 MySQL / Redis 密码与 JWT 密钥，已在本地忽略，不会上传到 GitHub。
+# 仓库只保留 config/config.example.yaml 作为模板：
+#   克隆后把它复制成 config/config.yaml，填你自己的密码；
+#   或者按 internal/config/config.go 的 BindEnv，用环境变量覆盖
+#   （MYSQL_PASSWORD / REDIS_PASSWORD / JWT_SECRET）。
+.env
+.env.local
+config/config.yaml
+config/config.local.yaml
+config/.env
+
+# ============ 编辑器与 IDE ============
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# ============ 操作系统 ============
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ============ 日志 ============
+*.log
+logs/
