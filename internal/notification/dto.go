@@ -38,7 +38,9 @@ func toNotificationResp(n *model.Notification) notificationResp {
 	}
 }
 
-// notificationListResp 让列表始终带 list，空结果输出 []。
+// notificationListResp 是列表接口的 data 部分。
+// List 初始化为空切片，保证空结果输出 [] 而不是 null，前端不用判空。
+// UnreadCount 单独返回，前端不必自己遍历统计未读。
 type notificationListResp struct {
 	List        []notificationResp `json:"list"`
 	Total       int64              `json:"total"`

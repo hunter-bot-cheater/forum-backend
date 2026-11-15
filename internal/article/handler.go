@@ -1,20 +1,22 @@
 package article
 
 import (
-	"forum-backend/internal/httputil"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 
+	"forum-backend/internal/httputil"
 	"forum-backend/pkg/response"
 )
 
-// ArticleHandler 文章接口，只依赖同包的 service，不认识 GORM。
+// ArticleHandler 是文章模块的 HTTP 入口，只依赖同包的 service，不认识 GORM。
+// 每个方法都走同一个套路：解析参数 → 调 service → 成功交 DTO / 失败交 MapServiceError。
 type ArticleHandler struct {
 	svc *ArticleService
 }
 
+// NewArticleHandler 注入文章 service，由 router 在装配期调用。
 func NewArticleHandler(svc *ArticleService) *ArticleHandler {
 	return &ArticleHandler{svc: svc}
 }
@@ -28,11 +30,13 @@ func NewArticleHandler(svc *ArticleService) *ArticleHandler {
 // @Success      200  {object}  httputil.SwaggerEnvelope{data=articleListResp}
 // @Failure      400  {string}  string    "分页参数越界"
 // @Router       /articles [get]
-// List 处理 GET /api/articles。
+// List 处理 GET /api/articles，返回当前页数据与总数。
 func (h *ArticleHandler) List(c *gin.Context) {
+	// 分页参数统一由 httputil.ParsePage 解析：缺省值、上下界、溢出检查都在那一处，
+	// 各接口不重复写，口径才不会漂。出错时交给 MapServiceError 统一映射。
 	page, pageSize, err := httputil.ParsePage(c)
 	if err != nil {
-		httputil.MapServiceError(c, "list articles", err) //统一错误映射
+		httputil.MapServiceError(c, "list articles", err)
 		return
 	}
 
@@ -42,9 +46,13 @@ func (h *ArticleHandler) List(c *gin.Context) {
 		return
 	}
 
-	list := make([]articleResp, 0, len(articles)) //从空开始 申请了len(articles)的容量，避免多次扩容
+	// 这里必须从「空切片」开始，而不是声明 var list []articleListItem：
+	// nil 切片会被序列化成 null，前端拿到的 list 就不是数组了。
+	// 容量先按 len(articles) 申请，避免 append 过程中反复扩容。
+	// 列表项不含正文，只带服务端截好的摘要，响应体不会随正文长度膨胀。
+	list := make([]articleListItem, 0, len(articles))
 	for _, a := range articles {
-		list = append(list, toArticleResp(a))
+		list = append(list, toArticleListItem(a))
 	}
 
 	resp := articleListResp{
@@ -61,23 +69,28 @@ func (h *ArticleHandler) List(c *gin.Context) {
 // @Tags         articles
 // @Produce      json
 // @Param        id   path  int  true  "文章 ID"
-// @Success      200  {object}  httputil.SwaggerEnvelope{data=articleResp}
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=articleDetailResp}
 // @Failure      400  {string}  string    "id 格式不正确"
 // @Failure      404  {string}  string    "文章不存在"
 // @Router       /articles/{id} [get]
-// Detail 处理 GET /api/articles/:id。
+// Detail 处理 GET /api/articles/:id，缓存命中时不会碰数据库。
 func (h *ArticleHandler) Detail(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64) //从 URL 路径中提取名为 "id" 的参数（字符串），
-	//并将其安全地转换成无符号 64 位整数（uint64），用于后续的业务逻辑
+	// 路径参数是字符串，先转成数字再交给 service。
+	// ParseUint 的第二个参数 10 表示十进制，第三个 64 表示位宽；
+	// 转换失败（传了字母、负数、超大数）直接在边界挡掉，不会把脏值带进 SQL 条件。
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		response.Error(c, http.StatusBadRequest, "id 格式不正确")
 		return
 	}
+
 	a, err := h.svc.Detail(c.Request.Context(), uint(id))
 	if err != nil {
+		// service 已经把「查不到」统一成 domain.ErrNotFound，这里不需要认识 GORM 的错误。
 		httputil.MapServiceError(c, "article detail", err)
 		return
 	}
+	// 详情比列表多一个 like_count，所以用另一个 DTO 包一层。
 	response.OK(c, toArticleDetailResp(a))
 }
 
@@ -92,7 +105,7 @@ func (h *ArticleHandler) Detail(c *gin.Context) {
 // @Failure      401  {string}  string    "未登录"
 // @Security     Bearer
 // @Router       /articles [post]
-// Create 处理 POST /api/articles。
+// Create 处理 POST /api/articles，作者取自 token，不接受客户端指定。
 func (h *ArticleHandler) Create(c *gin.Context) {
 	// 从 Gin context 取身份。GetUint 在类型不对或没值时返回 0，
 	// httputil.CurrentUserID 把 0 判成失败，避免把 0 号用户写进数据库。
@@ -102,18 +115,19 @@ func (h *ArticleHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// 只往两个字段的结构体里绑。请求体里额外的 user_id 之类字段
-	// 会被 encoding/json 忽略，不会进入后面的 service 调用。
+	// 只往两个字段的结构体里绑。请求体里额外的 user_id 字段
+	// 会被 encoding/json 直接忽略，伪造作者身份这条路走不通。
 	var req createArticleReq
-	if err := c.ShouldBindJSON(&req); err != nil { //从 HTTP 请求中，把客户端发来的 JSON 数据，提取出来并塞进 req 这个结构体里
+	if err := c.ShouldBindJSON(&req); err != nil {
 		// JSON 语法错、字段类型错、body 超过 limitBody 的 1 MiB，都落在这里。
 		response.Error(c, http.StatusBadRequest, "请求体格式不正确")
 		return
 	}
 
-	// userID 是第三个参数，来自 token；title 与 content 才是客户端给的。
+	// 三个入参里，只有后两个来自客户端；userID 来自中间件校验过的 token。
 	a, err := h.svc.Create(c.Request.Context(), userID, req.Title, req.Content)
 	if err != nil {
+		// 标题正文为空、超长都会走到这里，由 MapServiceError 映射成 400。
 		httputil.MapServiceError(c, "create article", err)
 		return
 	}
@@ -122,7 +136,7 @@ func (h *ArticleHandler) Create(c *gin.Context) {
 	response.OK(c, toArticleResp(a))
 }
 
-// Delete 处理 DELETE /api/articles/:id。
+// Delete 处理 DELETE /api/articles/:id，仅作者本人可删。
 func (h *ArticleHandler) Delete(c *gin.Context) {
 	userID, ok := httputil.CurrentUserID(c)
 	if !ok {
@@ -131,20 +145,21 @@ func (h *ArticleHandler) Delete(c *gin.Context) {
 	}
 
 	// 路径参数先转成数字。非法 id 在 handler 边界挡掉，
-	// 不把字符串拼进 SQL 条件。
+	// 不把原始字符串拼进 SQL 条件。
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
 		response.Error(c, http.StatusBadRequest, "id 格式不正确")
 		return
 	}
 
-	// 所有权判断在 service 的 WHERE 里完成，handler 不查库。
+	// 「是不是作者」的判断放在 service 的 WHERE 里由数据库完成，handler 不查库，
+	// 避免多一次往返，也避免查完再删之间的竞态。
 	if err := h.svc.Delete(c.Request.Context(), uint(id), userID); err != nil {
 		httputil.MapServiceError(c, "delete article", err)
 		return
 	}
 
 	// 当前 response 包只有 OK(200)，所以删除成功返回 200 且 data 为 null。
-	// 00 章合同里的 204 属于目标状态，要等响应包加 NoContent 之后一起改。
+	// 00 章契约里的 204 属于目标状态，要等响应包加 NoContent 之后一起改。
 	response.OK(c, nil)
 }

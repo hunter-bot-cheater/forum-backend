@@ -25,6 +25,9 @@ mysql:
   # 部署建议用环境变量 MYSQL_PASSWORD 覆盖。
   password: "your_mysql_password"
   dbname: forum
+  # 启动时按模型自动建表 / 补列。本机开着方便，改完模型重启就生效。
+  # 生产改成 false，改表走独立的迁移命令（见 config/config.production.yaml 与 make migrate）。
+  auto_migrate: true
 
 redis:
   addr: 127.0.0.1:6379
@@ -44,6 +47,16 @@ rate_limit:
   capacity: 10
   rate: 2
   key_prefix: "forum:dev:rate:"
+
+# 同域部署（Nginx 反代 /api、前端也由 Nginx 托管）不需要 CORS，留空即关闭。
+# 前后端分开域名或分开端口时才填完整 Origin，含协议，不带路径与结尾斜杠。
+# 例："https://forum.example.com"、"http://127.0.0.1:5173"。
+# 环境变量：CORS_ALLOWED_ORIGINS=https://a.com,https://b.com
+# 不支持通配符 "*"；预检放行的自定义头是 Authorization / Content-Type / X-Request-ID，
+# 前端新增自定义请求头时要同步改 internal/middleware/cors.go。
+# WebSocket 握手不受 CORS 管，拆域名时还要把同一域名加进下面的 ws.allowed_origins。
+cors:
+  allowed_origins: []
 
 # 浏览器发的 Origin 是 http://host:port，这里只写 host:port，不带协议。
 # 拿到内网穿透域名后，在下面补一行，例如 "xxx.ngrok-free.app"。

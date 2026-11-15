@@ -55,7 +55,7 @@ service.interceptors.response.use(
       ElMessage.error('登录已过期，请重新登录')
       router.replace('/login')
     } else if (status === 429) {
-      // 限流：后端按客户端 IP 分桶（Capacity=10, Rate=2），首页会并发多个请求。
+      // 限流：后端按客户端 IP 分桶，参数见 config/config.yaml 的 rate_limit，首页会并发多个请求。
       // 不要把 429 自动重试——重试本身也吃令牌，越重试越晚恢复。
       const retryAfter = resp?.headers?.['retry-after']
       ElMessage.error(

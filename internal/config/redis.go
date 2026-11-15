@@ -8,17 +8,22 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// InitRedis 创建 Redis 客户端并做一次 Ping 确认连通。
+// redis.NewClient 不会真的建连（池子是空的），所以必须 Ping 一次，
+// 否则配置写错要等到第一个业务请求才暴露。
 func InitRedis(cfg *RedisConfig) (*redis.Client, error) {
 	if cfg == nil {
-		return nil, fmt.Errorf("redis config is nil ")
+		return nil, fmt.Errorf("redis config is nil")
 	}
 	if cfg.Addr == "" {
 		return nil, fmt.Errorf("redis addr is empty")
 	}
-	rdb := redis.NewClient(&redis.Options{ //创建客户端  创建一个 *redis.Client 对象   初始化连接池（但池子是空的）
+
+	rdb := redis.NewClient(&redis.Options{
 		Addr:     cfg.Addr,
 		Password: cfg.Password,
 		DB:       cfg.DB,
+
 		// PoolSize 是连接池上限。默认是 10 * GOMAXPROCS，
 		// 在多核机器上会开出很多连接；学习项目写小一点，
 		// 出问题时更容易判断「是不是连接不够用」。
@@ -34,16 +39,17 @@ func InitRedis(cfg *RedisConfig) (*redis.Client, error) {
 
 		// 关键开关：默认 false 时 go-redis 在底层把调用方 ctx 换成 Background，
 		// 我们用 context.WithTimeout 设的超时就到不了 socket 读写。
-		// 依据见 v9.23.0 的 options.go:174-176 与 redis.go:1889-1896。
 		ContextTimeoutEnabled: true,
 	})
+
+	// Ping 单独给 3 秒上限：启动阶段不该被一个卡住的 Redis 拖死。
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if err := rdb.Ping(ctx).Err(); err != nil { //Ping 测连通性
-		_ = rdb.Close() // 连接失败就关闭客户端，释放资源
-		return nil, fmt.Errorf("connect redis:%w", err)
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		// 连不上就关闭客户端，释放已经建好的连接，避免进程退出前泄漏。
+		_ = rdb.Close()
+		return nil, fmt.Errorf("connect redis: %w", err)
 	}
 
 	return rdb, nil
-
 }

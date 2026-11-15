@@ -1,21 +1,41 @@
 package article
 
 import (
+	"strings"
 	"time"
 
 	"forum-backend/internal/model"
 )
 
 // 本文件集中存放文章模块对外响应的结构体，以及从 model 到响应结构体的转换函数。
+// 单独成文件，是为了让「客户端能看见哪些字段」在目录树里一眼可查，
+// 也避免把数据库模型直接交给 response.OK 序列化（那样加一个字段就会意外对外暴露）。
+//
+// 三个接口各用各的形状，故意不共用一个结构体：
+//   - 列表  articleListItem：只有摘要，不含正文
+//   - 详情  articleDetailResp：含正文，另加点赞数
+//   - 发布  articleResp：含正文，作者刚提交完，回显全文是合理的
 
-// userBrief 只暴露作者的两个字段，避免把整个 User 对象带出去。
-// 评论模块也会定义自己的 userBrief（按模块内聚，不跨包共享）。
+// userBrief 只暴露作者的两个字段，避免把整个 User 对象（包括密码哈希）带出去。
+// 评论模块也定义了自己的 userBrief：按模块内聚，不为了省几行代码去跨包共享。
 type userBrief struct {
 	ID       uint   `json:"id"`
 	Username string `json:"username"`
 }
 
-// articleResp 是文章列表与详情共用的对外形状。
+// authorBrief 从模型里取作者信息，没 Preload 时返回 nil。
+// 没 Preload 时 a.User 是零值、ID 为 0，这时不给 author 字段，
+// 而不是返回一个 id=0、username="" 的空作者对象让前端显示成空白名字。
+func authorBrief(a *model.Article) *userBrief {
+	if a.User.ID == 0 {
+		return nil
+	}
+	return &userBrief{ID: a.User.ID, Username: a.User.Username}
+}
+
+// articleResp 是详情与发布接口的正文形状。
+// 列表不用它：列表一页 10 篇，正文单篇上限 50000 字节，
+// 带上全文会让响应体到几百 KB，客户端在列表里也用不到。
 type articleResp struct {
 	ID        uint       `json:"id"`
 	Title     string     `json:"title"`
@@ -24,34 +44,79 @@ type articleResp struct {
 	CreatedAt time.Time  `json:"created_at"`
 }
 
-// toArticleResp 把数据库模型转成对外结构体，转换仍留在 handler 层。
+// toArticleResp 把数据库模型转成带正文的对外结构体，转换只发生在 handler 层。
+// service 继续只认识 model.Article，不需要反过来 import 这个文件。
 func toArticleResp(a *model.Article) articleResp {
-	resp := articleResp{
+	return articleResp{
 		ID:        a.ID,
 		Title:     a.Title,
 		Content:   a.Content,
+		Author:    authorBrief(a),
 		CreatedAt: a.CreatedAt,
 	}
-	if a.User.ID != 0 {
-		resp.Author = &userBrief{
-			ID:       a.User.ID,
-			Username: a.User.Username,
-		}
+}
+
+// articleExcerptLimit 是列表摘要保留的字符数（按 rune 算，不是字节）。
+// 一百多字在列表里大约两三行，够读者判断要不要点进去，又不会把列表撑长。
+const articleExcerptLimit = 160
+
+// articleExcerptSourceLimit 是 service 从 MySQL 里取回的正文字符数上限，
+// 必须大于 articleExcerptLimit：压掉换行和连续空白之后长度还会变短，
+// 多取一些才能保证截出来的摘要足够长。SQL 里截断只为了少搬数据，
+// 真正决定展示多长的是 articleExcerptLimit。
+const articleExcerptSourceLimit = 400
+
+// articleListItem 是文章列表里的一篇，刻意不含 content 全文。
+// Excerpt 是服务端截好的摘要，客户端不需要自己去截正文。
+type articleListItem struct {
+	ID        uint       `json:"id"`
+	Title     string     `json:"title"`
+	Excerpt   string     `json:"excerpt"`
+	Author    *userBrief `json:"author,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+// toArticleListItem 把数据库模型转成列表项。
+// a.Content 在列表查询里根本没查（service 只取了摘要），所以这里不能读它。
+func toArticleListItem(a *model.Article) articleListItem {
+	return articleListItem{
+		ID:        a.ID,
+		Title:     a.Title,
+		Excerpt:   excerptOf(a.Excerpt),
+		Author:    authorBrief(a),
+		CreatedAt: a.CreatedAt,
 	}
-	return resp
+}
+
+// excerptOf 把正文压成一行摘要。
+//
+// 先把所有空白（换行、制表、连续空格）压成单个空格，列表里一行显示时
+// 才不会出现大段空行；再按 rune 截断，避免把中文汉字截成半个导致乱码。
+// 截断时补一个省略号，让读者知道后面还有正文。
+func excerptOf(text string) string {
+	collapsed := strings.Join(strings.Fields(text), " ")
+
+	runes := []rune(collapsed)
+	if len(runes) <= articleExcerptLimit {
+		return collapsed
+	}
+	return string(runes[:articleExcerptLimit]) + "…"
 }
 
 // articleListResp 是文章列表接口 data 的形状。
 // 字段写错由编译器拦截，别在响应里用 gin.H 拼字符串键。
 type articleListResp struct {
-	List     []articleResp `json:"list"` // articleListResp.List 声明成切片，
-	Total    int64         `json:"total"`
-	Page     int           `json:"page"`
-	PageSize int           `json:"page_size"`
+	// List 声明成切片而不是指针，且调用方保证给它空切片而非 nil，
+	// 这样没有数据时序列化出来是 []，不会变成 null。
+	List     []articleListItem `json:"list"`
+	Total    int64             `json:"total"`
+	Page     int               `json:"page"`
+	PageSize int               `json:"page_size"`
 }
 
 // createArticleReq 是发布文章的请求体。
-// 字段里刻意没有 UserID：作者 id 只从 JWT 取，客户端传 user_id 会被 encoding/json 忽略。
+// 字段里刻意没有 UserID：作者 id 只从 token 取，
+// 客户端传 user_id 会被 encoding/json 忽略，伪造不了作者。
 type createArticleReq struct {
 	Title   string `json:"title"`
 	Content string `json:"content"`
@@ -59,15 +124,15 @@ type createArticleReq struct {
 
 // articleDetailResp 是详情接口专用的响应，比列表多一个点赞数。
 // 匿名嵌入 articleResp，encoding/json 会把里面的字段平铺到同一层，
-// 输出仍是 id、title、content、author、created_at 加一个 like_count。
-// 列表与新建接口继续用 articleResp，不带这个字段。
+// 输出仍是 id、title、content、author、created_at，再加一个 like_count。
+// 发布接口继续用 articleResp，不带这个字段。
 type articleDetailResp struct {
 	articleResp
 	LikeCount int64 `json:"like_count"`
 }
 
 // toArticleDetailResp 把详情模型转成对外结构体。
-// LikeCount 由 queryDetail 在回源时算好，随文章一起进缓存。
+// LikeCount 由 queryDetail 在回源时算好，随文章一起写进缓存，命中缓存时直接带出来。
 func toArticleDetailResp(a *model.Article) articleDetailResp {
 	return articleDetailResp{
 		articleResp: toArticleResp(a),

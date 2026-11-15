@@ -2,6 +2,7 @@
 package router
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -27,7 +28,12 @@ import (
 )
 
 // Deps 是 router.New 需要的全部外部依赖。
-// 用结构体传依赖，指针参数写反顺序时编译器发现不了。
+// 用结构体传依赖而不是一长串参数，指针参数写反顺序时编译器发现不了，会静默传错。
+//
+// 字段分三类：
+//   - 连接类：DB、Redis（数据库与缓存客户端）
+//   - 组件类：JWT（签发/校验 token）、Hub（WebSocket 在线连接表）
+//   - 配置类：WSOrigins、RateLimit、TrustedProxies、CORSOrigins（从 config 透传进来）
 type Deps struct {
 	DB             *gorm.DB
 	JWT            *jwt.Manager
@@ -36,11 +42,14 @@ type Deps struct {
 	WSOrigins      []string
 	RateLimit      config.RateLimitConfig
 	TrustedProxies []string
+	CORSOrigins    []string
 }
 
-// New 注册全部路由。
-// db、jwtManager、rdb 都由 main 创建后传入，router 只负责组装。
+// New 组装出完整的 HTTP 服务：创建 gin 引擎 → 装全局中间件 → 建各业务对象 → 注册路由。
+// 数据库、Redis、JWT 这些外部依赖由 main 创建好再传进来，router 只管接线，不负责连接。
 func New(deps Deps) (*gin.Engine, error) {
+	// 装配期一次性校验必需的依赖。这里挡掉比运行期每次请求都判断划算：
+	// 少传一个依赖，服务直接起不来，而不是某个接口在半夜才报 nil panic。
 	if deps.DB == nil {
 		return nil, errors.New("router: database is required")
 	}
@@ -54,21 +63,57 @@ func New(deps Deps) (*gin.Engine, error) {
 		return nil, errors.New("router: realtime hub is required")
 	}
 
-	// gin.Default 自带的 404/405/panic 都返回纯文本，前端统一拆包会失败。
-	// 换成 gin.New 加自定义兜底，所有失败路径输出统一 JSON。
+	// gin.Default 自带的 404/405/panic 处理都返回纯文本，前端统一拆包会失败。
+	// 换成 gin.New 加自定义兜底，所有失败路径都输出统一 JSON。
 	r := gin.New()
 	installFallbacks(r)
+
+	// 留空表示同域部署（前端和接口同一个域名，走反代），完全不装中间件，行为与改动前一致。
+	// 只有前后端分属不同域名时才需要配这个。
+	if len(deps.CORSOrigins) > 0 {
+		cors, err := middleware.CORS(deps.CORSOrigins)
+		if err != nil {
+			return nil, err
+		}
+		r.Use(cors)
+	}
 
 	// API 文档只在调试模式暴露。生产用 GIN_MODE=release 关闭。
 	if gin.IsDebugging() {
 		r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler, ginSwagger.PersistAuthorization(true)))
 	}
 
-	// gin 默认信任所有代理，会让 X-Forwarded-For 伪造绕过按 IP 限流。
-	// 配置留空时退回 RemoteAddr；部署在反代后面才填那一段代理 IP。
+	// gin 默认信任所有代理，会让客户端伪造 X-Forwarded-For 绕过按 IP 限流。
+	// 配置留空时退回 RemoteAddr（直连 IP）；部署在反代后面才填那一段代理 IP。
 	if err := r.SetTrustedProxies(deps.TrustedProxies); err != nil {
 		return nil, fmt.Errorf("router: set trusted proxies: %w", err)
 	}
+
+	// 探活接口挂在根路径、不进 /api 分组，因此既不限流也不过 body 限制：
+	// 它们会被 Nginx、监控和穿透工具周期性调用，不该占用业务接口的令牌桶。
+	registerHealth(r, []healthCheck{
+		{
+			name: "mysql",
+			check: func(ctx context.Context) error {
+				// gorm.Open 是懒连接，真正能反映可用性的是底层 *sql.DB 的 Ping。
+				sqlDB, err := deps.DB.DB()
+				if err != nil {
+					return err
+				}
+				return sqlDB.PingContext(ctx)
+			},
+		},
+		{
+			name: "redis",
+			check: func(ctx context.Context) error {
+				return deps.Redis.Ping(ctx).Err()
+			},
+		},
+	})
+
+	// 下面这一段是「接线」：把 service 和 handler 一层层 new 出来。
+	// 每个模块的形状都一样：service 持有 data 层依赖 → handler 持有 service。
+	// handler 只做参数解析与响应组装，业务逻辑全在 service 里。
 	userSvc := user.NewUserService(deps.DB)
 	userHandler := user.NewUserHandler(userSvc, deps.JWT)
 
@@ -77,7 +122,8 @@ func New(deps Deps) (*gin.Engine, error) {
 	articleHandler := article.NewArticleHandler(articleSvc)
 	commentHandler := comment.NewCommentHandler(commentSvc)
 
-	// 共用一个 redis.Client。
+	// 点赞会触发文章缓存失效并写热榜，所以 like 要拿到 articleSvc 和 hotSvc。
+	// 所有模块共用一个 redis.Client，它内部自带连接池，new 多个反而浪费。
 	likeSvc := like.NewLikeService(deps.DB, deps.Redis, articleSvc)
 	hotSvc := hot.NewHotService(deps.DB, deps.Redis)
 	likeHandler := like.NewLikeHandler(likeSvc, hotSvc)
@@ -86,10 +132,11 @@ func New(deps Deps) (*gin.Engine, error) {
 	notificationHandler := notification.NewNotificationHandler(notificationSvc)
 	wsHandler := ws.NewWSHandler(deps.Hub, deps.JWT, deps.WSOrigins)
 
-	// 抢楼活动共用一个 redis.Client：发号器就在 Redis 里。
+	// 抢楼活动的发号器（下一个空楼层）就存在 Redis 里，所以要传 redis 客户端。
 	floorSvc := floor.NewService(deps.DB, deps.Redis)
 	floorHandler := floor.NewHandler(floorSvc)
 
+	// 限流器构造失败说明配置填错，跟上面的 nil 校验一样在装配期直接返回。
 	rateLimit, err := middleware.RateLimit(deps.Redis, middleware.RateLimitConfig{
 		Capacity:  deps.RateLimit.Capacity,
 		Rate:      deps.RateLimit.Rate,
@@ -99,6 +146,8 @@ func New(deps Deps) (*gin.Engine, error) {
 		return nil, err
 	}
 
+	// /api 组上挂两个所有接口都要过的中间件：
+	// limitBody 限制请求体大小（防止超大 body 打爆内存），rateLimit 按 IP 限流。
 	api := r.Group("/api")
 	api.Use(limitBody(1 << 20))
 	api.Use(rateLimit)
@@ -119,6 +168,9 @@ func New(deps Deps) (*gin.Engine, error) {
 		// 所以这两条放在公开组里，不能挂 JWTAuth。
 		api.GET("/ws/notifications", wsHandler.Notifications)
 		api.GET("/ws/stats", wsHandler.Stats)
+
+		// 下面这个子组路径是空的（""），表示沿用 /api 前缀，只是多挂一个登录校验。
+		// 挂在这个组上的接口，handler 里一定能取到 userID；上面公开组的接口则取不到。
 		auth := api.Group("", middleware.JWTAuth(deps.JWT))
 		{
 			auth.POST("/articles", articleHandler.Create)

@@ -1,0 +1,107 @@
+# 服务器部署样例。复制为 /etc/nginx/conf.d/forum.conf（该文件被 include 在 http {} 内）。
+# 本文件里的 upstream 与 map 必须位于 http 上下文，别放进 server {}。
+#
+# 前置步骤：
+#   1. cd web && npm run build，产物在 web/dist，VITE_API_BASE_URL 保持默认 /api。
+#   2. 把 web/dist 拷到服务器，root 改成实际绝对路径。
+#   3. 后端只监听 127.0.0.1:8080：GIN_MODE=release ./forum-server
+#      别把 8080、3306、6379 暴露到公网。
+#   4. 后端 config/config.yaml 的 server.trusted_proxies 填 ["127.0.0.1"]，
+#      否则按 IP 限流会把所有外部请求算成同一个桶。
+#   5. 检查语法 nginx -t，重载 nginx -s reload。
+#
+# 同域部署时前端与 /api 同源，cors.allowed_origins 留空即可，不需要 CORS。
+# 前后端拆成两个域名时，才在后端 config 里填完整 Origin，并把证书配到两个域名上。
+
+upstream forum_api {
+    server 127.0.0.1:8080;
+    keepalive 16;
+}
+
+# Upgrade 与 Connection 是逐跳头，nginx 默认不转发，必须显式设置。
+# 没有 Upgrade 头时把 Connection 置为 close，普通 HTTP 请求才不会误升级。
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    server_name _;                          # 改成自己的域名，例如 forum.example.com
+
+    # 与后端 limitBody(1 << 20) 一致，超过 1 MiB 在边缘就挡掉。
+    client_max_body_size 1m;
+
+    root /var/www/forum/web/dist;           # 改成实际 dist 绝对路径
+    index index.html;
+
+    # 启用 HTTPS 时：把上面 listen 80 改成下面三行，并另建一个 80 端口的 301 跳转 server。
+    # listen 443 ssl;
+    # http2 on;
+    # ssl_certificate     /etc/letsencrypt/live/forum.example.com/fullchain.pem;
+    # ssl_certificate_key /etc/letsencrypt/live/forum.example.com/privkey.pem;
+
+    add_header X-Content-Type-Options "nosniff" always;
+
+    gzip on;
+    gzip_min_length 1024;
+    gzip_types text/css application/javascript application/json image/svg+xml;
+
+    # Vite 产物文件名带内容哈希，可以长期缓存。
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+        try_files $uri =404;
+    }
+
+    # index.html 不能缓存，否则发版后浏览器一直拿旧入口，指向已删除的资产文件。
+    location = /index.html {
+        add_header Cache-Control "no-cache" always;
+    }
+
+    # WebSocket 握手走 /api/ws/。后端心跳 pingPeriod 是 54 秒，
+    # nginx 默认 proxy_read_timeout 只有 60 秒，余量太小，这里放宽到 300 秒。
+    location /api/ws/ {
+        proxy_pass http://forum_api;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    # 其余 /api 反代。proxy_pass 不带 URI 部分，原始 /api 前缀会原样传给后端。
+    location /api/ {
+        proxy_pass http://forum_api;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 30s;
+    }
+
+    # 探活接口在后端根路径（不在 /api 下），必须单独代理，
+    # 否则会落到最下面的 location / 被 SPA 回退成 index.html（200 但内容是网页）。
+    #   /healthz  只表示进程活着，穿透工具、监控用它判断要不要重启；
+    #   /readyz   额外探测 MySQL 与 Redis，返回 503 表示暂时接不了流量。
+    # 探活频率高，关掉访问日志，免得把业务日志冲掉。
+    location = /healthz {
+        proxy_pass http://forum_api;
+        access_log off;
+    }
+
+    location = /readyz {
+        proxy_pass http://forum_api;
+        access_log off;
+    }
+
+    # SPA 刷新子路由时回退到 index.html，交给 vue-router 处理。
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

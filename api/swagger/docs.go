@@ -201,7 +201,7 @@ const docTemplate = `{
                                     "type": "object",
                                     "properties": {
                                         "data": {
-                                            "$ref": "#/definitions/article.articleResp"
+                                            "$ref": "#/definitions/article.articleDetailResp"
                                         }
                                     }
                                 }
@@ -1005,14 +1005,57 @@ const docTemplate = `{
         }
     },
     "definitions": {
+        "article.articleDetailResp": {
+            "type": "object",
+            "properties": {
+                "author": {
+                    "$ref": "#/definitions/article.userBrief"
+                },
+                "content": {
+                    "type": "string"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "like_count": {
+                    "type": "integer"
+                },
+                "title": {
+                    "type": "string"
+                }
+            }
+        },
+        "article.articleListItem": {
+            "type": "object",
+            "properties": {
+                "author": {
+                    "$ref": "#/definitions/article.userBrief"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "excerpt": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "title": {
+                    "type": "string"
+                }
+            }
+        },
         "article.articleListResp": {
             "type": "object",
             "properties": {
                 "list": {
-                    "description": "articleListResp.List 声明成切片，",
+                    "description": "List 声明成切片而不是指针，且调用方保证给它空切片而非 nil，\n这样没有数据时序列化出来是 []，不会变成 null。",
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/article.articleResp"
+                        "$ref": "#/definitions/article.articleListItem"
                     }
                 },
                 "page": {
@@ -1369,7 +1412,6 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "username": {
-                    "description": "Gin 内置的参数校验，字段没传或为空就自动报参数错误",
                     "type": "string"
                 }
             }

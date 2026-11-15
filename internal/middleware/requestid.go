@@ -16,8 +16,12 @@ const HeaderRequestID = "X-Request-ID"
 
 const maxRequestIDLen = 64
 
-// RequestID 给每个请求分配一个追踪号，写进响应头、gin.Context 和错误响应体。
-// 用户报障时把响应头里的编号给后端，日志里能直接搜到同一次请求。
+// RequestID 给每个请求分配一个追踪号。
+// 这个号会同时出现在三个地方：响应头（用户能拿到）、gin.Context（下游代码能取到）、
+// 错误响应体（前端报错弹窗能显示）。用户报障时报这个号，日志里能直接搜到同一次请求。
+//
+// 允许客户端自带 X-Request-ID，方便前端或网关把一次用户操作的多个请求串起来；
+// 但必须先过滤，因为外来值最终会写进日志。
 func RequestID() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		id := c.GetHeader(HeaderRequestID)
@@ -31,7 +35,8 @@ func RequestID() gin.HandlerFunc {
 }
 
 // validRequestID 只接受字母、数字、下划线、连字符，长度不超过 64。
-// 客户端传来的值会进日志和响应头，先过滤掉换行与控制字符，避免日志注入。
+// 客户端传来的值会进日志和响应头，先过滤掉换行与控制字符，避免日志注入
+// （有人塞个 \n 就能在日志里伪造一行假记录）。
 func validRequestID(id string) bool {
 	if id == "" || len(id) > maxRequestIDLen {
 		return false

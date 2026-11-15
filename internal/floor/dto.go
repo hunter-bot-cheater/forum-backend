@@ -43,7 +43,8 @@ type eventResp struct {
 }
 
 // grabResp 是一次抢楼的结果。
-// Won 只有两个来源：楼层号命中中奖集合，且 INSERT 成功。
+// Won 为 true 需要同时满足两条：楼层号命中中奖集合，且条件 UPDATE 抢到了名额。
+// 命中但名额已被别人领走会返回 409，不会走到这里的 Won=false。
 type grabResp struct {
 	Floor   int    `json:"floor"`
 	Won     bool   `json:"won"`

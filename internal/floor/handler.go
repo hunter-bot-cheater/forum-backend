@@ -15,6 +15,7 @@ type Handler struct {
 	svc *Service
 }
 
+// NewHandler 由装配层调用，注入已构造好的 service。
 func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
 }

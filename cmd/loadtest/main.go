@@ -36,6 +36,8 @@ type sample struct {
 	netErr    int
 }
 
+// requestConfig 是压测请求的固定部分。
+// 每个 worker 只改 URL 里的 id，其余字段读同一份，避免每次请求都重新拼。
 type requestConfig struct {
 	url         string
 	method      string
@@ -44,10 +46,12 @@ type requestConfig struct {
 	token       string
 }
 
+// main 只负责把退出码交出去，真正的逻辑在 run 里，方便以后写测试。
 func main() {
 	os.Exit(run())
 }
 
+// run 解析参数、跑压测、打印报告，返回进程退出码（0 成功，2 参数或连接错误）。
 func run() int {
 	url := flag.String("url", "", "目标地址，可含 {id} 占位符")
 	method := flag.String("method", "GET", "HTTP 方法")
@@ -117,6 +121,7 @@ func run() int {
 	samples := make([]*sample, *concurrency)
 	var wg sync.WaitGroup
 	wg.Add(*concurrency)
+	// 每个协程一份自己的统计，跑完再合并：压测期间完全不加锁，开销只剩本地 append。
 	for i := 0; i < *concurrency; i++ {
 		s := &sample{
 			latencies: make([]time.Duration, 0, 1024),
@@ -167,12 +172,16 @@ func warmup(client *http.Client, cfg requestConfig, ids []uint, useID bool) {
 	}
 }
 
+// worker 是一个并发协程：不断发请求直到 ctx 到期，把耗时和状态码记进自己的 sample。
+// 它只关心单次请求的成本，不做限速，靠并发数控制压力。
 func worker(ctx context.Context, client *http.Client, cfg requestConfig, ids []uint, useID bool, s *sample) {
 	for {
 		if ctx.Err() != nil {
 			return
 		}
 
+		// 用了 {id} 占位符就随机挑一个仓库里的 id，让请求打到不同行，
+		// 避免所有请求都命中同一份缓存，测出来偏乐观。
 		target := cfg.url
 		if useID {
 			id := ids[rand.IntN(len(ids))]
@@ -220,6 +229,8 @@ func worker(ctx context.Context, client *http.Client, cfg requestConfig, ids []u
 	}
 }
 
+// report 合并所有协程的样本并按分位数打印。
+// 输出刻意保持等宽几行，方便贴进文档或前后两次对比。
 func report(samples []*sample, elapsed time.Duration) {
 	all := make([]time.Duration, 0, 4096)
 	codes := make(map[int]int)
@@ -267,6 +278,8 @@ func report(samples []*sample, elapsed time.Duration) {
 	}
 }
 
+// percentile 从已排序的切片里取分位值，p 取 0~1。
+// 用最接近的序号而不是插值：样本量够大时差别可以忽略，代码更好懂。
 func percentile(sorted []time.Duration, p float64) time.Duration {
 	if len(sorted) == 0 {
 		return 0

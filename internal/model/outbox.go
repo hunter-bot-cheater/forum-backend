@@ -11,16 +11,23 @@ const (
 )
 
 // OutboxEvent 是事务发件箱里的一行。
-// 业务写入和这一行由同一个 MySQL 事务提交，事件因此不会凭空消失。
+//
+// 为什么要有这张表：点赞、评论这些动作要在同一个 MySQL 事务里既改业务数据、
+// 又留下「该发通知了」这条意图。如果直接在这个事务里去 XADD Redis，
+// 事务回滚了就发了个假通知，Redis 挂了又丢了真通知。
+// 所以先落库（同一事务，必定成功或必定回滚），再由 relay 后台线程搬到 Redis，
+// 搬成功才把状态改成 published。
 type OutboxEvent struct {
-	ID            uint      `gorm:"primaryKey" json:"id"`
-	EventID       string    `gorm:"size:36;not null;uniqueIndex:uk_outbox_event" json:"event_id"`
-	EventType     string    `gorm:"size:32;not null" json:"event_type"`
-	AggregateType string    `gorm:"size:32;not null" json:"aggregate_type"`
-	AggregateID   uint      `gorm:"not null" json:"aggregate_id"`
-	Payload       string    `gorm:"type:text;not null" json:"payload"`
-	Status        string    `gorm:"size:16;not null;index" json:"status"` //relay后台会不断扫描 where status='pending' 所以要加索引
-	Attempts      int       `gorm:"not null;default:0" json:"attempts"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID            uint   `gorm:"primaryKey" json:"id"`
+	EventID       string `gorm:"size:36;not null;uniqueIndex:uk_outbox_event" json:"event_id"` // 幂等键，重复插入会被唯一索引挡掉
+	EventType     string `gorm:"size:32;not null" json:"event_type"`
+	AggregateType string `gorm:"size:32;not null" json:"aggregate_type"` // 事件来源的聚合类型，如 article / like
+	AggregateID   uint   `gorm:"not null" json:"aggregate_id"`
+	Payload       string `gorm:"type:text;not null" json:"payload"` // 序列化后的事件体，消费端反序列化使用
+	// relay 后台会不断扫描 WHERE status='pending'，所以这列必须有索引，
+	// 否则每轮扫描都是全表扫。
+	Status    string    `gorm:"size:16;not null;index" json:"status"`
+	Attempts  int       `gorm:"not null;default:0" json:"attempts"` // 投递失败次数，超过上限置 failed
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }

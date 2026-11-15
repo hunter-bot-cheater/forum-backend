@@ -8,7 +8,7 @@
 - 文章与评论链路：service 方法、`internal/handler/dto.go` 的响应结构体、`article.go`、`comment.go`、`errors.go`、`paging.go` 均已落盘，`internal/router/router.go` 已注册列表、详情、评论列表等读路由与 JWT 保护的写路由。文章与评论的四个写接口都已在仓库源码实现，service 与 handler 的方法名统一成动词式（`Create` / `List` / `Detail` / `Delete`），对照表见 03 章 1.2。判断完成度用「路由已注册且验收通过」，别用「文件已存在」。
 - `main.go` 已调用 `config.InitRedis`，`router.New` 的签名是 `New(db *gorm.DB, jwtManager *jwt.Manager, rdb *redis.Client)`。Redis 是启动硬依赖，连不上会直接退出。三层装配顺序见 03 章 7.2。仓库里没有 `/ping` 路由。
 - 缓存已落地：详情接口的 Cache Aside 读路径（03 章 7.3）、写路径缓存失效（`Create` 与 `Delete` 在数据库写入或事务提交成功后调用 `InvalidateDetailCache`）、`InitRedis` 在 `Ping` 失败分支调用 `rdb.Close()`。旧版 README、00 章与 03 章 7.6 把这三项写成「待实现」或「还缺」，2026-11-07 核对源码后已更正。
-- 已落盘：四个写接口（03 章 6.6、6.7）、缓存工程化加固（TTL 抖动、空值缓存、singleflight 请求合并、降级超时与连接池、原子计数器，见 `internal/service/article_cache.go` 与 03a 章）。未完成：第 3 周点赞、热榜、限流的源码，第 3 周源码由你按 04 章十步跟做逐步落盘，状态以工作树为准，落盘并验收后才算具备；生产部署所需的迁移、服务管理、监控与备份流程也未做。文档里的设计要经过实现与验收才算完成。
+- 已落盘：四个写接口（03 章 6.6、6.7）、缓存工程化加固（TTL 抖动、空值缓存、singleflight 请求合并、降级超时与连接池、原子计数器，见 `internal/service/article_cache.go` 与 03a 章）。未完成：第 3 周点赞、热榜、限流的源码，第 3 周源码由你按 04 章十步跟做逐步落盘，状态以工作树为准，落盘并验收后才算具备；生产部署所需的迁移已提供独立的 `migrate` 命令（`cmd/migrate`，见「生产配置与迁移」），服务管理、监控与备份流程仍未做。文档里的设计要经过实现与验收才算完成。
 - `docs/03a-第2周进阶-Redis缓存工程化加固.md` 是缓存加固的独立进阶专题，接在 03 章第 7 节之后，不占用周次；第 3 周仍是 04 章，第 4 周仍是 05 章。它同时修正了前面章节的进度快照。它记录的 `gorm.ErrRecordNotFound` 映射缺陷现已在源码修好，查不存在的文章与删后 GET 详情都返回 404。
 - `docs/04a-第3周进阶-异步消息与站内通知.md` 与 `docs/04b-第3周进阶-Swagger-API文档与契约.md` 是第 3 周之后的两个进阶专题，同样不占周次。前者用 Transactional Outbox 加 Redis Stream 做点赞、评论后的站内通知，后者用 swaggo 从 handler 注解生成 Swagger 2.0 文档与可交互 UI。两章只给可落盘代码与验收步骤，源码状态以工作树为准。
 - `docs/04c-第3周进阶-WebSocket实时通知.md`、`docs/04d-第3周进阶-敏感词过滤与前缀树.md`、`docs/04e-第3周进阶-全文搜索与倒排索引.md` 是同一系列的三个进阶专题，接在 04b 之后，同样不占周次。04c 把异步通知升级成服务端主动推送，含连接登记、心跳、慢客户端剔除与关停处理；04d 自己实现前缀树做敏感词替换，附 benchmark 实测与朴素做法的对比结论；04e 用第二个消费组把文章同步进 Meilisearch，实现关键词搜索与相关性排序。三章都只给可落盘代码，源码状态以工作树为准。
@@ -69,6 +69,46 @@ go run ./cmd/server
 ```
 
 默认从项目根目录运行时，配置读取 `config/config.yaml`。启动链路会校验 JWT 配置、连接 MySQL 并执行自动迁移，所以要先创建配置中的数据库并确认 MySQL 正在运行。连不上数据库时进程会退出，先修依赖再试 HTTP 请求。
+
+## 探活接口
+
+两个接口都在根路径，不挂鉴权、不进限流、不写访问日志，供 Nginx、监控和穿透工具调用：
+
+```powershell
+curl.exe -i http://localhost:8080/healthz   # 进程活着就 200，不查依赖
+curl.exe -i http://localhost:8080/readyz    # 探测 MySQL 与 Redis，任一失败返回 503
+```
+
+`/healthz` 只回答「进程还能不能处理请求」，故意不查数据库：如果它也查，MySQL 抖动一下就会被外部工具判定进程已死并重启，故障反而放大。`/readyz` 返回 `{"status":"fail","checks":{"mysql":"fail","redis":"ok"}}` 时表示暂时接不了流量，进程不用重启，等依赖恢复即可。具体错误只写在服务端日志里，不回给调用方，避免泄露连接地址。
+
+## 生产配置与迁移
+
+`config/config.production.yaml` 是生产模板（不含任何真实凭据）。与本机配置的差异只有四处：`mysql.auto_migrate` 关掉、限流放大、`trusted_proxies` 指向本机 Nginx、`ws.allowed_origins` 换成真实域名。密码与密钥一律用环境变量给，不写进文件：
+
+```bash
+export MYSQL_PASSWORD=...
+export REDIS_PASSWORD=...
+export JWT_SECRET=$(openssl rand -hex 32)
+
+CONFIG_PATH=/etc/forum/config.yaml GIN_MODE=release ./forum-migrate   # 先建表/补列
+CONFIG_PATH=/etc/forum/config.yaml GIN_MODE=release ./forum-server    # 再启动服务
+```
+
+`mysql.auto_migrate` 默认 `true`，本机改完模型重启就建表。生产模板里是 `false`，改表必须显式跑 `./forum-migrate`（本机用 `make migrate`）：它跟启动解耦，部署顺序才是确定的；多个实例同时启动各跑一次迁移会互相等锁，甚至建到一半失败。跳过自动迁移时启动日志会明确打一行，避免运维以为表已经建好。
+
+`make build` 同时产出 `bin/forum-server` 与 `bin/forum-migrate`；本机是 Windows 时用 `make build-release` 交叉编译 Linux 版（`-trimpath -ldflags="-s -w"`），再传到服务器。
+
+## 服务器部署（样例）
+
+`deploy/nginx.conf.example` 是单机同域反代的样例：Nginx 托管 `web/dist`，把 `/api` 转发到本机 8080，并单独处理 `/api/ws/` 的 WebSocket 升级。文件头部的注释列了必改项，包括 `server_name`、`root`、证书路径和后端 `server.trusted_proxies`。`/healthz` 与 `/readyz` 也单独代理了，否则会落到 SPA 回退规则上、返回 200 但内容是一张网页。
+
+```bash
+cd web && npm run build                 # 前端产物在 web/dist
+make build-release                      # 交叉编译 bin/forum-server-linux 与 bin/forum-migrate-linux
+GIN_MODE=release ./forum-server-linux    # 生产模式：关闭 Swagger，跳过自动迁移
+```
+
+同域部署时 `VITE_API_BASE_URL` 保持默认 `/api`，后端的 `cors.allowed_origins` 留空即可。前后端拆到不同域名时，才需要放行完整 Origin 并把 `VITE_API_BASE_URL` 改成完整地址。样例只覆盖 Nginx 这一层，进程守护、证书申请、备份与告警仍需另外补。
 
 ## 注册和登录接口（当前可用）
 

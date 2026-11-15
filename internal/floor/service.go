@@ -32,14 +32,16 @@ const (
 
 // ---------- 纯函数：不碰数据库和 Redis，可以单独单测 ----------
 
-// parseLuckyFloors 把 "8,88,888" 解析成去重后的正整数列表。
+// parseLuckyFloors 把 "8,88,888" 解析成中奖楼层列表。
 // 存的时候已经规范化过，这里仍然逐个校验，是为了防住手工改库的脏数据。
+// 返回的错误带 domain.ErrInvalidInput，调用方直接往上抛即可。
 func parseLuckyFloors(raw string) ([]int, error) {
-	if strings.TrimSpace(raw) == "" { //去空格
+	if strings.TrimSpace(raw) == "" {
 		return nil, fmt.Errorf("%w: lucky floors is empty", domain.ErrInvalidInput)
 	}
-	parts := strings.Split(raw, ",") //把字符串 raw，按照逗号 , 进行切割，
-	//把切出来的每一段放进一个名为 parts 的字符串切片（数组）里
+
+	// 按逗号切成若干段，再逐段 trim 后转数字，容忍 "8, 88" 这种带空格的写法。
+	parts := strings.Split(raw, ",")
 	floors := make([]int, 0, len(parts))
 	for _, part := range parts {
 		text := strings.TrimSpace(part)
@@ -147,12 +149,13 @@ func toWinnerResp(p *model.FloorPrize) winnerResp {
 
 // ---------- Service ----------
 
-// Service 抢楼业务逻辑。
+// Service 抢楼业务逻辑。db 存活动与奖品行，rdb 存发号计数器。
 type Service struct {
 	db  *gorm.DB
 	rdb *redis.Client
 }
 
+// NewService 由装配层在启动时调用一次。
 func NewService(db *gorm.DB, rdb *redis.Client) *Service {
 	return &Service{db: db, rdb: rdb}
 }
@@ -193,10 +196,14 @@ func (s *Service) Create(ctx context.Context, req createEventReq) (*model.FloorE
 		StartsAt:    req.StartsAt,
 		EndsAt:      req.EndsAt,
 	}
+
+	// 活动行和奖品行必须一起成功：要么都有，要么都没有。
+	// 少了奖品行，用户抢到中奖号也没行可改，等于这个名额永远发不出去。
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(ev).Error; err != nil {
 			return err
 		}
+		// 每个中奖楼层预置一行名额，winner_id 初始为 NULL。
 		for i := 0; i < len(lucky); i++ {
 			prize := &model.FloorPrize{
 				EventID: ev.ID,

@@ -1,12 +1,12 @@
 package comment
 
 import (
-	"forum-backend/internal/httputil"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 
+	"forum-backend/internal/httputil"
 	"forum-backend/pkg/response"
 )
 
@@ -16,6 +16,7 @@ type CommentHandler struct {
 	svc *CommentService
 }
 
+// NewCommentHandler 由装配层调用，注入已构造好的 service。
 func NewCommentHandler(svc *CommentService) *CommentHandler {
 	return &CommentHandler{svc: svc}
 }

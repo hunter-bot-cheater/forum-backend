@@ -16,7 +16,7 @@ import (
 )
 
 // reconcileTopN 是单次对账默认检查的榜单深度。
-// 不做全量对账：全量要 GROUP BY 整张点赞表，成本问题已经在 hot.go 的 rebuild 注释里论证过。
+// 不做全量对账：全量要 GROUP BY 整张点赞表，成本问题已经在 service.go 的 rebuild 注释里论证过。
 // 榜单之外的文章即使漂移也影响不到接口输出，等它们真上榜时 rebuild 会给一次正确值。
 const reconcileTopN = 200
 
@@ -54,11 +54,15 @@ type ReconcileReport struct {
 
 // Reconciler 对账热榜投影与消息链路。
 // 它不重建榜单，只做点对点纠正：投影在但值错了，或者成员指向了不存在的文章。
+//
+// Check 只读、Fix 才写，两步分开是为了能先看报告再决定改不改：
+// 线上先跑一次 Check 确认漂移规模，再决定是让 Fix 逐条改，还是等 rebuild 整体刷新。
 type Reconciler struct {
 	db  *gorm.DB
 	rdb *redis.Client
 }
 
+// NewReconciler 由 cmd/reconcile 创建，也用于测试。
 func NewReconciler(db *gorm.DB, rdb *redis.Client) *Reconciler {
 	return &Reconciler{db: db, rdb: rdb}
 }

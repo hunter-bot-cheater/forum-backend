@@ -17,18 +17,20 @@ import (
 )
 
 const (
-	notifyConsumer = "worker-1"
-	readBlock      = 2 * time.Second
-	readBatchSize  = 20
+	notifyConsumer = "worker-1"      // 消费者名，同一消费组内多个实例要各自不同
+	readBlock      = 2 * time.Second // 等新消息时最多阻塞多久，顺便当作退出检查点
+	readBatchSize  = 20              // 一次最多取多少条，控制单轮处理时长
 )
 
 // NotificationWorker 从消费组取事件，写成站内通知，再推给在线的收件人。
+// 它是 outbox -> Stream -> 站内通知这条链路的最后一环。
 type NotificationWorker struct {
 	db  *gorm.DB
 	rdb *redis.Client
 	hub *realtime.Hub
 }
 
+// NewNotificationWorker 由装配层调用。hub 允许传 nil，方便只跑消费不推送的场景。
 func NewNotificationWorker(db *gorm.DB, rdb *redis.Client, hub *realtime.Hub) *NotificationWorker {
 	if hub == nil {
 		// 构造函数保证 hub 不为 nil，调用方不必在每次推送前判断。
@@ -37,30 +39,35 @@ func NewNotificationWorker(db *gorm.DB, rdb *redis.Client, hub *realtime.Hub) *N
 	return &NotificationWorker{db: db, rdb: rdb, hub: hub}
 }
 
-// Run 先确保消费组存在，再循环处理 PEL 与新消息。
+// Run 先确保消费组存在，再循环处理 PEL 与新消息，ctx 取消后退出。
 func (w *NotificationWorker) Run(ctx context.Context) {
-	// 重复启动会返回 BUSYGROUP，组已存在正是我们要的状态，忽略即可。
+	// 用 forum:notify:v1 消费组消费 forum:events:v1 这个 Stream。
+	// 消费组或 Stream 不存在时会自动创建；已存在则返回 BUSYGROUP，
+	// 那正是我们想要的状态，所以忽略这个错误。
 	_ = w.rdb.XGroupCreateMkStream(ctx, event.StreamKey, event.NotifyGroup, "0").Err()
-	//用 forum:notify:v1 这个消费组，来消费 forum:events:v1 这个队列里的消息。如果这个队列或消费组还不存在，会自动创建它们
+
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		//PEL极致 待处理消息队列
-		w.consume(ctx, "0") // 先补上次没 ACK 的 //消息 100 已经被 Redis 标记为“已分配给这个消费者”，
-		// 但消费者还没来得及给它发 ACK  消息 100 就变成了 Pending（待处理）状态，躺在 PEL 列表里
-		w.consume(ctx, ">") // 再阻塞读新消息
+		// 每轮固定两个动作：
+		// 1) 先读 "0"，把上次读走但没来得及 ACK 的 PEL 消息补处理掉（比如进程刚好被杀）。
+		// 2) 再读 ">"，取从未投递给任何消费者的新消息。
+		w.consume(ctx, "0")
+		w.consume(ctx, ">")
 	}
 }
 
-// consume 读一批消息，逐条处理，成功才 ACK。
+// consume 读一批消息，逐条处理，处理成功才 ACK。
+// start 是 XReadGroup 的游标语义："0" 表示重读 PEL，">" 表示只要新消息。
 func (w *NotificationWorker) consume(ctx context.Context, start string) {
+	// 读 PEL 时不能阻塞：PEL 可能本来就是空的，阻塞两秒会白等。
+	// go-redis v9 只有 Block 为正数时才发 BLOCK 参数，传 -1 就是立即返回。
 	block := readBlock
 	if start == "0" {
-		// go-redis v9 里只有 Block >= 0 才发 BLOCK 参数。
-		// 传 -1 让这次读立即返回，不阻塞循环。
 		block = -1
 	}
+
 	streams, err := w.rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
 		Group:    event.NotifyGroup,
 		Consumer: notifyConsumer,
@@ -68,12 +75,13 @@ func (w *NotificationWorker) consume(ctx context.Context, start string) {
 		Count:    readBatchSize,
 		Block:    block,
 	}).Result()
+	// redis.Nil 是「阻塞超时、没有新消息」，属于正常情况，不是错误。
 	if errors.Is(err, redis.Nil) {
 		return
 	}
 	if err != nil {
 		if ctx.Err() != nil {
-			return
+			return // 退出过程中断开连接，不当作故障
 		}
 		log.Printf("read group from %s: %v", start, err)
 		return
@@ -82,7 +90,7 @@ func (w *NotificationWorker) consume(ctx context.Context, start string) {
 	for _, stream := range streams {
 		for _, msg := range stream.Messages {
 			if err := w.handle(ctx, msg); err != nil {
-				// 不 ACK，消息留在 PEL，下一轮用 "0" 重新读到。
+				// 不 ACK，消息留在 PEL，下一轮用 "0" 重新读到，相当于自动重试。
 				log.Printf("handle event %s: %v", msg.ID, err)
 				continue
 			}
@@ -112,6 +120,7 @@ func (w *NotificationWorker) handle(ctx context.Context, msg redis.XMessage) err
 		log.Printf("no notification resolver for %s, ack event %s", p.Type, msg.ID)
 		return nil
 	}
+	// resolver 只负责回答「这条事件该通知谁、点进去跳哪」，不碰落库。
 	spec, err := resolve(ctx, w.db, p)
 	if err != nil {
 		return err
@@ -130,12 +139,13 @@ func (w *NotificationWorker) handle(ctx context.Context, msg redis.XMessage) err
 		TargetType: spec.TargetType,
 		TargetID:   spec.TargetID,
 	}
-	res := w.db.WithContext(ctx).Clauses(clause.OnConflict{ //告诉 GORM，我要处理“冲突”情况
-		Columns:   []clause.Column{{Name: "event_id"}}, //根据 event_id 这个字段来判断是否冲突的
-		DoNothing: true,                                //如果发生了冲突（唯一键重复），就假装什么都没发生，静默跳过，不要报错
+
+	// 以 event_id 唯一索引做幂等：两个消费者同时拿到同一条消息时，
+	// InnoDB 会在索引行上加锁，第一个插入成功，第二个走 DoNothing 静默跳过。
+	res := w.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "event_id"}},
+		DoNothing: true,
 	}).Create(notice)
-	//个消费者（不同机器）同一瞬间拿到了同一条消息，同时执行插入。
-	// MySQL 的 InnoDB 会在行级别加锁，第一个插入成功，第二个被拦截并静默忽略
 	if res.Error != nil {
 		return fmt.Errorf("insert notification %s: %w", p.EventID, res.Error)
 	}

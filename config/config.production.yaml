@@ -1,0 +1,69 @@
+# 生产环境配置模板（会被提交到 Git，里面不得出现真实凭据）。
+#
+# 用法：
+#   1. 复制到服务器上别的位置，例如 /etc/forum/config.yaml，并 chmod 600。
+#   2. 真实密码与密钥一律走环境变量，不写进文件：
+#        export MYSQL_PASSWORD=...
+#        export REDIS_PASSWORD=...
+#        export JWT_SECRET=$(openssl rand -hex 32)
+#      用 systemd 托管时把它们放进 EnvironmentFile，例如 /etc/forum/forum.env。
+#   3. 先迁移再启动（顺序不能反，auto_migrate 已关掉）：
+#        CONFIG_PATH=/etc/forum/config.yaml ./forum-migrate
+#        CONFIG_PATH=/etc/forum/config.yaml GIN_MODE=release ./forum-server
+#   4. 反向代理与静态资源见 deploy/nginx.conf.example。
+#
+# 与本机 config/config.yaml 的差异只有四处：
+#   mysql.auto_migrate 关掉、限流放大、trusted_proxies 指向本机 Nginx、
+#   ws.allowed_origins 换成真实域名。其余键名完全一致，方便对照。
+
+server:
+  # 只监听本机，由 Nginx 反代对外。不要改成 0.0.0.0 直接暴露。
+  port: 8080
+  # 反代在 127.0.0.1 上，只有它转发的 X-Forwarded-For 才可信，
+  # 限流才能按真实客户端 IP 分桶。
+  # 如果是内网穿透客户端从本机连进来，也填 "127.0.0.1"；直连不用代理则留空 []。
+  trusted_proxies:
+    - "127.0.0.1"
+
+mysql:
+  host: 127.0.0.1
+  port: 3306
+  user: forum
+  # 留空，由 MYSQL_PASSWORD 提供。空密码连不上，正好拦住「忘了配」的情况。
+  password: ""
+  dbname: forum
+  # 生产关掉自动迁移：多实例同时启动会并发建表，改表要作为一次显式部署动作。
+  # 建表 / 补列统一走 ./forum-migrate。
+  auto_migrate: false
+
+redis:
+  addr: 127.0.0.1:6379
+  password: ""
+  db: 0
+
+jwt:
+  # 留空，由 JWT_SECRET 提供；少于 32 个字符或等于示例占位值会被拒绝启动。
+  # 换密钥等于让所有已签发的 token 立刻失效，改之前想清楚。
+  secret: ""
+  expire: 24 # 小时
+
+# 生产限流比本机宽：本机 10/2 是给单人调试用的，
+# 上线后多人共用一个出口 IP 时会被误伤。按实际并发再调。
+# key_prefix 带环境名，多个环境共用一个 Redis 时互不干扰。
+rate_limit:
+  capacity: 60
+  rate: 20
+  key_prefix: "forum:prod:rate:"
+
+# 同域部署（Nginx 同时托管前端与 /api）不需要 CORS，留空即关闭。
+# 前后端分域名时才填完整 Origin，含协议、不带结尾斜杠，例如：
+#   allowed_origins:
+#     - "https://forum.example.com"
+cors:
+  allowed_origins: []
+
+# 浏览器握手的 Origin 只写 host:port，不带协议。
+# 换成自己的域名；多个域名各占一行。
+ws:
+  allowed_origins:
+    - "forum.example.com"

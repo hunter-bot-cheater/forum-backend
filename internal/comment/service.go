@@ -1,15 +1,15 @@
-// Package comment 的评论部分：方法名统一用动词。
+// Package comment 实现文章评论的增删查。
 package comment
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"forum-backend/internal/domain"
 	"strings"
 
 	"gorm.io/gorm"
 
+	"forum-backend/internal/domain"
 	"forum-backend/internal/event"
 	"forum-backend/internal/model"
 )
@@ -18,11 +18,12 @@ import (
 // 放在本文件而不是 article.go，因为它只服务评论查询。
 const commentListOrder = "created_at ASC, id ASC"
 
-// CommentService 评论业务逻辑。
+// CommentService 评论业务逻辑。方法名统一用动词：List / Create / Delete。
 type CommentService struct {
 	db *gorm.DB
 }
 
+// NewCommentService 由装配层在启动时调用一次。
 func NewCommentService(db *gorm.DB) *CommentService {
 	return &CommentService{db: db}
 }
@@ -60,8 +61,9 @@ func (s *CommentService) List(ctx context.Context, articleID uint, page, pageSiz
 	return list, total, nil
 }
 
-// Create 在指定文章下发表一条评论。 并在同一事务里写出领域事件
+// Create 在指定文章下发表一条评论，并在同一事务里写出领域事件。
 // articleID 来自 URL 路径，userID 来自 JWT，content 才是请求体给的。
+// 返回新建的评论模型（不含作者），错误已转成 domain 哨兵值供 handler 映射。
 func (s *CommentService) Create(ctx context.Context, articleID, userID uint, content string) (*model.Comment, error) {
 	// 与文章 Create 同样的规则：去空白、判空、限长，都留在 service 层。
 	content = strings.TrimSpace(content)
@@ -90,14 +92,16 @@ func (s *CommentService) Create(ctx context.Context, articleID, userID uint, con
 		UserID:    userID,
 		Content:   content,
 	}
+
+	// 评论和事件必须一起提交：事务回滚时事件也不会留下，
+	// 否则会出现「通知说有人评论了，但评论根本不存在」。
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(m).Error; err != nil {
 			return fmt.Errorf("create comment for article %d: %w", articleID, err)
 		}
 		// m.ID 由 tx.Create(m) 回填，必须在 INSERT 之后才能生成事件。
-		// Target 是评论作用的文章，收件人靠它回查作者。
+		// Target 是评论作用的文章，收件人靠它回查作者；
 		// Created 是刚插入的这条评论，通知点进去要定位到它。
-		// 消费端按事件类型分发，不再靠某个字段是否为 0 猜类型。
 		target := event.Target{Type: event.TargetArticle, ID: articleID}
 		created := event.Target{Type: event.TargetComment, ID: m.ID}
 		return event.EmitCreated(ctx, tx, event.TypeCommentCreated, userID, target, &created)

@@ -22,10 +22,13 @@ import (
 	"forum-backend/internal/hot"
 )
 
+// main 只负责把退出码交给 os.Exit，逻辑在 run 里。
 func main() {
 	os.Exit(run())
 }
 
+// run 执行一次对账，返回退出码：0 一致、1 有问题、2 运行失败。
+// 默认只读，加 -fix 才会写 Redis。
 func run() int {
 	topN := flag.Int("top", 200, "对账检查的榜单深度")
 	fix := flag.Bool("fix", false, "修正发现的漂移。默认只报告，不写 Redis")
@@ -102,6 +105,8 @@ func run() int {
 	return 0
 }
 
+// printReport 把报告以缩进 JSON 打印出来，末尾附一行人能读的摘要。
+// JSON 便于脚本消费，摘要便于人一眼看出有没有问题。
 func printReport(rep *hot.ReconcileReport) {
 	pretty, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {

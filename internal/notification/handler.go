@@ -14,6 +14,7 @@ type NotificationHandler struct {
 	svc *NotificationService
 }
 
+// NewNotificationHandler 由装配层调用，注入已构造好的 service。
 func NewNotificationHandler(svc *NotificationService) *NotificationHandler {
 	return &NotificationHandler{svc: svc}
 }
@@ -29,6 +30,7 @@ func NewNotificationHandler(svc *NotificationService) *NotificationHandler {
 // @Security     Bearer
 // @Router       /notifications [get]
 // List 处理 GET /api/notifications。
+// 收件人只从 JWT 里取，不接受 query 传 user_id，否则任何登录用户都能翻别人的通知。
 func (h *NotificationHandler) List(c *gin.Context) {
 	userID, ok := httputil.CurrentUserID(c)
 	if !ok {
@@ -69,6 +71,7 @@ func (h *NotificationHandler) List(c *gin.Context) {
 // @Security     Bearer
 // @Router       /notifications/read-all [put]
 // ReadAll 处理 PUT /api/notifications/read-all。
+// 用 PUT 而不是 POST，因为这个操作幂等：重复调用结果都是「全部已读」。
 func (h *NotificationHandler) ReadAll(c *gin.Context) {
 	userID, ok := httputil.CurrentUserID(c)
 	if !ok {

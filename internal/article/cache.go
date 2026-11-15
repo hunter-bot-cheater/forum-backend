@@ -1,5 +1,5 @@
-// Package service 的文章详情缓存配置与工具函数。
-// 本文件只放常量、纯函数和计数器。
+// 本文件是文章详情缓存的配置与工具部分：key 怎么拼、TTL 取多少、空标记是什么、计数器怎么记。
+// 纯常量与纯函数放这里，和业务逻辑分开，改缓存策略时不用翻 service.go。
 package article
 
 import (
@@ -9,10 +9,11 @@ import (
 	"time"
 )
 
-//一、key
+// ===== 缓存 key =====
 
 // articleDetailKeyPrefix 是详情缓存 key 的前缀。
 // 抽成常量是为了让「读缓存」「删缓存」「redis-cli 排查」三处用同一个名字，
+// 手写字符串迟早会出现少一个冒号、拼错单词之类的低级错误。
 const articleDetailKeyPrefix = "article:detail:"
 
 // articleDetailCacheVersion 是缓存值的格式版本。
@@ -22,25 +23,26 @@ const articleDetailKeyPrefix = "article:detail:"
 const articleDetailCacheVersion = "v1"
 
 // articleDetailKey 拼出一篇详情的缓存 key，形如 article:detail:v1:42。
-// 用 strconv.FormatUint 而不是 fmt.Sprintf：这里只需要十进制转换，
-// strconv 不做格式解析，意图更明确。
+// 用 strconv.FormatUint 而不是 fmt.Sprintf：这里只做十进制转换，
+// strconv 不解析格式串，意图更明确也更快。
 func articleDetailKey(id uint) string {
 	return articleDetailKeyPrefix + articleDetailCacheVersion + ":" + strconv.FormatUint(uint64(id), 10)
 }
 
-// 二、TTL
+// ===== 缓存 TTL =====
 
 // 详情缓存的基础存活时间。
-// 决定「数据库改了但删缓存失败」时，旧数据最多能被读多久。
+// 它决定「数据库改了但删缓存失败」时，旧数据最多还能被读多久。
 const articleDetailTTLBase = 10 * time.Minute
 
 // articleDetailTTLJitter 是叠加在基础 TTL 上的随机抖动上限。
-// 最终 TTL 落在 [10m, 10m+2m)，把一批写入的过期时刻摊到 2 分钟窗口。
+// 最终 TTL 落在 [10m, 10m+2m)，把一批同时写入的 key 的过期时刻摊到 2 分钟窗口里，
+// 避免它们在同一个瞬间集体失效、把流量一起打到数据库（缓存雪崩）。
 const articleDetailTTLJitter = 2 * time.Minute
 
 // articleEmptyTTL 是「查无此文」空标记的存活时间。
-// 空标记挡的是不存在的 id，
-// 留太久会让后来真写入这条记录时短暂查不到。
+// 空标记挡的是反复查询不存在 id 的请求（缓存穿透），所以不能没有；
+// 但也留不久：留太久会让这条记录后来真被写入时，仍有一段时间查不到。
 const articleEmptyTTL = 60 * time.Second
 
 // articleDetailTTL 返回本次回填应该用的 TTL。
@@ -51,7 +53,8 @@ func articleDetailTTL() time.Duration {
 	return articleDetailTTLBase + time.Duration(jitter)
 }
 
-// 三、空标记
+// ===== 空标记 =====
+
 // articleEmptySentinel 是「数据库里确实没有这篇文章」的缓存值。
 // 合法的详情缓存一定是 json.Marshal(model.Article) 的结果，以 '{' 开头；
 // 这个字符串以下划线开头，永远不可能和真实文章 JSON 混淆。
@@ -59,7 +62,7 @@ func articleDetailTTL() time.Duration {
 // 会把 a 留成全零结构体，客户端会收到一篇 id=0 的假文章。
 const articleEmptySentinel = "__ARTICLE_NOT_FOUND__"
 
-//四、计数器
+// ===== 计数器 =====
 
 // cacheMetrics 用原子计数器记录缓存路径上发生了什么。
 // 字段必须用 atomic.Int64：Detail 会被多个请求并发调用，
@@ -77,7 +80,7 @@ type cacheMetrics struct {
 // CacheStats 是缓存计数器的只读快照，供调试接口和测试读取。
 // 故意用普通 int64：调用方拿到的是一份拷贝，读的时候不会看到半成品，
 // 也不用知道 atomic 怎么用。
-// json tag 写成小写下划线，是因为 6.7 的可选调试接口会直接把它序列化出去，
+// json tag 写成小写下划线，是因为调试接口会直接把它序列化出去，
 // Go 默认导出的字段名是 Hits、EmptyHits 这种大写形式，不适合当 API 字段。
 type CacheStats struct {
 	Hits      int64 `json:"hits"`
@@ -91,7 +94,7 @@ type CacheStats struct {
 
 // snapshot 把原子计数器读成一份普通结构体。
 // 每个字段单独 Load，严格说这不是同一个瞬间的快照；
-// 对学习项目里看趋势、做验收断言够用，要精确一致得另加锁。
+// 对看趋势、做验收断言够用，要精确一致得另加锁。
 func (m *cacheMetrics) snapshot() CacheStats {
 	var s CacheStats
 	s.Hits = m.Hits.Load()

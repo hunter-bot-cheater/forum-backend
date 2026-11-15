@@ -21,6 +21,7 @@ type onlineStatsResp struct {
 }
 
 // WSHandler 负责升级连接与在线状态查询。
+// allowedOrigins 是启动时从配置算好的白名单，这里用 map 存是为了 O(1) 判断。
 type WSHandler struct {
 	hub            *realtime.Hub
 	jwt            *jwt.Manager
@@ -28,6 +29,7 @@ type WSHandler struct {
 	upgrader       websocket.Upgrader
 }
 
+// NewWSHandler 由装配层调用，origins 为空表示谁都不放行（浏览器连接会被拒）。
 func NewWSHandler(hub *realtime.Hub, jwtManager *jwt.Manager, origins []string) *WSHandler {
 	h := &WSHandler{
 		hub:            hub,
@@ -88,15 +90,14 @@ func (h *WSHandler) Notifications(c *gin.Context) {
 	client := realtime.NewClient(h.hub, conn, userID)
 	h.hub.Register(client)
 
-	// 写泵单独一个 goroutine，读泵占住本次请求的 goroutine，
-	// 它返回就代表连接结束，defer 里会把连接摘掉。
+	// 写泵必须单独起协程：gorilla/websocket 不支持并发写，
+	// 由它独占处理发件箱和心跳，绝不能阻塞在这次请求里。
 	go client.WriteLoop()
-	// 写泵：必须单独起协程。因为 gorilla/websocket 不支持并发写，
-	// 必须由它独占处理发件箱 (send channel) 和心跳 (Ping)，严禁阻塞。
+
+	// 读泵必须占住当前请求的协程（不要加 go），有两个原因：
+	// 一是 Handler 一返回，net/http 就会回收底层连接；
+	// 二是靠阻塞读来感知客户端断开，从而走到 ReadLoop 里 defer 的注销与清理。
 	client.ReadLoop()
-	// 读泵：必须占住当前请求的协程（不要加 go）。
-	// 一是防止 Handler 返回导致底层 TCP 被 net/http 回收；
-	// 二是靠阻塞读来感知客户端断开，触发 defer 里的注销与资源清理。
 }
 
 // Stats godoc

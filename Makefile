@@ -1,5 +1,5 @@
 # 常用开发命令
-.PHONY: run run-release build test tidy swagger web-dev web-build web-preview
+.PHONY: run run-release build build-release migrate test tidy swagger web-dev web-build web-preview
 
 run:   ## 启动服务
 	go run ./cmd/server
@@ -7,8 +7,16 @@ run:   ## 启动服务
 run-release: ## 以 release 模式启动后端，关闭 Swagger
 	GIN_MODE=release go run ./cmd/server
 
-build: ## 编译
+build: ## 编译服务端与迁移命令到 bin/
 	go build -o bin/forum-server ./cmd/server
+	go build -o bin/forum-migrate ./cmd/migrate
+
+build-release: ## 编译 Linux 版可执行文件，用于上传服务器（本机是 Windows 时用这个）
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/forum-server-linux ./cmd/server
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/forum-migrate-linux ./cmd/migrate
+
+migrate: ## 手工执行一次建表（生产 auto_migrate=false 时用；本机也可用）
+	go run ./cmd/migrate
 
 test:  ## 跑全部测试
 	go test ./...

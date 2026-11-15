@@ -7,9 +7,11 @@ package keys
 
 import "strconv"
 
-const LikeSetKeyPrefix = "article:like:v1:"
-const HotArticlesKey = "hot:articles:v1"
-const FloorNextKeyPrefix = "floor:event:v1:"
+// key 里统一带 v1 版本号：将来结构变了，改成 v2 就能让旧 key 自然过期，
+// 不用写迁移脚本去清理线上残留。
+const LikeSetKeyPrefix = "article:like:v1:"  // 文章点赞用户集合（SET），成员是 user_id
+const HotArticlesKey = "hot:articles:v1"     // 热榜（ZSET），成员是 article_id，score 是热度
+const FloorNextKeyPrefix = "floor:event:v1:" // 抢楼发号器前缀
 
 // LikeSetKey 返回某篇文章点赞用户集合的 Redis key。
 func LikeSetKey(articleID uint) string {

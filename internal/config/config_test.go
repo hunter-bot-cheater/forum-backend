@@ -36,11 +36,13 @@ func useTestConfig(t *testing.T, content string) {
 	t.Setenv("CONFIG_PATH", path)
 	t.Setenv("JWT_SECRET", "")
 	t.Setenv("MYSQL_PASSWORD", "")
+	t.Setenv("MYSQL_AUTO_MIGRATE", "")
 	t.Setenv("REDIS_PASSWORD", "")
 	t.Setenv("SERVER_TRUSTED_PROXIES", "")
 	t.Setenv("RATE_LIMIT_CAPACITY", "")
 	t.Setenv("RATE_LIMIT_RATE", "")
 	t.Setenv("RATE_LIMIT_KEY_PREFIX", "")
+	t.Setenv("CORS_ALLOWED_ORIGINS", "")
 }
 
 func TestLoadFromYAML(t *testing.T) {
@@ -177,10 +179,90 @@ func TestLoadRateLimitEnvOverride(t *testing.T) {
 	}
 }
 
+func TestLoadCORSDefaults(t *testing.T) {
+	useTestConfig(t, testYAML)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.CORS.AllowedOrigins) != 0 {
+		t.Fatalf("CORS should be off by default, got %v", cfg.CORS.AllowedOrigins)
+	}
+}
+
+func TestLoadCORSOriginsFromYAML(t *testing.T) {
+	useTestConfig(t, testYAML+`
+cors:
+  allowed_origins:
+    - "https://front.example.com"
+    - "http://127.0.0.1:5173"
+`)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.CORS.AllowedOrigins) != 2 || cfg.CORS.AllowedOrigins[1] != "http://127.0.0.1:5173" {
+		t.Fatalf("allowed origins = %v", cfg.CORS.AllowedOrigins)
+	}
+}
+
+func TestLoadCORSEnvOverride(t *testing.T) {
+	useTestConfig(t, testYAML)
+	t.Setenv("CORS_ALLOWED_ORIGINS", "https://a.example.com,https://b.example.com")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.CORS.AllowedOrigins) != 2 || cfg.CORS.AllowedOrigins[0] != "https://a.example.com" {
+		t.Fatalf("allowed origins = %v", cfg.CORS.AllowedOrigins)
+	}
+}
+
 func TestLoadMissingFile(t *testing.T) {
 	t.Setenv("CONFIG_PATH", filepath.Join(t.TempDir(), "missing.yaml"))
 
 	if _, err := Load(); err == nil {
 		t.Fatal("missing config file should return an error")
+	}
+}
+
+// yaml 里没写 auto_migrate 时默认开，本机开发改完模型重启就能建表。
+func TestLoadAutoMigrateDefaultsTrue(t *testing.T) {
+	useTestConfig(t, testYAML)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MySQL.AutoMigrate {
+		t.Fatal("auto_migrate should default to true")
+	}
+}
+
+// 生产模板靠这一项关掉自动建表，两种写法（yaml 与环境变量）都要生效。
+func TestLoadAutoMigrateCanBeDisabled(t *testing.T) {
+	content := strings.Replace(testYAML, "  dbname: forum", "  dbname: forum\n  auto_migrate: false", 1)
+	useTestConfig(t, content)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MySQL.AutoMigrate {
+		t.Fatal("auto_migrate: false in yaml should be respected")
+	}
+
+	useTestConfig(t, testYAML)
+	t.Setenv("MYSQL_AUTO_MIGRATE", "false")
+
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MySQL.AutoMigrate {
+		t.Fatal("MYSQL_AUTO_MIGRATE=false should override the default")
 	}
 }
