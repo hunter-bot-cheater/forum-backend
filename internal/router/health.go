@@ -2,7 +2,7 @@ package router
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -53,7 +53,7 @@ func registerHealth(r *gin.Engine, checks []healthCheck) {
 		for _, hc := range checks {
 			if err := hc.check(ctx); err != nil {
 				// 具体错误只写日志：里面有连接地址、驱动报错，不宜回给调用方。
-				log.Printf("readyz check %s failed: %v", hc.name, err)
+				slog.WarnContext(ctx, "readyz check failed", "check", hc.name, "error", err)
 				results[hc.name] = "fail"
 				failed = true
 				continue

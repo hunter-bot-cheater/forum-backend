@@ -28,6 +28,8 @@ mysql:
   # 启动时按模型自动建表 / 补列。本机开着方便，改完模型重启就生效。
   # 生产改成 false，改表走独立的迁移命令（见 config/config.production.yaml 与 make migrate）。
   auto_migrate: true
+  # 慢查询阈值（毫秒）。执行时间超过它的 SQL 会打一条 warn 日志，带上 sql 与 request_id。
+  slow_query_ms: 200
 
 redis:
   addr: 127.0.0.1:6379
@@ -63,3 +65,28 @@ cors:
 ws:
   allowed_origins:
     - "127.0.0.1:5173"
+
+# 日志：统一由 pkg/logging 组装，字段固定为 time / level / msg / request_id + 业务字段。
+# level 取 debug / info / warn / error；format 取 json（机器检索）/ text（人眼读）。
+# 本机建议 format: text，看日志不用在一堆花括号里找。
+log:
+  level: info
+  format: json
+  console: true
+  # 本机不落盘（path 留空）。要落盘就填 logs/app.log，写满 max_size_mb 切成 .1、.2。
+  file:
+    path: ""
+    max_size_mb: 50
+    max_backups: 7
+    max_age_days: 30
+
+# 指标抓取端点 GET /metrics，挂在根路径（不在 /api 下，因此不限流）。
+# 指标用 prometheus/client_golang 采集，暴露 http_requests_total、
+# http_request_duration_seconds、article_cache_events_total、ws_online_users 等，
+# 以及库自带的 go_* / process_* 运行时指标，可直接套现成的 Grafana 看板。
+# enabled: false 时完全不注册路由，请求落到统一 404（不是返回空指标）。
+# token 非空则要求 Authorization: Bearer <token>；本机看指标留空即可。
+# 环境变量：METRICS_ENABLED、METRICS_TOKEN
+metrics:
+  enabled: true
+  token: ""

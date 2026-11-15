@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +21,7 @@ import (
 
 	"forum-backend/internal/domain"
 	"forum-backend/internal/keys"
+	"forum-backend/internal/metrics"
 	"forum-backend/internal/model"
 )
 
@@ -44,16 +45,15 @@ var articleListColumns = fmt.Sprintf(
 //   - rdb：Redis，只放详情缓存，挂了也要能降级跑
 //   - group：把「同一个 key 的并发回源」合并成一次，只在当前进程内生效
 //
-// metrics 含 atomic 字段，所以 ArticleService 必须始终用指针传递，
-// 拷贝值会让计数器各记各的。
+// 缓存计数不在结构体里：统一记到 metrics 包的共享计数器上，
+// 这样 /metrics 与 CacheStats() 用的是同一份数字。
 type ArticleService struct {
-	db      *gorm.DB
-	rdb     *redis.Client
-	group   singleflight.Group
-	metrics cacheMetrics
+	db    *gorm.DB
+	rdb   *redis.Client
+	group singleflight.Group
 }
 
-// NewArticleService 由 router 在装配期调用一次。group 和 metrics 是零值可用类型，不用初始化。
+// NewArticleService 由 router 在装配期调用一次。group 是零值可用类型，不用初始化。
 func NewArticleService(db *gorm.DB, rdb *redis.Client) *ArticleService {
 	return &ArticleService{db: db, rdb: rdb}
 }
@@ -180,10 +180,10 @@ func (s *ArticleService) Delete(ctx context.Context, id, userID uint) error {
 	// 这两个 key 由别的模块拥有，拼法统一收在 keys 包，这里只引用不自己拼。
 	// 清理失败只记日志：文章已经删了，不能让缓存清理失败把接口变成 500。
 	if err := s.rdb.Del(ctx, keys.LikeSetKey(id)).Err(); err != nil {
-		log.Printf("drop like set for article %d: %v", id, err)
+		slog.ErrorContext(ctx, "drop like set", "article_id", id, "error", err)
 	}
 	if err := s.rdb.ZRem(ctx, keys.HotArticlesKey, strconv.FormatUint(uint64(id), 10)).Err(); err != nil {
-		log.Printf("drop hot member for article %d: %v", id, err)
+		slog.ErrorContext(ctx, "drop hot member", "article_id", id, "error", err)
 	}
 	return nil
 }
@@ -229,7 +229,7 @@ func (s *ArticleService) Detail(ctx context.Context, id uint) (*model.Article, e
 		}
 
 		// 到这里才真正查库。
-		s.metrics.Loads.Add(1)
+		metrics.ArticleCacheEvents.WithLabelValues(cacheEventLoad).Inc()
 		loaded, err := s.queryDetail(loadCtx, id)
 		if err != nil {
 			// 只有「确实不存在」才能写空标记。数据库故障绝不能写成空标记，
@@ -247,7 +247,7 @@ func (s *ArticleService) Detail(ctx context.Context, id uint) (*model.Article, e
 
 	if shared {
 		// shared 只表示结果被多个请求领取，不代表成功，所以只是计数，不影响返回。
-		s.metrics.Shares.Add(1)
+		metrics.ArticleCacheEvents.WithLabelValues(cacheEventShare).Inc()
 	}
 	if err != nil {
 		return nil, err
@@ -270,34 +270,34 @@ func (s *ArticleService) readArticleCache(ctx context.Context, key string) (*mod
 	val, err := s.rdb.Get(ctx, key).Result()
 	if err == redis.Nil {
 		// redis.Nil 是「key 不存在」的正常未命中，不是故障，别当错误往上抛。
-		s.metrics.Misses.Add(1)
+		metrics.ArticleCacheEvents.WithLabelValues(cacheEventMiss).Inc()
 		return nil, false, nil
 	}
 	if err != nil {
 		// 断连、超时等：降级回源，同时留下日志与计数证据，别静默吃掉。
-		s.metrics.Misses.Add(1)
-		s.metrics.Degrades.Add(1)
-		log.Printf("read article cache %s: %v", key, err)
+		metrics.ArticleCacheEvents.WithLabelValues(cacheEventMiss).Inc()
+		metrics.ArticleCacheEvents.WithLabelValues(cacheEventDegrade).Inc()
+		slog.ErrorContext(ctx, "read article cache", "key", key, "error", err)
 		return nil, false, nil
 	}
 
 	// 先比空标记，再谈反序列化。顺序不能反：
 	// 哨兵不是合法 JSON，交给 Unmarshal 只会得到一次没必要的解析错误。
 	if val == articleEmptySentinel {
-		s.metrics.EmptyHits.Add(1)
+		metrics.ArticleCacheEvents.WithLabelValues(cacheEventEmptyHit).Inc()
 		return nil, true, domain.ErrNotFound
 	}
 
 	var a model.Article
 	if err := json.Unmarshal([]byte(val), &a); err != nil {
 		// 坏缓存自愈：删掉它，否则每次请求都会重复读到坏值、重复报错。
-		s.metrics.Degrades.Add(1)
-		log.Printf("invalid article cache %s: %v", key, err)
+		metrics.ArticleCacheEvents.WithLabelValues(cacheEventDegrade).Inc()
+		slog.ErrorContext(ctx, "invalid article cache", "key", key, "error", err)
 		_ = s.rdb.Del(ctx, key).Err()
 		return nil, false, nil
 	}
 
-	s.metrics.Hits.Add(1)
+	metrics.ArticleCacheEvents.WithLabelValues(cacheEventHit).Inc()
 	return &a, true, nil
 }
 
@@ -307,16 +307,16 @@ func (s *ArticleService) writeArticleCache(ctx context.Context, key string, a *m
 	data, err := json.Marshal(a)
 	if err != nil {
 		// model.Article 全是普通字段，正常不会失败；仍要显式处理，别吞掉。
-		log.Printf("marshal article cache %s: %v", key, err)
+		slog.ErrorContext(ctx, "marshal article cache", "key", key, "error", err)
 		return
 	}
 	// 每次调用 articleDetailTTL() 都会重新取随机数，这是防雪崩的关键。
 	if err := s.rdb.Set(ctx, key, data, articleDetailTTL()).Err(); err != nil {
-		s.metrics.Degrades.Add(1)
-		log.Printf("write article cache %s: %v", key, err)
+		metrics.ArticleCacheEvents.WithLabelValues(cacheEventDegrade).Inc()
+		slog.ErrorContext(ctx, "write article cache", "key", key, "error", err)
 		return
 	}
-	s.metrics.Writes.Add(1)
+	metrics.ArticleCacheEvents.WithLabelValues(cacheEventWrite).Inc()
 }
 
 // markArticleAbsent 写入「查无此文」的空标记，只给短 TTL。
@@ -324,8 +324,8 @@ func (s *ArticleService) writeArticleCache(ctx context.Context, key string, a *m
 // 否则会把数据库故障误记成「这篇文章不存在」。
 func (s *ArticleService) markArticleAbsent(ctx context.Context, key string) {
 	if err := s.rdb.Set(ctx, key, articleEmptySentinel, articleEmptyTTL).Err(); err != nil {
-		s.metrics.Degrades.Add(1)
-		log.Printf("write empty article cache %s: %v", key, err)
+		metrics.ArticleCacheEvents.WithLabelValues(cacheEventDegrade).Inc()
+		slog.ErrorContext(ctx, "write empty article cache", "key", key, "error", err)
 	}
 }
 
@@ -362,13 +362,13 @@ func (s *ArticleService) queryDetail(ctx context.Context, id uint) (*model.Artic
 func (s *ArticleService) InvalidateDetailCache(ctx context.Context, id uint) {
 	key := articleDetailKey(id)
 	if err := s.rdb.Del(ctx, key).Err(); err != nil {
-		s.metrics.Degrades.Add(1)
-		log.Printf("invalidate article cache %s: %v", key, err)
+		metrics.ArticleCacheEvents.WithLabelValues(cacheEventDegrade).Inc()
+		slog.ErrorContext(ctx, "invalidate article cache", "key", key, "error", err)
 	}
 }
 
 // CacheStats 返回当前进程的缓存计数快照，供本地验收与将来的监控接入使用。
 // 进程重启后计数归零，它不是持久化指标。
 func (s *ArticleService) CacheStats() CacheStats {
-	return s.metrics.snapshot()
+	return snapshot()
 }

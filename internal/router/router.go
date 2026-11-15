@@ -19,6 +19,7 @@ import (
 	"forum-backend/internal/floor"
 	"forum-backend/internal/hot"
 	"forum-backend/internal/like"
+	"forum-backend/internal/metrics"
 	"forum-backend/internal/middleware"
 	"forum-backend/internal/notification"
 	"forum-backend/internal/realtime"
@@ -33,7 +34,7 @@ import (
 // 字段分三类：
 //   - 连接类：DB、Redis（数据库与缓存客户端）
 //   - 组件类：JWT（签发/校验 token）、Hub（WebSocket 在线连接表）
-//   - 配置类：WSOrigins、RateLimit、TrustedProxies、CORSOrigins（从 config 透传进来）
+//   - 配置类：WSOrigins、RateLimit、TrustedProxies、CORSOrigins、Metrics（从 config 透传进来）
 type Deps struct {
 	DB             *gorm.DB
 	JWT            *jwt.Manager
@@ -43,6 +44,7 @@ type Deps struct {
 	RateLimit      config.RateLimitConfig
 	TrustedProxies []string
 	CORSOrigins    []string
+	Metrics        config.MetricsConfig
 }
 
 // New 组装出完整的 HTTP 服务：创建 gin 引擎 → 装全局中间件 → 建各业务对象 → 注册路由。
@@ -109,6 +111,17 @@ func New(deps Deps) (*gin.Engine, error) {
 				return deps.Redis.Ping(ctx).Err()
 			},
 		},
+	})
+
+	// 指标端点与两个在线连接数 gauge。
+	// 用 BindGauge 而不是在 metrics 包里写死：Hub 是每个进程一个实例，
+	// 只有装配到它的人才知道去哪里读在线数；抓取时才求值，热路径上不用埋钩子。
+	registerMetrics(r, deps.Metrics)
+	metrics.BindGauge("ws_online_users", "当前在线的 WebSocket 用户数", func() float64 {
+		return float64(deps.Hub.OnlineUsers())
+	})
+	metrics.BindGauge("ws_online_connections", "当前 WebSocket 连接数（同一用户多标签页算多个）", func() float64 {
+		return float64(deps.Hub.OnlineConns())
 	})
 
 	// 下面这一段是「接线」：把 service 和 handler 一层层 new 出来。

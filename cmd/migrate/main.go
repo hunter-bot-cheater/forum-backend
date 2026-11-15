@@ -15,10 +15,11 @@
 package main
 
 import (
-	"log"
+	"log/slog"
 	"os"
 
 	"forum-backend/internal/config"
+	"forum-backend/pkg/logging"
 )
 
 // main 只负责把退出码交给 os.Exit，逻辑在 run 里。
@@ -30,13 +31,26 @@ func main() {
 func run() int {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Printf("加载配置失败: %v", err)
+		slog.Error("加载配置失败", "error", err)
 		return 2
 	}
 
+	// 一次性命令只打控制台、不落文件：日志文件同一时刻只允许一个进程写，
+	// 让迁移命令去写 server 的文件会互相抢改名。
+	_, closeLog, err := logging.Setup(logging.Config{
+		Level:   cfg.Log.Level,
+		Format:  cfg.Log.Format,
+		Console: true,
+	})
+	if err != nil {
+		slog.Error("初始化日志失败", "error", err)
+		return 2
+	}
+	defer closeLog()
+
 	db, err := config.InitDB(&cfg.MySQL)
 	if err != nil {
-		log.Printf("连接数据库失败: %v", err)
+		slog.Error("连接数据库失败", "error", err)
 		return 2
 	}
 	// 迁移命令跑完就退，连接池不关也无所谓，但显式关闭能让 MySQL 侧的会话立刻回收。
@@ -46,10 +60,10 @@ func run() int {
 	}
 
 	if err := config.Migrate(db); err != nil {
-		log.Printf("迁移失败: %v", err)
+		slog.Error("迁移失败", "error", err)
 		return 2
 	}
 
-	log.Printf("迁移完成: db=%s host=%s:%d", cfg.MySQL.DBName, cfg.MySQL.Host, cfg.MySQL.Port)
+	slog.Info("迁移完成", "db", cfg.MySQL.DBName, "host", cfg.MySQL.Host, "port", cfg.MySQL.Port)
 	return 0
 }

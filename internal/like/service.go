@@ -13,7 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 
 	"github.com/redis/go-redis/v9"
@@ -186,7 +186,7 @@ func (s *LikeService) syncLikeSet(ctx context.Context, articleID, userID uint, a
 		err = s.rdb.SRem(ctx, key, member).Err()
 	}
 	if err != nil {
-		log.Printf("sync like set %s: %v", key, err)
+		slog.WarnContext(ctx, "sync like set", "key", key, "error", err)
 	}
 }
 
@@ -223,7 +223,7 @@ func (s *LikeService) HasLiked(ctx context.Context, articleID, userID uint) (boo
 	}
 	if err != nil {
 		// Redis 故障不当成失败：往下走 MySQL，接口照常可用。
-		log.Printf("check like set %s: %v", key, err)
+		slog.WarnContext(ctx, "check like set", "key", key, "error", err)
 	}
 
 	var count int64
@@ -236,7 +236,7 @@ func (s *LikeService) HasLiked(ctx context.Context, articleID, userID uint) (boo
 	// 回填：确认点过就把成员补进集合，下次查询走快速路径。
 	if count > 0 {
 		if err := s.rdb.SAdd(ctx, key, member).Err(); err != nil {
-			log.Printf("repair like set %s: %v", key, err)
+			slog.WarnContext(ctx, "repair like set", "key", key, "error", err)
 		}
 	}
 	return count > 0, nil
@@ -261,6 +261,6 @@ func (s *LikeService) syncHotScore(ctx context.Context, articleID uint, count in
 		err = s.rdb.ZRem(ctx, keys.HotArticlesKey, member).Err()
 	}
 	if err != nil {
-		log.Printf("sync hot score %s: %v", member, err)
+		slog.WarnContext(ctx, "sync hot score", "member", member, "error", err)
 	}
 }

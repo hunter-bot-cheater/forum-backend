@@ -266,3 +266,69 @@ func TestLoadAutoMigrateCanBeDisabled(t *testing.T) {
 		t.Fatal("MYSQL_AUTO_MIGRATE=false should override the default")
 	}
 }
+
+// 日志的默认值要能撑起「什么都不配也能跑」：JSON 打控制台、不落盘、级别 info。
+// 落盘默认关掉是刻意的，否则每次启动都会在项目里建 logs/ 目录。
+func TestLoadLogDefaults(t *testing.T) {
+	useTestConfig(t, testYAML)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Log.Level != "info" || cfg.Log.Format != "json" {
+		t.Fatalf("log 默认应为 info/json，实际 %s/%s", cfg.Log.Level, cfg.Log.Format)
+	}
+	if !cfg.Log.Console {
+		t.Fatal("log.console 应默认开启")
+	}
+	if cfg.Log.File.Path != "" {
+		t.Fatalf("log.file.path 应默认为空（不落盘），实际 %q", cfg.Log.File.Path)
+	}
+	if cfg.Log.File.MaxSizeMB != 50 || cfg.Log.File.MaxBackups != 7 || cfg.Log.File.MaxAgeDays != 30 {
+		t.Fatalf("日志切分默认值不对: %+v", cfg.Log.File)
+	}
+	if cfg.MySQL.SlowQueryMS != 200 {
+		t.Fatalf("slow_query_ms 应默认 200，实际 %d", cfg.MySQL.SlowQueryMS)
+	}
+}
+
+// 落盘配置要能从 yaml 读进来，并支持环境变量覆盖（LOG_FILE_PATH）。
+func TestLoadLogFileFromYAMLAndEnv(t *testing.T) {
+	content := testYAML + `log:
+  level: debug
+  format: text
+  console: false
+  file:
+    path: logs/test.log
+    max_size_mb: 5
+    max_backups: 2
+    max_age_days: 3
+`
+	useTestConfig(t, content)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Log.Level != "debug" || cfg.Log.Format != "text" || cfg.Log.Console {
+		t.Fatalf("yaml 里的 log 配置没生效: %+v", cfg.Log)
+	}
+	if cfg.Log.File.Path != "logs/test.log" || cfg.Log.File.MaxSizeMB != 5 {
+		t.Fatalf("yaml 里的 log.file 没生效: %+v", cfg.Log.File)
+	}
+
+	t.Setenv("LOG_LEVEL", "warn")
+	t.Setenv("LOG_FILE_PATH", "/var/log/forum/app.log")
+
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Log.Level != "warn" {
+		t.Fatalf("LOG_LEVEL 没覆盖成功: %s", cfg.Log.Level)
+	}
+	if cfg.Log.File.Path != "/var/log/forum/app.log" {
+		t.Fatalf("LOG_FILE_PATH 没覆盖成功: %s", cfg.Log.File.Path)
+	}
+}

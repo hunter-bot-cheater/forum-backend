@@ -22,6 +22,8 @@ type Config struct {
 	WS        WSConfig        `mapstructure:"ws"`
 	RateLimit RateLimitConfig `mapstructure:"rate_limit"`
 	CORS      CORSConfig      `mapstructure:"cors"`
+	Log       LogConfig       `mapstructure:"log"`
+	Metrics   MetricsConfig   `mapstructure:"metrics"`
 }
 
 type ServerConfig struct {
@@ -41,6 +43,9 @@ type MySQLConfig struct {
 	// 本机开发开着方便（改模型后直接重启）；生产建议关掉，
 	// 改表结构走独立的 migrate 命令，避免多实例同时启动时并发建表。
 	AutoMigrate bool `mapstructure:"auto_migrate"`
+	// SlowQueryMS 是慢查询阈值，超过它的 SQL 会按 warn 级别记一条日志。
+	// 设成 0 表示用默认值 200ms；调小能抓到更多可疑查询，代价是日志变多。
+	SlowQueryMS int `mapstructure:"slow_query_ms"`
 }
 
 type RedisConfig struct {
@@ -73,6 +78,40 @@ type CORSConfig struct {
 	AllowedOrigins []string `mapstructure:"allowed_origins"`
 }
 
+// LogConfig 决定日志打到哪、打成什么格式，具体组装见 pkg/logging。
+type LogConfig struct {
+	// Level 取 debug / info / warn / error。线上用 info，排查问题临时调 debug。
+	Level string `mapstructure:"level"`
+	// Format 取 json / text。json 便于机器检索，text 便于本机肉眼读。
+	Format string `mapstructure:"format"`
+	// Console 控制是否同时写标准输出。容器和穿透工具靠 stdout 收日志，线上必须为 true。
+	Console bool `mapstructure:"console"`
+	// File.Path 为空表示不落盘。没有 systemd/journald 的机器才需要文件，
+	// 落盘后要自己注意磁盘占用，靠 MaxSizeMB * MaxBackups 兜住上限。
+	File LogFileConfig `mapstructure:"file"`
+}
+
+// MetricsConfig 控制 /metrics 抓取端点。
+//
+// 端点挂在根路径、不进 /api，因此不限流：抓取方（Prometheus）本该高频轮询，
+// 挤占业务令牌桶会把正常用户限死。
+type MetricsConfig struct {
+	// Enabled 为 false 时完全不注册这个路由，请求会落到统一的 404。
+	Enabled bool `mapstructure:"enabled"`
+	// Token 非空时要求请求带 Authorization: Bearer <token>。
+	// 指标里有路由名和流量规模，直接暴露在公网等于给扫描器送情报；
+	// 内网抓取一般靠 Nginx 的 allow/deny 限制，跨网段抓取才用 token。
+	Token string `mapstructure:"token"`
+}
+
+// LogFileConfig 是日志文件的切分与保留策略。
+type LogFileConfig struct {
+	Path       string `mapstructure:"path"`
+	MaxSizeMB  int    `mapstructure:"max_size_mb"`
+	MaxBackups int    `mapstructure:"max_backups"`
+	MaxAgeDays int    `mapstructure:"max_age_days"`
+}
+
 // HMAC-SHA256 的密钥强度下限：256 bit 对应 32 个字符，短于这个长度可被暴力猜解。
 const minJWTSecretLength = 32
 
@@ -103,6 +142,20 @@ func Load() (*Config, error) {
 	v.SetDefault("rate_limit.rate", 2)
 	v.SetDefault("rate_limit.key_prefix", "forum:dev:rate:")
 	v.SetDefault("cors.allowed_origins", []string{})
+	// 慢查询阈值 200ms：低于它的 SQL 在开发机上看不出慢，抓到的都是真该改的。
+	v.SetDefault("mysql.slow_query_ms", 200)
+	// 日志默认按 JSON 打控制台。本机想看人话就在 config.yaml 里把 format 改成 text。
+	// 文件留空：开发机不需要落盘，免得 logs/ 越攒越大；生产配置里显式开。
+	v.SetDefault("log.level", "info")
+	v.SetDefault("log.format", "json")
+	v.SetDefault("log.console", true)
+	v.SetDefault("log.file.path", "")
+	v.SetDefault("log.file.max_size_mb", 50)
+	v.SetDefault("log.file.max_backups", 7)
+	v.SetDefault("log.file.max_age_days", 30)
+	// 指标默认开着：本机看 /metrics 不需要额外配置，生产模板里按需加 token。
+	v.SetDefault("metrics.enabled", true)
+	v.SetDefault("metrics.token", "")
 
 	// 第二步：决定读哪个文件。部署时用 CONFIG_PATH 传绝对路径，本机默认读项目内的 config/config.yaml。
 	configPath := os.Getenv("CONFIG_PATH")

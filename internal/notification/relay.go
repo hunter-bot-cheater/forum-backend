@@ -3,7 +3,7 @@ package notification
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -45,7 +45,7 @@ func (r *Relay) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := r.PublishBatch(ctx); err != nil {
-				log.Printf("relay publish batch: %v", err)
+				slog.ErrorContext(ctx, "relay publish batch", "error", err)
 			}
 		}
 	}
@@ -76,7 +76,7 @@ func (r *Relay) PublishBatch(ctx context.Context) error {
 		}).Result()
 		if err != nil {
 			// XADD 是单条网络请求，一条失败不影响后面的，标记失败后继续处理下一条。
-			log.Printf("relay xadd %s: %v", e.EventID, err)
+			slog.ErrorContext(ctx, "relay xadd", "event_id", e.EventID, "error", err)
 			r.markFailure(ctx, e)
 			continue
 		}
@@ -107,6 +107,6 @@ func (r *Relay) markFailure(ctx context.Context, e model.OutboxEvent) {
 	err := r.db.WithContext(ctx).Model(&model.OutboxEvent{}).
 		Where("id = ?", e.ID).Updates(updates).Error
 	if err != nil {
-		log.Printf("mark outbox failure %s: %v", e.EventID, err)
+		slog.ErrorContext(ctx, "mark outbox failure", "event_id", e.EventID, "error", err)
 	}
 }

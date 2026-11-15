@@ -1,7 +1,7 @@
 package ws
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 
@@ -83,7 +83,7 @@ func (h *WSHandler) Notifications(c *gin.Context) {
 	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		// Upgrade 失败时它自己已经写过 HTTP 响应，这里只能记日志。
-		log.Printf("upgrade websocket: %v", err)
+		slog.ErrorContext(c.Request.Context(), "upgrade websocket", "error", err)
 		return
 	}
 

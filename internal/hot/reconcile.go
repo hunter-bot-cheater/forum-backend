@@ -3,7 +3,7 @@ package hot
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -106,13 +106,13 @@ func (r *Reconciler) Check(ctx context.Context, topN int) (*ReconcileReport, err
 	for _, p := range pairs {
 		member, ok := p.Member.(string)
 		if !ok {
-			log.Printf("reconcile: unexpected member type %T", p.Member)
+			slog.WarnContext(ctx, "reconcile: unexpected member type", "type", fmt.Sprintf("%T", p.Member))
 			continue
 		}
 		id64, err := strconv.ParseUint(member, 10, 64)
 		if err != nil {
 			// 非数字成员是脏数据，Fix 会把它当僵尸删掉。
-			log.Printf("reconcile: non-numeric member %q", member)
+			slog.WarnContext(ctx, "reconcile: non-numeric member", "member", member)
 			continue
 		}
 		id := uint(id64)

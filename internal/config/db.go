@@ -7,7 +7,6 @@ import (
 	mysqlDriver "github.com/go-sql-driver/mysql"
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
-	gormlogger "gorm.io/gorm/logger"
 
 	"forum-backend/internal/model"
 )
@@ -35,8 +34,9 @@ func InitDB(cfg *MySQLConfig) (*gorm.DB, error) {
 		// TranslateError 把驱动的原始错误转成 gorm.ErrDuplicatedKey 这类哨兵值，
 		// 业务层判断「是不是唯一索引冲突」时不用去匹配 MySQL 错误码。
 		TranslateError: true,
-		// 只打慢查询和错误：SQL 错误由 HTTP 边界统一记一次，避免 GORM 和应用重复打印。
-		Logger: gormlogger.Default.LogMode(gormlogger.Warn),
+		// SQL 日志接到 slog：只记错误和慢查询，成功的语句不记。
+		// 阈值来自 mysql.slow_query_ms，默认 200ms。
+		Logger: newGormLogger(time.Duration(cfg.SlowQueryMS) * time.Millisecond),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)

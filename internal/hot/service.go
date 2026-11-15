@@ -3,7 +3,7 @@ package hot
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -112,7 +112,7 @@ func (s *HotService) Top(ctx context.Context, n int) ([]HotArticle, error) {
 	ready, err := s.rdb.Exists(ctx, hotReadyKey).Result()
 	if err != nil {
 		// Redis 报错（断连、超时）直接降级，不让缓存故障变成接口故障。
-		log.Printf("check hot ready key: %v", err)
+		slog.WarnContext(ctx, "check hot ready key", "error", err)
 		return s.TopFromMySQL(ctx, n)
 	}
 
@@ -124,7 +124,7 @@ func (s *HotService) Top(ctx context.Context, n int) ([]HotArticle, error) {
 			return s.TopFromMySQL(ctx, n)
 		}
 		if err := s.ensureHotZSet(ctx); err != nil {
-			log.Printf("rebuild hot zset: %v", err)
+			slog.WarnContext(ctx, "rebuild hot zset", "error", err)
 			s.markCooldown(ctx)
 			return s.TopFromMySQL(ctx, n)
 		}
@@ -134,7 +134,7 @@ func (s *HotService) Top(ctx context.Context, n int) ([]HotArticle, error) {
 	// 省掉为每条再查一次 ZSCORE。
 	pairs, err := s.rdb.ZRevRangeWithScores(ctx, keys.HotArticlesKey, 0, int64(n-1)).Result()
 	if err != nil {
-		log.Printf("read hot zset: %v", err)
+		slog.WarnContext(ctx, "read hot zset", "error", err)
 		return s.TopFromMySQL(ctx, n)
 	}
 
@@ -188,7 +188,7 @@ func (s *HotService) TopFromMySQL(ctx context.Context, n int) ([]HotArticle, err
 // 但「别再重试」这个结论要留下来给后面的请求看。
 func (s *HotService) markCooldown(ctx context.Context) {
 	if err := s.rdb.Set(context.WithoutCancel(ctx), hotCooldownKey, "1", hotCooldownTTL).Err(); err != nil {
-		log.Printf("mark hot cooldown: %v", err)
+		slog.WarnContext(ctx, "mark hot cooldown", "error", err)
 	}
 }
 

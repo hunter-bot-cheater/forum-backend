@@ -12,9 +12,9 @@
 #        CONFIG_PATH=/etc/forum/config.yaml GIN_MODE=release ./forum-server
 #   4. 反向代理与静态资源见 deploy/nginx.conf.example。
 #
-# 与本机 config/config.yaml 的差异只有四处：
-#   mysql.auto_migrate 关掉、限流放大、trusted_proxies 指向本机 Nginx、
-#   ws.allowed_origins 换成真实域名。其余键名完全一致，方便对照。
+# 与本机 config/config.yaml 的差异只有五处：
+#   mysql.auto_migrate 关掉并放大慢查询阈值、限流放大、trusted_proxies 指向本机 Nginx、
+#   ws.allowed_origins 换成真实域名、日志落盘。其余键名完全一致，方便对照。
 
 server:
   # 只监听本机，由 Nginx 反代对外。不要改成 0.0.0.0 直接暴露。
@@ -35,6 +35,9 @@ mysql:
   # 生产关掉自动迁移：多实例同时启动会并发建表，改表要作为一次显式部署动作。
   # 建表 / 补列统一走 ./forum-migrate。
   auto_migrate: false
+  # 生产慢查询阈值比本机宽松一点：云盘 IO 波动会让 200ms 的查询偶尔超标，
+  # 阈值太低会全是噪音。真超过 500ms 的查询才值得改索引。
+  slow_query_ms: 500
 
 redis:
   addr: 127.0.0.1:6379
@@ -67,3 +70,25 @@ cors:
 ws:
   allowed_origins:
     - "forum.example.com"
+
+# 生产日志：JSON + 落盘。用 systemd 托管时既进 journald 也留一份文件，
+# 排查历史问题时比 journalctl 翻页快；没有日志系统的机器（裸机 + 内网穿透）就靠这个文件。
+# 上限由 max_size_mb * (max_backups + 1) 决定，这里是 50MB * 8 = 400MB。
+# 目录要对运行用户可写，例如 /var/log/forum/app.log（chown 给运行用户）。
+log:
+  level: info
+  format: json
+  console: true
+  file:
+    path: /var/log/forum/app.log
+    max_size_mb: 50
+    max_backups: 7
+    max_age_days: 30
+
+# 指标端点：抓取方通常是本机或内网 Prometheus，靠 Nginx 的 allow/deny 限来源，
+# 因此 token 留空、不额外加鉴权。若要跨网段抓取（例如云上托管监控），
+# 用环境变量给一个随机 token：METRICS_TOKEN=xxx，抓取请求带 Authorization: Bearer xxx。
+# 指标里有路由名与流量规模，裸奔在公网等于把接口清单送给扫描器。
+metrics:
+  enabled: true
+  token: ""

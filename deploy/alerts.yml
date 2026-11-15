@@ -1,0 +1,178 @@
+# 告警规则样例。与 prometheus.yml 同目录，被 rule_files 引用。
+#
+# 阈值是按「小规模单机部署」挑的起点，不是真理：
+# 真正的数字要拿 05a 的压测结论（QPS、p95、连接数）来定，
+# 定太低天天响、定太高真出事不响，两种都等于没有告警。
+#
+# 每条规则都刻意只用已有指标，不假设装了 exporters：
+# 唯一的例外是 ForumNotReady，它依赖 prometheus.yml 里那段注释掉的黑盒探测。
+
+groups:
+  # ===== 可用性：进程还在不在、依赖还通不通 =====
+  - name: forum-availability
+    rules:
+      # up 是 Prometheus 自己生成的合成指标，抓取失败它就是 0。
+      # 等 1 分钟再报，避免一次网络抖动就打电话。
+      - alert: ForumDown
+        expr: up{job="forum-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "后端抓取失败：{{ $labels.instance }}"
+          description: "连续 1 分钟抓不到 /metrics。常见原因：进程挂了、端口没监听、metrics.enabled 被改成 false、token 不匹配（401 也算抓取失败）、Nginx 的 allow/deny 把抓取方挡了。"
+
+      # 依赖就绪检查。需要 prometheus.yml 里的 blackbox-readyz job，
+      # 没配时这条规则没有任何序列，永远不触发（不会误报，也不会生效）。
+      - alert: ForumNotReady
+        expr: probe_success{job="blackbox-readyz"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "就绪检查失败：MySQL 或 Redis 不可用"
+          description: "连续 2 分钟 /readyz 返回非 2xx。此时进程还活着但接不了流量，先看依赖状态与 /readyz 响应里的 checks 字段。等 2 分钟是为了避开主从切换、Redis 主备倒换这类秒级抖动。"
+
+  # ===== 错误：请求失败率、panic、降级 =====
+  - name: forum-errors
+    rules:
+      # 5xx 占比。分母用全部请求，分子只用 5xx。
+      # 后面那段 and on() 是流量闸门：QPS 太低时 1 个 500 就能算出 50% 占比，
+      # 没有闸门会天天误报。0.2 req/s 约等于 5 分钟 60 个请求。
+      - alert: ForumHighErrorRatio
+        expr: |
+          (
+            sum(rate(http_requests_total{job="forum-backend",status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{job="forum-backend"}[5m]))
+          ) > 0.05
+          and on()
+          (
+            sum(rate(http_requests_total{job="forum-backend"}[5m])) > 0.2
+          )
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "5xx 占比超过 5%（当前 {{ $value | humanizePercentage }}）"
+          description: "先按 level=ERROR 捞日志，再用里面的 request_id 反查同一次请求的慢查询与业务错误。指标只告诉你有多少，日志才告诉你是谁。"
+
+      # panic 是「代码有 bug」的硬信号，1 次就值得看。
+      # 用 increase 而不是 rate：次数太少时 rate 会算成 0.00x，看不出发生过。
+      - alert: ForumPanics
+        expr: increase(http_panics_total{job="forum-backend"}[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "10 分钟内出现 {{ $value | humanize }} 次 panic"
+          description: "去日志搜 \"panic recovered\"，同一行的 request_id 能把整条链路串起来。panic 被 Recovery 兜住了，用户看到的是 500，不会拖垮进程，但每次都要当成必修 bug。"
+
+      # 限流器故障是「保护失效」而不是「服务不可用」：
+      # 限流设计成 fail-open（Redis 挂了就放行），所以接口还能跑，但已经裸奔。
+      - alert: ForumRateLimitFailing
+        expr: rate(rate_limit_errors_total{job="forum-backend"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "限流器持续故障，当前处于 fail-open 状态"
+          description: "Redis 连不上或 Lua 脚本报错。请求没有被限流，一旦有人刷接口会直接打到 MySQL。先修 Redis，再确认 http_rate_limited_total 恢复正常增长。"
+
+      # SQL 执行失败（不含 ErrRecordNotFound，那个是业务空结果，不算错误）。
+      - alert: ForumGormErrors
+        expr: rate(gorm_query_errors_total{job="forum-backend"}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SQL 错误率偏高（{{ $value | humanize }} 次/秒）"
+          description: "看日志里的 gorm 错误与 error 字段。常见原因：连接池耗尽（wait_timeout 与 ConnMaxLifetime 不匹配）、唯一索引冲突没被翻译、磁盘满。"
+
+  # ===== 延迟：慢请求、慢 SQL =====
+  - name: forum-latency
+    rules:
+      # p95 从直方图桶里算。sum by (le) 把各路由合并成一个总体分位数，
+      # 想看单个路由就在 by 里加 route。
+      - alert: ForumHighLatencyP95
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket{job="forum-backend"}[5m]))
+          ) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 延迟 {{ $value | humanizeDuration }}，超过 500ms"
+          description: "先分清是缓存没命中（看 article_cache_events_total 的 miss 与 degrade）还是 SQL 慢（看 gorm_slow_queries_total）。等 10 分钟是为了排除发版后第一次请求的冷启动。"
+
+      # 慢查询条数。0.2 次/秒 ≈ 每分钟 12 条，对单机 MySQL 已经是需要看的量。
+      - alert: ForumSlowQuerySpike
+        expr: rate(gorm_slow_queries_total{job="forum-backend"}[5m]) > 0.2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "慢查询 {{ $value | humanize }} 次/秒"
+          description: "阈值来自 mysql.slow_query_ms（默认 200ms）。日志里搜「慢查询」能拿到完整 SQL 与 elapsed_ms，配合 EXPLAIN 看索引是否被绕过。"
+
+  # ===== 缓存：命中率掉了，压力就直接落到 MySQL =====
+  - name: forum-cache
+    rules:
+      # 命中率 = hit / (hit + miss)。
+      # empty_hit（缓存了「不存在」的标记）不算命中也不算未命中，故意排除在外。
+      # clamp_min 防止新实例刚起来还没有任何 miss 时除零得到 NaN。
+      - alert: ForumCacheHitRateLow
+        expr: |
+          (
+            sum(rate(article_cache_events_total{job="forum-backend",event="hit"}[10m]))
+            /
+            clamp_min(
+              sum(rate(article_cache_events_total{job="forum-backend",event=~"hit|miss"}[10m])),
+              0.001
+            )
+          ) < 0.6
+          and on()
+          (
+            sum(rate(article_cache_events_total{job="forum-backend",event=~"hit|miss"}[10m])) > 0.05
+          )
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "文章缓存命中率跌破 60%（当前 {{ $value | humanizePercentage }}）"
+          description: "可能是 TTL 到期后集中失效、Redis 内存被淘汰，或者只是流量太小（分母太小）。先看 article_cache_events_total 里 write 与 degrade 的比例。"
+
+      # 降级意味着「Redis 出错，直接回源 MySQL」。哪怕只有零星几次也说明 Redis 不稳。
+      - alert: ForumCacheDegraded
+        expr: rate(article_cache_events_total{job="forum-backend",event="degrade"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "缓存降级在进行（{{ $value | humanize }} 次/秒）"
+          description: "Redis 读写超时或连接池耗尽。接口还能用（降级到 MySQL），但 MySQL 压力会成倍上涨，且响应时间会明显变长。"
+
+  # ===== 容量：慢慢漏的才最容易被忽略 =====
+  - name: forum-capacity
+    rules:
+      # goroutine 只增不减通常意味着某个读循环 / 连接没被回收。
+      # 正常单机几十到一两百，1000 是个宽松的起点。
+      - alert: ForumGoroutineHigh
+        expr: go_goroutines{job="forum-backend"} > 1000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "goroutine 数 {{ $value | humanize }}，持续 15 分钟高于 1000"
+          description: "先看是否 WebSocket 连接泄漏（对比 ws_online_connections），再看网络请求有没有超时缺失。持续缓慢上涨比瞬间冲高更危险。"
+
+      # 常驻内存。Go 的 GC 会让 RSS 有锯齿，但基线不断抬高就是泄漏。
+      - alert: ForumMemoryHigh
+        expr: process_resident_memory_bytes{job="forum-backend"} > 512 * 1024 * 1024
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "常驻内存 {{ $value | humanize1024 }}B 超过 512MiB"
+          description: "对照 go_memstats_heap_inuse_bytes 判断是堆在涨还是栈/映射在涨。单机 512MiB 对小论坛已经很宽，触发时先确认是不是一次性大批量查询把结果集读进了内存。"

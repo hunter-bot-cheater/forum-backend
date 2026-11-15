@@ -16,7 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -29,20 +29,41 @@ import (
 	"forum-backend/internal/realtime"
 	"forum-backend/internal/router"
 	"forum-backend/pkg/jwt"
+	"forum-backend/pkg/logging"
 )
 
 // main 的职责只有装配和生命周期管理，业务逻辑一律不写在这里。
-// 顺序是：先建资源（配置、DB、Redis、JWT、Hub），再建路由，
+// 顺序是：先建资源（日志、配置、DB、Redis、JWT、Hub），再建路由，
 // 再起后台任务，最后跑 HTTP 服务并等退出信号收尾。
 func main() {
+	// 日志必须最先初始化：后面每一步失败都要靠它记下原因。
+	// 这一步之前出错的，只能用标准错误输出，因为此刻还没有 logger。
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("加载配置失败: %v", err)
+		fmt.Fprintf(os.Stderr, "加载配置失败: %v\n", err)
+		os.Exit(1)
 	}
+
+	_, closeLog, err := logging.Setup(logging.Config{
+		Level:   cfg.Log.Level,
+		Format:  cfg.Log.Format,
+		Console: cfg.Log.Console,
+		File: logging.FileConfig{
+			Path:       cfg.Log.File.Path,
+			MaxSizeMB:  cfg.Log.File.MaxSizeMB,
+			MaxBackups: cfg.Log.File.MaxBackups,
+			MaxAgeDays: cfg.Log.File.MaxAgeDays,
+		},
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "初始化日志失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer closeLog()
 
 	db, err := config.InitDB(&cfg.MySQL)
 	if err != nil {
-		log.Fatalf("连接数据库失败: %v", err)
+		exitOnError("连接数据库失败", err)
 	}
 	sqlDB, err := db.DB()
 	if err == nil {
@@ -53,21 +74,21 @@ func main() {
 	// 关掉时这里只打一行日志，避免运维以为表已经建好了却查不到表。
 	if cfg.MySQL.AutoMigrate {
 		if err := config.Migrate(db); err != nil {
-			log.Fatalf("自动迁移失败: %v", err)
+			exitOnError("自动迁移失败", err)
 		}
 	} else {
-		log.Printf("mysql.auto_migrate=false，已跳过自动建表；部署前请先执行 migrate 命令")
+		slog.Warn("mysql.auto_migrate=false，已跳过自动建表；部署前请先执行 migrate 命令")
 	}
 
 	rdb, err := config.InitRedis(&cfg.Redis)
 	if err != nil {
-		log.Fatalf("连接 Redis 失败: %v", err)
+		exitOnError("连接 Redis 失败", err)
 	}
 	defer rdb.Close()
 
 	jwtManager, err := jwt.NewManager(cfg.JWT.Secret, cfg.JWT.Expire)
 	if err != nil {
-		log.Fatalf("JWT 配置错误: %v", err)
+		exitOnError("JWT 配置错误", err)
 	}
 
 	// Hub 必须全进程唯一：HTTP 侧推送和 WS 侧注册都指向同一个实例，
@@ -84,9 +105,10 @@ func main() {
 		RateLimit:      cfg.RateLimit,
 		TrustedProxies: cfg.Server.TrustedProxies,
 		CORSOrigins:    cfg.CORS.AllowedOrigins,
+		Metrics:        cfg.Metrics,
 	})
 	if err != nil {
-		log.Fatalf("注册路由失败: %v", err)
+		exitOnError("注册路由失败", err)
 	}
 
 	// 一个信号源同时管 HTTP server 与两个后台 worker。
@@ -125,16 +147,27 @@ func main() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
-			log.Printf("shutdown server: %v", err)
+			slog.Error("shutdown server", "error", err)
 		}
 	}()
 
-	log.Printf("server start at %s", addr)
+	slog.Info("server start", "addr", addr, "log_format", cfg.Log.Format, "log_file", cfg.Log.File.Path)
 	// Shutdown 会让 ListenAndServe 返回 ErrServerClosed，那是正常退出，不是故障。
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("启动服务失败: %v", err)
+		exitOnError("启动服务失败", err)
 	}
 
 	// 等两个 worker 收完手，再让 main 返回、defer 关连接池。
 	wg.Wait()
+}
+
+// exitOnError 记一条 error 日志后退出进程。
+//
+// 启动阶段的失败没有恢复路径，能做的只是留下可查的记录并让托管方重启。
+// 不用 log.Fatal：日志已经统一走 slog，混用两套格式会让采集端拿到非 JSON 行；
+// 也正因为直接 os.Exit，前面的 defer（关日志文件、关连接池）不会执行——
+// 进程结束时操作系统会回收句柄，日志 writer 没有缓冲，不会丢最后一条。
+func exitOnError(msg string, err error) {
+	slog.Error(msg, "error", err)
+	os.Exit(1)
 }

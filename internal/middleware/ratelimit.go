@@ -2,13 +2,14 @@ package middleware
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 
+	"forum-backend/internal/metrics"
 	"forum-backend/pkg/response"
 )
 
@@ -93,7 +94,8 @@ func RateLimit(rdb *redis.Client, cfg RateLimitConfig) (gin.HandlerFunc, error) 
 		if err != nil {
 			// Redis 抖动时降级放行，避免一次依赖故障演变成全站 500。
 			// 代价是这段时间限流失效，所以要打日志，别静默降级。
-			log.Printf("rate limit check %s: %v", key, err)
+			metrics.RateLimitErrors.Inc()
+			slog.WarnContext(c.Request.Context(), "rate limit check", "key", key, "error", err)
 			c.Next()
 			return
 		}
@@ -103,6 +105,7 @@ func RateLimit(rdb *redis.Client, cfg RateLimitConfig) (gin.HandlerFunc, error) 
 		retryMs := res[1].(int64)
 
 		if allowed == 0 {
+			metrics.HTTPRateLimited.Inc()
 			// Retry-After 单位是秒，Lua 给的是毫秒；向上取整，避免算出 0 秒让客户端立刻重试。
 			retrySec := (retryMs + 999) / 1000
 			c.Header("Retry-After", strconv.FormatInt(retrySec, 10))

@@ -5,8 +5,9 @@ package article
 import (
 	"math/rand/v2"
 	"strconv"
-	"sync/atomic"
 	"time"
+
+	"forum-backend/internal/metrics"
 )
 
 // ===== 缓存 key =====
@@ -64,24 +65,29 @@ const articleEmptySentinel = "__ARTICLE_NOT_FOUND__"
 
 // ===== 计数器 =====
 
-// cacheMetrics 用原子计数器记录缓存路径上发生了什么。
-// 字段必须用 atomic.Int64：Detail 会被多个请求并发调用，
-// 普通 int64 的 ++ 不是原子操作，go test -race 会直接报数据竞争。
-type cacheMetrics struct {
-	Hits      atomic.Int64 // 命中真实文章 JSON 的次数
-	EmptyHits atomic.Int64 // 命中空标记、直接判定不存在的次数
-	Misses    atomic.Int64 // 未命中（含 Redis 故障降级）的次数
-	Loads     atomic.Int64 // 真正回源 MySQL 的次数，验证击穿时看这个
-	Shares    atomic.Int64 // 被 singleflight 合并掉的请求数
-	Degrades  atomic.Int64 // Redis 读写出错、走降级的次数
-	Writes    atomic.Int64 // 成功回填缓存的次数
-}
+// 缓存事件统一记到 metrics.ArticleCacheEvents 上，标签 event 的取值见下面这组常量。
+//
+// 为什么不再各自维护一份原子计数器：这些数字需要同时出现在两处——
+// /metrics 给监控抓取，CacheStats() 给本地验收。两套计数会慢慢对不上，
+// 所以只记一份，验收时用 metrics.CounterValue 从指标里读回来。
+//
+// 为什么打标签而不是七个独立计数器：算命中率要 hit 与 miss 相除，
+// 带 event 标签后一条 PromQL 就能算（sum by (event)），也不用给每个事件起名字。
+const (
+	cacheEventHit      = "hit"       // 命中真实文章 JSON
+	cacheEventEmptyHit = "empty_hit" // 命中空标记，直接判定不存在
+	cacheEventMiss     = "miss"      // 未命中（含 Redis 故障降级）
+	cacheEventLoad     = "load"      // 真正回源 MySQL，验证击穿时看这个
+	cacheEventShare    = "share"     // 被 singleflight 合并掉的请求数
+	cacheEventDegrade  = "degrade"   // Redis 读写出错、走降级的次数
+	cacheEventWrite    = "write"     // 成功回填缓存的次数
+)
 
-// CacheStats 是缓存计数器的只读快照，供调试接口和测试读取。
-// 故意用普通 int64：调用方拿到的是一份拷贝，读的时候不会看到半成品，
-// 也不用知道 atomic 怎么用。
-// json tag 写成小写下划线，是因为调试接口会直接把它序列化出去，
-// Go 默认导出的字段名是 Hits、EmptyHits 这种大写形式，不适合当 API 字段。
+// CacheStats 是缓存计数器的只读快照，供本地验收和调试接口读取。
+//
+// 注意口径：计数器是全进程共享的（/metrics 只有一份），不按 ArticleService 实例区分。
+// 生产上没有区别——一个进程就一个实例；测试里实例会更多，读到的是累计值。
+// json tag 写成小写下划线，是因为调试接口会直接把它序列化出去。
 type CacheStats struct {
 	Hits      int64 `json:"hits"`
 	EmptyHits int64 `json:"empty_hits"`
@@ -92,17 +98,16 @@ type CacheStats struct {
 	Writes    int64 `json:"writes"`
 }
 
-// snapshot 把原子计数器读成一份普通结构体。
-// 每个字段单独 Load，严格说这不是同一个瞬间的快照；
-// 对看趋势、做验收断言够用，要精确一致得另加锁。
-func (m *cacheMetrics) snapshot() CacheStats {
-	var s CacheStats
-	s.Hits = m.Hits.Load()
-	s.EmptyHits = m.EmptyHits.Load()
-	s.Misses = m.Misses.Load()
-	s.Loads = m.Loads.Load()
-	s.Shares = m.Shares.Load()
-	s.Degrades = m.Degrades.Load()
-	s.Writes = m.Writes.Load()
-	return s
+// snapshot 从指标里读出当前计数。
+// 每个值单独读，严格说不是同一瞬间的快照；对看趋势、做验收断言够用。
+func snapshot() CacheStats {
+	return CacheStats{
+		Hits:      int64(metrics.CounterValue(metrics.ArticleCacheEvents, cacheEventHit)),
+		EmptyHits: int64(metrics.CounterValue(metrics.ArticleCacheEvents, cacheEventEmptyHit)),
+		Misses:    int64(metrics.CounterValue(metrics.ArticleCacheEvents, cacheEventMiss)),
+		Loads:     int64(metrics.CounterValue(metrics.ArticleCacheEvents, cacheEventLoad)),
+		Shares:    int64(metrics.CounterValue(metrics.ArticleCacheEvents, cacheEventShare)),
+		Degrades:  int64(metrics.CounterValue(metrics.ArticleCacheEvents, cacheEventDegrade)),
+		Writes:    int64(metrics.CounterValue(metrics.ArticleCacheEvents, cacheEventWrite)),
+	}
 }

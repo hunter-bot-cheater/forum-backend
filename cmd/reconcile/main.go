@@ -14,7 +14,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"time"
 
@@ -35,15 +35,17 @@ func run() int {
 	timeout := flag.Duration("timeout", 30*time.Second, "整体超时")
 	flag.Parse()
 
+	// 这里刻意不调用 logging.Setup：报告 JSON 要占住 stdout 给脚本消费，
+	// 日志必须走 stderr（slog 默认就是 stderr 文本格式），混在一起会让解析失败。
 	cfg, err := config.Load()
 	if err != nil {
-		log.Printf("加载配置失败: %v", err)
+		slog.Error("加载配置失败", "error", err)
 		return 2
 	}
 
 	db, err := config.InitDB(&cfg.MySQL)
 	if err != nil {
-		log.Printf("连接数据库失败: %v", err)
+		slog.Error("连接数据库失败", "error", err)
 		return 2
 	}
 	sqlDB, err := db.DB()
@@ -53,7 +55,7 @@ func run() int {
 
 	rdb, err := config.InitRedis(&cfg.Redis)
 	if err != nil {
-		log.Printf("连接 Redis 失败: %v", err)
+		slog.Error("连接 Redis 失败", "error", err)
 		return 2
 	}
 	defer rdb.Close()
@@ -65,7 +67,7 @@ func run() int {
 
 	rep, err := rec.Check(ctx, *topN)
 	if err != nil {
-		log.Printf("对账失败: %v", err)
+		slog.Error("对账失败", "error", err)
 		return 2
 	}
 
@@ -84,7 +86,7 @@ func run() int {
 	// 报告本身记录的是修正前的快照，打印出来仍然能对照修了什么。
 	fixed, err := rec.Fix(ctx, rep)
 	if err != nil {
-		log.Printf("修正失败: %v（已修 %d 个）", err, fixed)
+		slog.Error("修正失败", "error", err, "fixed", fixed)
 		return 2
 	}
 
@@ -95,7 +97,7 @@ func run() int {
 	// 否则说明修正逻辑本身有问题，或者有并发写入在持续制造漂移。
 	again, err := rec.Check(ctx, *topN)
 	if err != nil {
-		log.Printf("修正后复查失败: %v", err)
+		slog.Error("修正后复查失败", "error", err)
 		return 2
 	}
 	fmt.Println("after fix: " + again.Summary())
@@ -110,7 +112,7 @@ func run() int {
 func printReport(rep *hot.ReconcileReport) {
 	pretty, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {
-		log.Printf("序列化报告失败: %v", err)
+		slog.Error("序列化报告失败", "error", err)
 		return
 	}
 	fmt.Println(string(pretty))

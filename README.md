@@ -8,7 +8,7 @@
 - 文章与评论链路：service 方法、`internal/handler/dto.go` 的响应结构体、`article.go`、`comment.go`、`errors.go`、`paging.go` 均已落盘，`internal/router/router.go` 已注册列表、详情、评论列表等读路由与 JWT 保护的写路由。文章与评论的四个写接口都已在仓库源码实现，service 与 handler 的方法名统一成动词式（`Create` / `List` / `Detail` / `Delete`），对照表见 03 章 1.2。判断完成度用「路由已注册且验收通过」，别用「文件已存在」。
 - `main.go` 已调用 `config.InitRedis`，`router.New` 的签名是 `New(db *gorm.DB, jwtManager *jwt.Manager, rdb *redis.Client)`。Redis 是启动硬依赖，连不上会直接退出。三层装配顺序见 03 章 7.2。仓库里没有 `/ping` 路由。
 - 缓存已落地：详情接口的 Cache Aside 读路径（03 章 7.3）、写路径缓存失效（`Create` 与 `Delete` 在数据库写入或事务提交成功后调用 `InvalidateDetailCache`）、`InitRedis` 在 `Ping` 失败分支调用 `rdb.Close()`。旧版 README、00 章与 03 章 7.6 把这三项写成「待实现」或「还缺」，2026-11-07 核对源码后已更正。
-- 已落盘：四个写接口（03 章 6.6、6.7）、缓存工程化加固（TTL 抖动、空值缓存、singleflight 请求合并、降级超时与连接池、原子计数器，见 `internal/service/article_cache.go` 与 03a 章）。未完成：第 3 周点赞、热榜、限流的源码，第 3 周源码由你按 04 章十步跟做逐步落盘，状态以工作树为准，落盘并验收后才算具备；生产部署所需的迁移已提供独立的 `migrate` 命令（`cmd/migrate`，见「生产配置与迁移」），服务管理、监控与备份流程仍未做。文档里的设计要经过实现与验收才算完成。
+- 已落盘：四个写接口（03 章 6.6、6.7）、缓存工程化加固（TTL 抖动、空值缓存、singleflight 请求合并、降级超时与连接池、指标计数，见 `internal/article/cache.go` 与 03a 章，路径已从旧的 `internal/service` 迁到 `internal/article`）。未完成：第 3 周点赞、热榜、限流的源码，第 3 周源码由你按 04 章十步跟做逐步落盘，状态以工作树为准，落盘并验收后才算具备；生产部署所需的迁移已提供独立的 `migrate` 命令（`cmd/migrate`，见「生产配置与迁移」），可观测性已提供结构化日志（`pkg/logging`，见「日志」）、`/metrics` 指标端点（见「指标」）与配套的抓取与告警样例（`deploy/prometheus.yml`、`deploy/alerts.yml`，见「监控告警」），服务管理与备份流程仍未做。文档里的设计要经过实现与验收才算完成。
 - `docs/03a-第2周进阶-Redis缓存工程化加固.md` 是缓存加固的独立进阶专题，接在 03 章第 7 节之后，不占用周次；第 3 周仍是 04 章，第 4 周仍是 05 章。它同时修正了前面章节的进度快照。它记录的 `gorm.ErrRecordNotFound` 映射缺陷现已在源码修好，查不存在的文章与删后 GET 详情都返回 404。
 - `docs/04a-第3周进阶-异步消息与站内通知.md` 与 `docs/04b-第3周进阶-Swagger-API文档与契约.md` 是第 3 周之后的两个进阶专题，同样不占周次。前者用 Transactional Outbox 加 Redis Stream 做点赞、评论后的站内通知，后者用 swaggo 从 handler 注解生成 Swagger 2.0 文档与可交互 UI。两章只给可落盘代码与验收步骤，源码状态以工作树为准。
 - `docs/04c-第3周进阶-WebSocket实时通知.md`、`docs/04d-第3周进阶-敏感词过滤与前缀树.md`、`docs/04e-第3周进阶-全文搜索与倒排索引.md` 是同一系列的三个进阶专题，接在 04b 之后，同样不占周次。04c 把异步通知升级成服务端主动推送，含连接登记、心跳、慢客户端剔除与关停处理；04d 自己实现前缀树做敏感词替换，附 benchmark 实测与朴素做法的对比结论；04e 用第二个消费组把文章同步进 Meilisearch，实现关键词搜索与相关性排序。三章都只给可落盘代码，源码状态以工作树为准。
@@ -83,7 +83,7 @@ curl.exe -i http://localhost:8080/readyz    # 探测 MySQL 与 Redis，任一失
 
 ## 生产配置与迁移
 
-`config/config.production.yaml` 是生产模板（不含任何真实凭据）。与本机配置的差异只有四处：`mysql.auto_migrate` 关掉、限流放大、`trusted_proxies` 指向本机 Nginx、`ws.allowed_origins` 换成真实域名。密码与密钥一律用环境变量给，不写进文件：
+`config/config.production.yaml` 是生产模板（不含任何真实凭据）。与本机配置的差异只有五处：`mysql.auto_migrate` 关掉并放大慢查询阈值、限流放大、`trusted_proxies` 指向本机 Nginx、`ws.allowed_origins` 换成真实域名、日志落盘。密码与密钥一律用环境变量给，不写进文件：
 
 ```bash
 export MYSQL_PASSWORD=...
@@ -98,9 +98,117 @@ CONFIG_PATH=/etc/forum/config.yaml GIN_MODE=release ./forum-server    # 再启�
 
 `make build` 同时产出 `bin/forum-server` 与 `bin/forum-migrate`；本机是 Windows 时用 `make build-release` 交叉编译 Linux 版（`-trimpath -ldflags="-s -w"`），再传到服务器。
 
+## 日志
+
+日志统一走 `log/slog`（`pkg/logging` 负责组装），默认 JSON 打控制台，字段固定为 `time / level / msg` 加业务字段，请求链路上的每条日志还会自动带 `request_id`。
+
+```json
+{"time":"2026-11-15T22:31:04.512+08:00","level":"INFO","msg":"http request","method":"GET","path":"/api/articles/12","status":200,"latency_ms":3.4,"size":312,"client_ip":"127.0.0.1","route":"/api/articles/:id","request_id":"9f2c..."}
+```
+
+三类日志的分工：
+
+| 来源 | 内容 | 位置 |
+|---|---|---|
+| 访问日志 | 方法、路径、路由模板、状态码、耗时、响应大小 | `internal/middleware/accesslog.go` |
+| 慢查询 | 超过 `mysql.slow_query_ms`（默认 200ms）的 SQL 与耗时 | `internal/config/gormlog.go` |
+| 业务错误 | 操作名、路由、错误原文；panic 额外带堆栈 | `httputil.LogRequestError`、`handlePanic` |
+
+级别按状态码决定：2xx/3xx 记 `INFO`，4xx 记 `WARN`，5xx 记 `ERROR`，可以直接按级别配告警。`/healthz`、`/readyz`、`/metrics` 不记访问日志，否则探测与抓取的频率会淹掉业务日志。
+
+要落盘（裸机、内网穿透这类没有 journald 的场景）就配 `log.file.path`，写满 `max_size_mb` 切分成 `app.log.1`、`.2`，按 `max_backups` 与 `max_age_days` 控制总量：
+
+```yaml
+log:
+  level: info          # debug / info / warn / error
+  format: json         # 本机排查可改 text
+  console: true
+  file:
+    path: /var/log/forum/app.log
+    max_size_mb: 50    # 50MB × 8 份 ≈ 400MB 上限
+    max_backups: 7
+    max_age_days: 30
+```
+
+注意两点：日志文件同时只能被一个进程写，所以 `forum-server` 落盘、`forum-migrate`/`forum-reconcile` 只打控制台；`forum-reconcile` 的报告要占 stdout 给脚本消费，它的日志走 stderr，别混着看。
+
+```powershell
+# 提交前排查：只看错误，且只看某个 request_id
+Get-Content logs\app.log | Select-String '"level":"ERROR"'
+```
+
+## 指标
+
+`GET /metrics` 用 `prometheus/client_golang` 采集，Prometheus 文本格式（0.0.4），支持 gzip 与 OpenMetrics 协商。挂根路径、不在 `/api` 下，所以不限流、不占业务令牌桶；`metrics.enabled: false` 时完全不注册这条路由（返回统一 404，而不是空指标）。
+
+指标分两层：
+
+| 来源 | 指标 | 用途 |
+|---|---|---|
+| `internal/metrics/builtin.go` | `http_requests_total{method,route,status}` | 路由与状态码维度的流量，`route` 是模板（`/api/articles/:id`），不会随文章数发散 |
+| | `http_request_duration_seconds{method,route}` | 耗时直方图，5ms~5s 十个桶，p95/p99 在 Prometheus 侧用 `histogram_quantile` 算 |
+| | `http_panics_total`、`http_rate_limited_total`、`rate_limit_errors_total` | 三个「非 0 就该看一眼」的计数器 |
+| | `gorm_slow_queries_total`、`gorm_query_errors_total` | SQL 层信号，慢查询阈值来自 `mysql.slow_query_ms` |
+| | `article_cache_events_total{event}` | 缓存事件（hit/miss/load/share/degrade/write），命中率 = hit /(hit+miss) |
+| | `ws_online_users`、`ws_online_connections` | 抓取时向 Hub 现读，不在连接建立/断开的热路径上埋点 |
+| 库自带采集器 | `go_*`、`process_*` | goroutine 数、堆内存、GC、CPU、常驻内存、fd 数等，字段名和社区 Grafana 看板一致 |
+
+想算 p95 就写 `histogram_quantile(0.95, sum by (le, route) (rate(http_request_duration_seconds_bucket[5m])))`。
+
+生产上默认只允许本机或内网抓取（`deploy/nginx.conf.example` 里 `/metrics` 配了 `allow`/`deny`）。跨网段抓取时给 `metrics.token` 一个随机值，抓取请求带上 `Authorization: Bearer <token>`：指标里有路由清单和流量规模，裸奔在公网等于把接口地图送人。token 用环境变量给，别写进文件：
+
+```bash
+METRICS_TOKEN=xxxxxxxx ./forum-server-linux
+curl -H "Authorization: Bearer xxxxxxxx" http://127.0.0.1:8080/metrics
+```
+
+指标只是原料，「要不要半夜叫醒人」得靠告警规则判断，见下一节。
+
+## 监控告警（样例）
+
+`deploy/prometheus.yml` 是抓取配置，`deploy/alerts.yml` 是告警规则，两个文件配套使用：
+
+```bash
+# 服务器上
+cp deploy/prometheus.yml /etc/prometheus/prometheus.yml
+cp deploy/alerts.yml     /etc/prometheus/alerts.yml
+promtool check config /etc/prometheus/prometheus.yml   # 语法 + 规则一起校验
+systemctl reload prometheus                            # 抓取与规则都支持热加载
+```
+
+抓取配置里只有两处要改：`targets` 换成后端实际地址，`credentials_file` 的路径按需调整（后端 `metrics.token` 为空就把整段 `authorization` 删掉，否则会带一个没人校验的头）。
+
+12 条规则按「出了什么问题」分组，全部只用 `/metrics` 已有的指标，不需要额外装 exporter：
+
+| 分组 | 规则 | 触发条件 | 级别 |
+|---|---|---|---|
+| 可用性 | `ForumDown` | 抓取失败持续 1 分钟 | critical |
+| | `ForumNotReady` | `/readyz` 非 2xx 持续 2 分钟（需 blackbox exporter，默认注释掉） | critical |
+| 错误 | `ForumHighErrorRatio` | 5xx 占比 > 5%，且流量 > 0.2 req/s，持续 5 分钟 | critical |
+| | `ForumPanics` | 10 分钟内出现 panic | critical |
+| | `ForumRateLimitFailing` | 限流器持续故障（fail-open 裸奔） | warning |
+| | `ForumGormErrors` | SQL 错误 > 0.1 次/秒，持续 5 分钟 | warning |
+| 延迟 | `ForumHighLatencyP95` | p95 > 500ms 持续 10 分钟 | warning |
+| | `ForumSlowQuerySpike` | 慢查询 > 0.2 次/秒，持续 5 分钟 | warning |
+| 缓存 | `ForumCacheHitRateLow` | 命中率 < 60% 持续 15 分钟 | warning |
+| | `ForumCacheDegraded` | 出现降级（Redis 出错回源） | warning |
+| 容量 | `ForumGoroutineHigh` | goroutine > 1000 持续 15 分钟 | warning |
+| | `ForumMemoryHigh` | 常驻内存 > 512MiB 持续 15 分钟 | warning |
+
+几个刻意的处理：
+
+- **低流量闸门**。`ForumHighErrorRatio` 与 `ForumCacheHitRateLow` 后面都跟了 `and on() (...)`，要求 QPS 超过阈值才算。否则刚发版时 2 个请求里 1 个 500，占比 50%，半夜就会响。
+- **`ForumPanics` 用 `increase` 不用 `rate`**。次数少的时候 `rate` 会算成 `0.0017` 这种值，看了一眼以为是噪声；`increase` 直接给出「发生过 1 次」。
+- **`ForumDown` 用 `up`**。这是 Prometheus 自己生成的合成指标，抓不到就是 0，不依赖后端任何代码。
+- **`ForumNotReady` 需要黑盒探测**。`/metrics` 能抓到只证明「进程能响应 HTTP」，看不见 MySQL / Redis。要把 `/readyz` 的 503 变成指标，得跑一个 blackbox_exporter，`prometheus.yml` 里那段注释掉的 job 就是配置，取消注释后规则才生效（不配时规则永远无数据，不误报也不报警）。
+
+阈值是按小规模单机部署挑的起点，真正的数字要拿 `docs/05a` 的压测结论来定。定太低天天响、定太高真出事不响，两种都等于没有告警。
+
+样例没有覆盖的部分：Alertmanager 的分组路由与静默（现在只配了 `targets`，告警会全部轰到默认 receiver）、Grafana 看板 JSON、以及 Prometheus 自身挂掉时的外部兜底（自监控告警发不出去，得靠另一个监控系统看它）。
+
 ## 服务器部署（样例）
 
-`deploy/nginx.conf.example` 是单机同域反代的样例：Nginx 托管 `web/dist`，把 `/api` 转发到本机 8080，并单独处理 `/api/ws/` 的 WebSocket 升级。文件头部的注释列了必改项，包括 `server_name`、`root`、证书路径和后端 `server.trusted_proxies`。`/healthz` 与 `/readyz` 也单独代理了，否则会落到 SPA 回退规则上、返回 200 但内容是一张网页。
+`deploy/nginx.conf.example` 是单机同域反代的样例：Nginx 托管 `web/dist`，把 `/api` 转发到本机 8080，并单独处理 `/api/ws/` 的 WebSocket 升级。文件头部的注释列了必改项，包括 `server_name`、`root`、证书路径和后端 `server.trusted_proxies`。`/healthz`、`/readyz`、`/metrics` 也单独代理了，否则会落到 SPA 回退规则上、返回 200 但内容是一张网页。
 
 ```bash
 cd web && npm run build                 # 前端产物在 web/dist
@@ -108,7 +216,7 @@ make build-release                      # 交叉编译 bin/forum-server-linux �
 GIN_MODE=release ./forum-server-linux    # 生产模式：关闭 Swagger，跳过自动迁移
 ```
 
-同域部署时 `VITE_API_BASE_URL` 保持默认 `/api`，后端的 `cors.allowed_origins` 留空即可。前后端拆到不同域名时，才需要放行完整 Origin 并把 `VITE_API_BASE_URL` 改成完整地址。样例只覆盖 Nginx 这一层，进程守护、证书申请、备份与告警仍需另外补。
+同域部署时 `VITE_API_BASE_URL` 保持默认 `/api`，后端的 `cors.allowed_origins` 留空即可。前后端拆到不同域名时，才需要放行完整 Origin 并把 `VITE_API_BASE_URL` 改成完整地址。样例只覆盖 Nginx 这一层，进程守护、证书申请与数据库备份仍需另外补；告警规则见上一节的 `deploy/alerts.yml`。
 
 ## 注册和登录接口（当前可用）
 

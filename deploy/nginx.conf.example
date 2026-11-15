@@ -100,6 +100,18 @@ server {
         access_log off;
     }
 
+    # 指标抓取端点，同样在根路径，不单独代理就会返回 index.html。
+    # 默认只允许抓取方在本机或内网访问：指标含路由清单与流量规模，
+    # 暴露在公网等于给扫描器报接口地图。跨机器抓取时把来源网段加进 allow。
+    # 抓取频率高，access_log 关掉；后端已经不会为 /metrics 单独打访问日志。
+    location = /metrics {
+        allow 127.0.0.1;
+        allow 10.0.0.0/8;
+        deny all;
+        proxy_pass http://forum_api;
+        access_log off;
+    }
+
     # SPA 刷新子路由时回退到 index.html，交给 vue-router 处理。
     location / {
         try_files $uri $uri/ /index.html;

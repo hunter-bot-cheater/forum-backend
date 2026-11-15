@@ -3,7 +3,7 @@
 package realtime
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 )
 
@@ -96,7 +96,7 @@ func (h *Hub) Push(userID uint, msg PushMessage) {
 		// 发件箱满了，说明对端长时间读不动。
 		// 直接断开它，让浏览器重连后靠 HTTP 接口补齐数据，
 		// 比在内存里给它无限排队安全得多。
-		log.Printf("drop slow websocket client user=%d", c.userID)
+		slog.Warn("drop slow websocket client", "user_id", c.userID)
 		c.Close()
 		h.Unregister(c)
 	}

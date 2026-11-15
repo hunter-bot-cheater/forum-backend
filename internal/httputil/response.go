@@ -5,7 +5,7 @@ package httputil
 
 import (
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -65,6 +65,6 @@ func CurrentUserID(c *gin.Context) (uint, bool) {
 // 带上 request_id：用户拿着响应头里的编号来问，日志里能直接对上同一次请求。
 // 注意只记 operation 和 error，不要打印整个请求体，里面可能有密码和 token。
 func LogRequestError(c *gin.Context, operation string, err error) {
-	log.Printf("%s failed: request_id=%s method=%s route=%s error=%v",
-		operation, c.GetString(response.RequestIDKey), c.Request.Method, c.FullPath(), err)
+	slog.ErrorContext(c.Request.Context(), "request failed",
+		"operation", operation, "method", c.Request.Method, "route", c.FullPath(), "error", err)
 }

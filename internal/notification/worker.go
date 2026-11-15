@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -83,7 +83,7 @@ func (w *NotificationWorker) consume(ctx context.Context, start string) {
 		if ctx.Err() != nil {
 			return // 退出过程中断开连接，不当作故障
 		}
-		log.Printf("read group from %s: %v", start, err)
+		slog.ErrorContext(ctx, "read group", "from", start, "error", err)
 		return
 	}
 
@@ -91,11 +91,11 @@ func (w *NotificationWorker) consume(ctx context.Context, start string) {
 		for _, msg := range stream.Messages {
 			if err := w.handle(ctx, msg); err != nil {
 				// 不 ACK，消息留在 PEL，下一轮用 "0" 重新读到，相当于自动重试。
-				log.Printf("handle event %s: %v", msg.ID, err)
+				slog.ErrorContext(ctx, "handle event", "message_id", msg.ID, "error", err)
 				continue
 			}
 			if err := w.rdb.XAck(ctx, event.StreamKey, event.NotifyGroup, msg.ID).Err(); err != nil {
-				log.Printf("ack event %s: %v", msg.ID, err)
+				slog.ErrorContext(ctx, "ack event", "message_id", msg.ID, "error", err)
 			}
 		}
 	}
@@ -117,7 +117,7 @@ func (w *NotificationWorker) handle(ctx context.Context, msg redis.XMessage) err
 	if !ok {
 		// 没有注册 resolver 的事件，通知消费端不处理。
 		// 直接 ACK，避免未知类型永远留在 PEL 变成毒消息。
-		log.Printf("no notification resolver for %s, ack event %s", p.Type, msg.ID)
+		slog.WarnContext(ctx, "no notification resolver, ack event", "type", p.Type, "message_id", msg.ID)
 		return nil
 	}
 	// resolver 只负责回答「这条事件该通知谁、点进去跳哪」，不碰落库。

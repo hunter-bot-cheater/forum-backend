@@ -1,11 +1,14 @@
 package router
 
 import (
-	"log"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"runtime/debug"
 
 	"github.com/gin-gonic/gin"
 
+	"forum-backend/internal/metrics"
 	"forum-backend/internal/middleware"
 	"forum-backend/pkg/response"
 )
@@ -21,17 +24,15 @@ func installFallbacks(r *gin.Engine) {
 	r.HandleMethodNotAllowed = true
 
 	// 下面三个中间件的顺序不能乱：
-	// 1. Logger 记录每个请求的访问日志
-	// 2. RequestID 生成追踪号，必须排在 Recovery 前面，
-	//    否则 panic 日志里取不到 request_id，线上排查会断链
+	// 1. RequestID 生成追踪号，必须排在最前面，后面所有日志才能带上它；
+	//    也必须在 Recovery 之前，否则 panic 日志里取不到 request_id，线上排查会断链
+	// 2. AccessLog 记录访问日志，装在 Recovery 外面才能记到 panic 被兜成 500 的结果
 	// 3. CustomRecovery 捕获 panic，换成我们的 handlePanic
 	//
-	// 探活接口不进访问日志：它们会被外部每隔几秒调一次，
-	// 一天几万条 ok 日志会把真正有用的业务日志冲掉。
-	r.Use(gin.LoggerWithConfig(gin.LoggerConfig{
-		SkipPaths: []string{"/healthz", "/readyz"},
-	}))
+	// 探活与指标抓取不进访问日志：它们会被外部每隔几秒调一次，
+	// 一天几万条 ok 日志会把真正有用的业务日志冲掉，也会污染耗时分位数。
 	r.Use(middleware.RequestID())
+	r.Use(middleware.AccessLog("/healthz", "/readyz", "/metrics"))
 	r.Use(gin.CustomRecovery(handlePanic))
 
 	// 请求打到了不存在的路径。
@@ -48,9 +49,16 @@ func installFallbacks(r *gin.Engine) {
 // handlePanic 是 panic 的兜底出口：细节只留在服务端日志，客户端拿到通用文案加追踪号。
 // 不把 panic 内容返回给前端，是因为里面可能带 SQL 语句、文件路径这类内部信息。
 func handlePanic(c *gin.Context, recovered any) {
-	id := c.GetString(response.RequestIDKey)
-	log.Printf("panic recovered: request_id=%s method=%s path=%s error=%v",
-		id, c.Request.Method, c.Request.URL.Path, recovered)
+	// 计数和日志都记：计数用来配告警（不为 0 就说明有代码在崩），日志用来定位。
+	metrics.HTTPPanics.Inc()
+	// 用请求的 ctx 打日志，request_id 由 contextHandler 自动补上；
+	// 这里不再手写 request_id=%s，否则会重复两个同名字段。
+	slog.ErrorContext(c.Request.Context(), "panic recovered",
+		"method", c.Request.Method,
+		"path", c.Request.URL.Path,
+		"error", fmt.Sprint(recovered),
+		"stack", string(debug.Stack()),
+	)
 	response.ErrorWithCode(c, http.StatusInternalServerError, response.ErrCodeInternal, "服务暂时不可用，请稍后重试")
 	c.Abort()
 }

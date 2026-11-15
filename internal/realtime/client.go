@@ -2,7 +2,7 @@ package realtime
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -59,7 +59,7 @@ func (c *Client) Send(msg PushMessage) bool {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		// 序列化失败是服务端的代码问题，不该因此断掉客户端的连接，当作已处理。
-		log.Printf("marshal push message: %v", err)
+		slog.Error("marshal push message", "user_id", c.userID, "error", err)
 		return true
 	}
 

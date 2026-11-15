@@ -1,0 +1,77 @@
+# Prometheus 抓取配置样例（Prometheus 与后端同机或同内网）。
+#
+# 用法：
+#   1. 复制到 /etc/prometheus/prometheus.yml，同目录放 alerts.yml。
+#   2. promtool check config /etc/prometheus/prometheus.yml 校验语法。
+#   3. systemctl reload prometheus（抓取配置与规则都支持热加载，不用重启）。
+#
+# 后端侧前置条件：
+#   - config 里 metrics.enabled: true（默认就是 true）。
+#   - 设了 metrics.token 就必须配下面的 authorization 段，否则抓取全是 401。
+#   - /metrics 在根路径，若中间隔着 Nginx，需要 nginx.conf.example 里那段 allow/deny，
+#     否则请求会落到 SPA 回退、返回 200 但内容是一张网页。
+
+global:
+  # 抓取间隔。本项目的耗时是毫秒级，15s 足够看清趋势，
+  # 也不会让 /metrics 本身成为负担（一次抓取约 11KB 文本，gzip 后 3KB）。
+  scrape_interval: 15s
+  # 必须小于 scrape_interval：上一轮还没抓完就又发下一轮，会让目标的并发抓取叠加。
+  scrape_timeout: 10s
+  # 告警规则的求值间隔，和抓取间隔对齐，避免对同一批样本反复求值。
+  evaluation_interval: 15s
+  # 多环境或多实例时用来区分序列来源，Grafana 变量与告警里都能按它筛。
+  external_labels:
+    env: production
+    service: forum-backend
+
+# 告警规则文件，与 alerting 段是两件事：
+# rule_files 决定「什么时候算异常」，alerting 决定「异常发给谁」。
+rule_files:
+  - alerts.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["127.0.0.1:9093"]
+      # Alertmanager 没起也不影响抓取，只是告警发不出去；
+      # Prometheus 自己的 /alerts 页面仍能看到 Firing，排查时先看那里。
+
+scrape_configs:
+  # 后端业务指标。target 直接写后端地址，不要绕 Nginx：
+  # 多一跳就多一次 allow/deny 判断，还可能被 SPA 回退规则拦住，内网直连最省事。
+  - job_name: forum-backend
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets: ["127.0.0.1:8080"]
+    # 与后端 metrics.token 对应。token 单独放文件（chmod 600，只放一行 token 本身），
+    # 不写进这份会被提交的配置里。文件不存在或读不到时抓取会一直失败、ForumDown 会响。
+    # 后端 token 为空时把这三行删掉，否则会带一个后端根本不看的头，无害但容易误导。
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/forum_metrics_token
+
+  # Prometheus 自监控。它自己挂了就没人报警，所以这条通常保留。
+  - job_name: prometheus
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+
+  # 可选：黑盒探测。
+  # Prometheus 抓 /metrics 只能证明「进程能响应 HTTP」，看不见 MySQL / Redis 是否就绪；
+  # /readyz 的 503 要经过 blackbox_exporter 才能变成 probe_success 指标。
+  # 起一个 blackbox_exporter（默认 9115）后取消下面注释，alerts.yml 里的 ForumNotReady 才会生效。
+  # 没配这段时那条规则永远没有数据：不会误报，但也不会报警。
+  # - job_name: blackbox-readyz
+  #   metrics_path: /probe
+  #   params:
+  #     module: [http_2xx]
+  #   static_configs:
+  #     - targets: ["http://127.0.0.1:8080/readyz"]
+  #   relabel_configs:
+  #     # blackbox 的抓取地址要改成 exporter 自己，真正的探测目标塞进 __param_target。
+  #     - source_labels: [__address__]
+  #       target_label: __param_target
+  #     - source_labels: [__param_target]
+  #       target_label: instance
+  #     - target_label: __address__
+  #       replacement: 127.0.0.1:9115

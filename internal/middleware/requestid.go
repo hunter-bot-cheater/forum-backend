@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"forum-backend/pkg/logging"
 	"forum-backend/pkg/response"
 )
 
@@ -17,8 +18,9 @@ const HeaderRequestID = "X-Request-ID"
 const maxRequestIDLen = 64
 
 // RequestID 给每个请求分配一个追踪号。
-// 这个号会同时出现在三个地方：响应头（用户能拿到）、gin.Context（下游代码能取到）、
-// 错误响应体（前端报错弹窗能显示）。用户报障时报这个号，日志里能直接搜到同一次请求。
+// 这个号会同时出现在四个地方：响应头（用户能拿到）、gin.Context（下游代码能取到）、
+// 请求的 context.Context（日志自动带上）、错误响应体（前端报错弹窗能显示）。
+// 用户报障时报这个号，日志里能直接搜到同一次请求的全部记录。
 //
 // 允许客户端自带 X-Request-ID，方便前端或网关把一次用户操作的多个请求串起来；
 // 但必须先过滤，因为外来值最终会写进日志。
@@ -30,6 +32,10 @@ func RequestID() gin.HandlerFunc {
 		}
 		c.Set(response.RequestIDKey, id)
 		c.Header(HeaderRequestID, id)
+		// 除了 gin.Context，还要塞进请求的 ctx：
+		// service / worker / GORM 只拿得到 context.Context，看不到 gin.Context。
+		// 塞进去之后它们用 slog.ErrorContext 打日志就会自动带上 request_id。
+		c.Request = c.Request.WithContext(logging.WithRequestID(c.Request.Context(), id))
 		c.Next()
 	}
 }
