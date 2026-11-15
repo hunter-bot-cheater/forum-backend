@@ -20,40 +20,45 @@ type onlineStatsResp struct {
 	OnlineConns int `json:"online_conns"`
 }
 
-var allowedOrigins = map[string]bool{
-	"app.forum.com":  true, // 正式环境前端域名
-	"127.0.0.1:8080": true, // 本地测试
-}
-
-// upgrader 把普通 HTTP 请求升级成 WebSocket。
-// 只分配 1 KiB 读写缓冲区：这个连接只收心跳、发通知，不需要大块内存。
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	// 浏览器的同源策略管不住 WebSocket，握手是普通 HTTP 请求，
-	// 跨站页面可以带着 Cookie 发起。所以服务端必须自己校验 Origin。
-	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			// curl、Go 客户端这类非浏览器调用不带 Origin，放行。
-			return true
-		}
-		u, err := url.Parse(origin)
-		if err != nil {
-			return false
-		}
-		return allowedOrigins[u.Host]
-	},
-}
-
 // WSHandler 负责升级连接与在线状态查询。
 type WSHandler struct {
-	hub *realtime.Hub
-	jwt *jwt.Manager
+	hub            *realtime.Hub
+	jwt            *jwt.Manager
+	allowedOrigins map[string]bool
+	upgrader       websocket.Upgrader
 }
 
-func NewWSHandler(hub *realtime.Hub, jwtManager *jwt.Manager) *WSHandler {
-	return &WSHandler{hub: hub, jwt: jwtManager}
+func NewWSHandler(hub *realtime.Hub, jwtManager *jwt.Manager, origins []string) *WSHandler {
+	h := &WSHandler{
+		hub:            hub,
+		jwt:            jwtManager,
+		allowedOrigins: make(map[string]bool, len(origins)),
+	}
+	for _, origin := range origins {
+		h.allowedOrigins[origin] = true
+	}
+	h.upgrader = websocket.Upgrader{
+		// 这个连接只收心跳、发通知，1 KiB 读写缓冲够用。
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin:     h.checkOrigin,
+	}
+	return h
+}
+
+// 浏览器的同源策略管不住 WebSocket，握手是普通 HTTP 请求，
+// 跨站页面可以带着 Cookie 发起，所以服务端必须自己校验 Origin。
+func (h *WSHandler) checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		// curl、Go 客户端这类非浏览器调用不带 Origin。
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return h.allowedOrigins[u.Host]
 }
 
 // Notifications 把连接升级成 WebSocket，之后由 Hub 往这里推消息。
@@ -73,7 +78,7 @@ func (h *WSHandler) Notifications(c *gin.Context) {
 		return
 	}
 
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		// Upgrade 失败时它自己已经写过 HTTP 响应，这里只能记日志。
 		log.Printf("upgrade websocket: %v", err)

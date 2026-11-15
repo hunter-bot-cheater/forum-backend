@@ -14,6 +14,7 @@ import (
 	_ "forum-backend/api/swagger"
 	"forum-backend/internal/article"
 	"forum-backend/internal/comment"
+	"forum-backend/internal/config"
 	"forum-backend/internal/floor"
 	"forum-backend/internal/hot"
 	"forum-backend/internal/like"
@@ -26,13 +27,15 @@ import (
 )
 
 // Deps 是 router.New 需要的全部外部依赖。
-// 参数涨到四个以后改用结构体：新增依赖不用改所有调用点，
-// 也不会因为多传一个 hub 而去调整一长串参数顺序。
+// 用结构体传依赖，指针参数写反顺序时编译器发现不了。
 type Deps struct {
-	DB    *gorm.DB
-	JWT   *jwt.Manager
-	Redis *redis.Client
-	Hub   *realtime.Hub
+	DB             *gorm.DB
+	JWT            *jwt.Manager
+	Redis          *redis.Client
+	Hub            *realtime.Hub
+	WSOrigins      []string
+	RateLimit      config.RateLimitConfig
+	TrustedProxies []string
 }
 
 // New 注册全部路由。
@@ -61,10 +64,9 @@ func New(deps Deps) (*gin.Engine, error) {
 		r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler, ginSwagger.PersistAuthorization(true)))
 	}
 
-	// 不信任任何代理网段的 X-Forwarded-For。
-	// c.ClientIP() 退回 RemoteAddr，客户端伪造请求头无法绕过限流。
-	// 若部署在明确的反向代理后面，改成只信任那一段代理 IP。
-	if err := r.SetTrustedProxies(nil); err != nil {
+	// gin 默认信任所有代理，会让 X-Forwarded-For 伪造绕过按 IP 限流。
+	// 配置留空时退回 RemoteAddr；部署在反代后面才填那一段代理 IP。
+	if err := r.SetTrustedProxies(deps.TrustedProxies); err != nil {
 		return nil, fmt.Errorf("router: set trusted proxies: %w", err)
 	}
 	userSvc := user.NewUserService(deps.DB)
@@ -82,22 +84,24 @@ func New(deps Deps) (*gin.Engine, error) {
 
 	notificationSvc := notification.NewNotificationService(deps.DB)
 	notificationHandler := notification.NewNotificationHandler(notificationSvc)
-	wsHandler := ws.NewWSHandler(deps.Hub, deps.JWT)
+	wsHandler := ws.NewWSHandler(deps.Hub, deps.JWT, deps.WSOrigins)
 
 	// 抢楼活动共用一个 redis.Client：发号器就在 Redis 里。
 	floorSvc := floor.NewService(deps.DB, deps.Redis)
 	floorHandler := floor.NewHandler(floorSvc)
 
-	// 限流参数集中在 router 里给，middleware 不自己读配置。
-	rateCfg := middleware.RateLimitConfig{
-		Capacity:  10,
-		Rate:      2,
-		KeyPrefix: "forum:dev:rate:",
+	rateLimit, err := middleware.RateLimit(deps.Redis, middleware.RateLimitConfig{
+		Capacity:  deps.RateLimit.Capacity,
+		Rate:      deps.RateLimit.Rate,
+		KeyPrefix: deps.RateLimit.KeyPrefix,
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	api := r.Group("/api")
-	api.Use(limitBody(1 << 20)) // 1 MiB
-	api.Use(middleware.RateLimit(deps.Redis, rateCfg))
+	api.Use(limitBody(1 << 20))
+	api.Use(rateLimit)
 	{
 		api.POST("/register", userHandler.Register)
 		api.POST("/login", userHandler.Login)

@@ -20,7 +20,7 @@ import { useUserStore } from '@/store/modules/user'
 // 所以响应拦截器成功时直接返回 res.data（即真正的业务数据），
 // 页面里拿到的是 data 字段本身，不用再 res.data.data.data 层层取。
 const service: AxiosInstance = axios.create({
-  baseURL: '/api',
+  baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
   timeout: 10000,
 })
 

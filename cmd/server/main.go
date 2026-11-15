@@ -58,7 +58,15 @@ func main() {
 	}
 	hub := realtime.NewHub()
 
-	r, err := router.New(router.Deps{DB: db, JWT: jwtManager, Redis: rdb, Hub: hub})
+	r, err := router.New(router.Deps{
+		DB:             db,
+		JWT:            jwtManager,
+		Redis:          rdb,
+		Hub:            hub,
+		WSOrigins:      cfg.WS.AllowedOrigins,
+		RateLimit:      cfg.RateLimit,
+		TrustedProxies: cfg.Server.TrustedProxies,
+	})
 	if err != nil {
 		log.Fatalf("注册路由失败: %v", err)
 	}

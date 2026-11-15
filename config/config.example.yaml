@@ -1,13 +1,21 @@
 # 这是 config.yaml 的安全模板（会被提交到 Git）。
 # 使用方式：克隆仓库后，把本文件复制为 config/config.yaml，填上你自己的值。
 # config/config.yaml 已写入 .gitignore，不会上传，避免泄露密码。
-# 也可以用环境变量覆盖敏感项（见 internal/config/config.go 的 BindEnv）：
+# 配置文件里出现的键都能用同名环境变量覆盖，点号换成下划线：
 #   export MYSQL_PASSWORD=xxx
 #   export REDIS_PASSWORD=xxx
 #   export JWT_SECRET=xxx
+# 启动要求 JWT_SECRET 至少 32 个随机字符，公开占位值会被拒绝。
+# 键名带完整层级，例如 SERVER_TRUSTED_PROXIES=127.0.0.1,10.0.0.0/8，列表用逗号分隔。
 
 server:
   port: 8080
+  # gin 默认信任所有代理，会让 X-Forwarded-For 伪造绕过按 IP 限流，这里必须显式给值。
+  # 留空：c.ClientIP() 取直连 IP，最安全，本机开发用这个。
+  # 内网穿透：穿透客户端从本机连进来，填 "127.0.0.1"（IPv6 回环则填 "::1"）。
+  # 服务器 Nginx：填反代所在的 IP 或网段，例如 "127.0.0.1" 或 "10.0.0.0/8"。
+  # 只在确认反代会追加或覆盖真实客户端 IP 时才填；绝不要写 "0.0.0.0/0"。
+  trusted_proxies: []
 
 mysql:
   host: 127.0.0.1
@@ -25,8 +33,20 @@ redis:
   db: 0
 
 jwt:
-  # 必填且要足够长的随机字符串；也可用环境变量 JWT_SECRET 覆盖。
-  # 留空会导致启动直接报错（internal/config 强制校验），这是故意的，
-  # 防止用空密钥去签名 token（等于没有鉴权）。
-  secret: "replace_with_a_long_random_secret"
+  # 留空会让启动直接报错，用 JWT_SECRET 或本地填一个随机长串。
+  secret: ""
   expire: 24 # 小时
+
+# 令牌桶：capacity 是瞬时突发量，rate 是每秒补充的令牌数。
+# 穿透或压测时调大，避免多人共用出口 IP 时互相挤掉；生产按容量评估后再定。
+# key_prefix 是 Redis key 命名空间，换环境可换值，互不影响。
+rate_limit:
+  capacity: 10
+  rate: 2
+  key_prefix: "forum:dev:rate:"
+
+# 浏览器发的 Origin 是 http://host:port，这里只写 host:port，不带协议。
+# 拿到内网穿透域名后，在下面补一行，例如 "xxx.ngrok-free.app"。
+ws:
+  allowed_origins:
+    - "127.0.0.1:5173"

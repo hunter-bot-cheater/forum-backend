@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -15,8 +16,8 @@ import (
 // Capacity 是桶容量，也是允许的瞬时突发量。
 // Rate 是每秒补充的令牌数，决定长期平均速率。
 type RateLimitConfig struct {
-	Capacity  int     //Capacity（容量）：桶最多能存多少个令牌。决定了允许的瞬时最大爆发量
-	Rate      float64 //Rate（速率）：每秒往桶里扔多少个令牌。决定了长期的平均访问速率
+	Capacity  int
+	Rate      float64
 	KeyPrefix string
 }
 
@@ -48,40 +49,27 @@ else
 end
 
 redis.call('HSET', key, 'tokens', tokens, 'last_ms', now_ms)
--- TTL 至少 1 秒，且大于补满整桶所需时间的两倍，避免活跃 key 被提前清掉。
-local ttl_ms = math.max(1000, math.ceil(capacity * 2000 / rate))  -- 从空桶补满所需时间，乘 2 就是 TTL
-redis.call('PEXPIRE', key, ttl_ms)  --每次用户发起请求,PEXPIRE 都会把这个 Key 的存活时间续期到这个长度
--- 一旦用户超过「补满时间 * 2」没有再发请求，这个 IP 就算没有活动了，
--- 对应的 Key 会自动过期销毁，释放内存。
+-- TTL 取补满整桶所需时间的两倍，活跃 key 每次请求续期，闲置后自动释放。
+local ttl_ms = math.max(1000, math.ceil(capacity * 2000 / rate))
+redis.call('PEXPIRE', key, ttl_ms)
 return { allowed, retry_ms }
 `
 
-// RateLimit 令牌桶限流。参数在构造时校验，出错让服务启动期失败。
-func RateLimit(rdb *redis.Client, cfg RateLimitConfig) gin.HandlerFunc {
-	if cfg.Capacity < 1 {
-		panic("RateLimit: Capacity must be positive")
-	}
-	if cfg.Rate <= 0 {
-		panic("RateLimit: Rate must be positive")
-	}
-	if cfg.KeyPrefix == "" {
-		panic("RateLimit: KeyPrefix is required")
+// RateLimit 令牌桶限流，参数在装配时校验一次。
+func RateLimit(rdb *redis.Client, cfg RateLimitConfig) (gin.HandlerFunc, error) {
+	if cfg.Capacity < 1 || cfg.Rate <= 0 || cfg.KeyPrefix == "" {
+		return nil, fmt.Errorf("middleware: invalid rate limit config: %+v", cfg)
 	}
 
 	script := redis.NewScript(tokenBucketLua)
 
 	return func(c *gin.Context) {
-		key := cfg.KeyPrefix + "ip:" + c.ClientIP() //按照客户端ip限流
-		res, err := script.Run(
-			c.Request.Context(), // ctx：请求取消会中断等待（Redis 端脚本仍会跑完）
-			rdb,                 // *redis.Client
-			[]string{key},       // KEYS[1]，如 "ratelimit:ip:1.2.3.4"
-			cfg.Capacity,        // ARGV[1] 桶容量（允许的突发量）
-			cfg.Rate,            // ARGV[2] 每秒补充的令牌数
-		).Slice() // 把 Lua 返回的 table 解析成 []interface{}
+		key := cfg.KeyPrefix + "ip:" + c.ClientIP()
+		res, err := script.Run(c.Request.Context(), rdb, []string{key}, cfg.Capacity, cfg.Rate).Slice()
 		if err != nil {
+			// Redis 抖动时降级放行，避免一次依赖故障演变成全站 500。
 			log.Printf("rate limit check %s: %v", key, err)
-			c.Next() // fail-open，如果redis 挂了 那么请求继续 不因为redis挂了就把所有请求拒绝
+			c.Next()
 			return
 		}
 		allowed := res[0].(int64)
@@ -96,5 +84,5 @@ func RateLimit(rdb *redis.Client, cfg RateLimitConfig) gin.HandlerFunc {
 			return
 		}
 		c.Next()
-	}
+	}, nil
 }
