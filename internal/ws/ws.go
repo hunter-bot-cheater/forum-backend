@@ -21,8 +21,8 @@ type onlineStatsResp struct {
 }
 
 var allowedOrigins = map[string]bool{
-	"app.forum.com":   true, // 正式环境前端域名
-	"127.0.0.1:8080":  true, // 本地测试
+	"app.forum.com":  true, // 正式环境前端域名
+	"127.0.0.1:8080": true, // 本地测试
 }
 
 // upgrader 把普通 HTTP 请求升级成 WebSocket。
@@ -93,7 +93,6 @@ func (h *WSHandler) Notifications(c *gin.Context) {
 	// 一是防止 Handler 返回导致底层 TCP 被 net/http 回收；
 	// 二是靠阻塞读来感知客户端断开，触发 defer 里的注销与资源清理。
 }
-
 
 // Stats godoc
 // @Summary      当前在线人数与连接数

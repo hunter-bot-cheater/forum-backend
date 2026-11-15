@@ -15,9 +15,9 @@ import (
 // Capacity 是桶容量，也是允许的瞬时突发量。
 // Rate 是每秒补充的令牌数，决定长期平均速率。
 type RateLimitConfig struct {
-	Capacity  int  //Capacity（容量）：桶最多能存多少个令牌。决定了允许的瞬时最大爆发量
+	Capacity  int     //Capacity（容量）：桶最多能存多少个令牌。决定了允许的瞬时最大爆发量
 	Rate      float64 //Rate（速率）：每秒往桶里扔多少个令牌。决定了长期的平均访问速率
-	KeyPrefix string 
+	KeyPrefix string
 }
 
 // tokenBucketLua 在 Redis 服务端一次完成读状态、补令牌、扣令牌、写回与设过期。
@@ -71,14 +71,14 @@ func RateLimit(rdb *redis.Client, cfg RateLimitConfig) gin.HandlerFunc {
 	script := redis.NewScript(tokenBucketLua)
 
 	return func(c *gin.Context) {
-		key := cfg.KeyPrefix + "ip:" + c.ClientIP()//按照客户端ip限流
+		key := cfg.KeyPrefix + "ip:" + c.ClientIP() //按照客户端ip限流
 		res, err := script.Run(
-    		c.Request.Context(),  // ctx：请求取消会中断等待（Redis 端脚本仍会跑完）
-    		rdb,                  // *redis.Client
-    		[]string{key},        // KEYS[1]，如 "ratelimit:ip:1.2.3.4"
-    		cfg.Capacity,         // ARGV[1] 桶容量（允许的突发量）
-    		cfg.Rate,             // ARGV[2] 每秒补充的令牌数
-		).Slice()                 // 把 Lua 返回的 table 解析成 []interface{}
+			c.Request.Context(), // ctx：请求取消会中断等待（Redis 端脚本仍会跑完）
+			rdb,                 // *redis.Client
+			[]string{key},       // KEYS[1]，如 "ratelimit:ip:1.2.3.4"
+			cfg.Capacity,        // ARGV[1] 桶容量（允许的突发量）
+			cfg.Rate,            // ARGV[2] 每秒补充的令牌数
+		).Slice() // 把 Lua 返回的 table 解析成 []interface{}
 		if err != nil {
 			log.Printf("rate limit check %s: %v", key, err)
 			c.Next() // fail-open，如果redis 挂了 那么请求继续 不因为redis挂了就把所有请求拒绝

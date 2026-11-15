@@ -13,4 +13,5 @@ type ArticleLike struct {
 	// Article 只用来让 AutoMigrate 建外键，不参与 JSON 序列化。
 	Article Article `gorm:"constraint:OnUpdate:NO ACTION,OnDelete:RESTRICT;" json:"-"`
 }
+
 //最左前缀法则 articleid在左边 SELECT * FROM article_likes WHERE article_id = 1 会走索引，极快

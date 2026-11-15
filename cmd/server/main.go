@@ -56,7 +56,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("JWT 配置错误: %v", err)
 	}
-	hub := realtime.NewHub()	
+	hub := realtime.NewHub()
 
 	r, err := router.New(router.Deps{DB: db, JWT: jwtManager, Redis: rdb, Hub: hub})
 	if err != nil {
@@ -86,10 +86,10 @@ func main() {
 	srv := &http.Server{Addr: addr, Handler: r}
 
 	go func() {
-		<-ctx.Done()  // 收到关闭信号
+		<-ctx.Done() // 收到关闭信号
 		// WebSocket 连接在握手后就被 hijack 了，不算 http.Server 管的活跃请求，
 		// Shutdown 不会关它们。必须自己先断，否则这些 goroutine 一直挂着。
-		hub.CloseAll()    //主动掐断所有 WebSocket 连接                                                              //监听http关闭信号
+		hub.CloseAll()                                                                  //主动掐断所有 WebSocket 连接                                                              //监听http关闭信号
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second) //1.立刻关闭底层的监听端口（不再接受新请求）
 		//2.等待所有正在处理的请求执行完毕
 		defer cancel()

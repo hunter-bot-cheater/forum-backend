@@ -16,9 +16,9 @@ import (
 )
 
 const (
-	relayInterval       = 200 * time.Millisecond  //轮询间隔 200ms
-	relayBatchSize      = 100 //每次最多搬100条
-	maxPublishAttempts  = 5 //最大重试次数
+	relayInterval      = 200 * time.Millisecond //轮询间隔 200ms
+	relayBatchSize     = 100                    //每次最多搬100条
+	maxPublishAttempts = 5                      //最大重试次数
 )
 
 // Relay 把 outbox 里 pending 的事件投进 Redis Stream。
@@ -33,14 +33,14 @@ func NewRelay(db *gorm.DB, rdb *redis.Client) *Relay {
 
 // Run 按固定间隔扫表，ctx 取消后退出，由 main 的 WaitGroup 等它收尾。
 func (r *Relay) Run(ctx context.Context) {
-	ticker := time.NewTicker(relayInterval)  //创建一个定时器 每隔 200 毫秒，
+	ticker := time.NewTicker(relayInterval) //创建一个定时器 每隔 200 毫秒，
 	//它就会往 ticker.C 这个管道（Channel）里滴答扔进一个时间对象
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done(): //系统取消信号
 			return
-		case <-ticker.C://闹钟信号（200 毫秒到了）
+		case <-ticker.C: //闹钟信号（200 毫秒到了）
 			if err := r.PublishBatch(ctx); err != nil {
 				log.Printf("relay publish batch: %v", err)
 			}
@@ -78,7 +78,7 @@ func (r *Relay) PublishBatch(ctx context.Context) error {
 			Where("id = ?", e.ID).
 			Update("status", model.OutboxPublished).Error //推入 Redis Stream 成功后，立刻将 MySQL 里的状态改为 published
 		if err != nil {
-			return fmt.Errorf("mark published %s: %w", e.EventID, err)  //如果 Update 报错，意味着整个 MySQL 连接不可用，或者 ctx 被取消了 需要立刻返回
+			return fmt.Errorf("mark published %s: %w", e.EventID, err) //如果 Update 报错，意味着整个 MySQL 连接不可用，或者 ctx 被取消了 需要立刻返回
 		}
 	}
 	return nil
@@ -90,7 +90,7 @@ func (r *Relay) markFailure(ctx context.Context, e model.OutboxEvent) {
 		"attempts": gorm.Expr("attempts + 1"),
 	}
 	if e.Attempts+1 >= maxPublishAttempts {
-		updates["status"] = model.OutboxFailed  //把状态改成 failed。一旦变成 failed，
+		updates["status"] = model.OutboxFailed //把状态改成 failed。一旦变成 failed，
 		//PublishBatch 里的 Where("status = ?", model.OutboxPending) 就查不到它
 	}
 	err := r.db.WithContext(ctx).Model(&model.OutboxEvent{}).

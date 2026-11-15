@@ -1,9 +1,9 @@
 package hot
 
 import (
-	"forum-backend/internal/domain"
 	"context"
 	"fmt"
+	"forum-backend/internal/domain"
 	"log"
 	"strconv"
 	"time"
@@ -96,9 +96,9 @@ func (s *HotService) Top(ctx context.Context, n int) ([]HotArticle, error) {
 	//就会把这个 Key 设为 "1"。以后看到它，就知道“缓存系统是健康的，榜单空是真没人点赞”
 	if err != nil {
 		log.Printf("check hot ready key: %v", err)
-		return s.TopFromMySQL(ctx, n)//如果 Redis 报错了（比如网络断了），直接降级去 MySQL 查
+		return s.TopFromMySQL(ctx, n) //如果 Redis 报错了（比如网络断了），直接降级去 MySQL 查
 	}
-	if ready == 0 {//如果 ready == 0（说明系统刚启动或 Redis 被清空了），
+	if ready == 0 { //如果 ready == 0（说明系统刚启动或 Redis 被清空了），
 		//进入 ensureHotZSet 去重建缓存。如果重建失败，同样降级去查 MySQL
 		// 冷却期内不再尝试重建，直接降级。见 hotCooldownKey 上的注释。
 		cool, err := s.rdb.Exists(ctx, hotCooldownKey).Result()
@@ -112,7 +112,7 @@ func (s *HotService) Top(ctx context.Context, n int) ([]HotArticle, error) {
 		}
 	}
 
-	pairs, err := s.rdb.ZRevRangeWithScores(ctx, keys.HotArticlesKey, 0, int64(n-1)).Result()//按分数（Score）从大到小，取出前 N 名，并且带出分数
+	pairs, err := s.rdb.ZRevRangeWithScores(ctx, keys.HotArticlesKey, 0, int64(n-1)).Result() //按分数（Score）从大到小，取出前 N 名，并且带出分数
 	if err != nil {
 		log.Printf("read hot zset: %v", err)
 		return s.TopFromMySQL(ctx, n)
@@ -131,7 +131,7 @@ func (s *HotService) Top(ctx context.Context, n int) ([]HotArticle, error) {
 
 // ensureHotZSet 把同一时刻发现「投影丢失」的请求合并成一次重建。
 // 没有它，FLUSHDB 之后 100 个并发请求会各查一次 MySQL。
-func (s *HotService) ensureHotZSet(ctx context.Context) error {//拦截并发重建（防击穿）
+func (s *HotService) ensureHotZSet(ctx context.Context) error { //拦截并发重建（防击穿）
 	_, err, _ := s.group.Do("hot:rebuild", func() (interface{}, error) {
 		// fn 用的是第一个请求的 ctx。它被取消会连累所有等待者，
 		// 03a 5.3 讲过这个坑：脱离取消，另给 3 秒超时。
@@ -172,12 +172,12 @@ func (s *HotService) markCooldown(ctx context.Context) {
 // 只由 ensureHotZSet 调用，不对外暴露，也不再有脚本调用它。
 //
 // 三次改写留下的两条铁律：
-// 1. SQL 必须带 LIMIT。不带的话，点赞表涨到千万级，
-//    这条 GROUP BY 会扫穿整张表，MySQL 的 CPU 直接被打满。
-//    聚合本身仍然要过一遍索引，LIMIT 省下的是结果集和后续的 ZADD 条数。
-// 2. 新榜必须落在临时 key 上，写完 RENAME 换过去。
-//    直接在正式 key 上 Del 再逐条 ZAdd，中途任何一次读都会拿到残缺的榜单，
-//    而重建期间的点赞也会被后面的全量覆盖冲掉。
+//  1. SQL 必须带 LIMIT。不带的话，点赞表涨到千万级，
+//     这条 GROUP BY 会扫穿整张表，MySQL 的 CPU 直接被打满。
+//     聚合本身仍然要过一遍索引，LIMIT 省下的是结果集和后续的 ZADD 条数。
+//  2. 新榜必须落在临时 key 上，写完 RENAME 换过去。
+//     直接在正式 key 上 Del 再逐条 ZAdd，中途任何一次读都会拿到残缺的榜单，
+//     而重建期间的点赞也会被后面的全量覆盖冲掉。
 func (s *HotService) rebuild(ctx context.Context) error {
 	var rows []hotRow
 	if err := s.db.WithContext(ctx).Model(&model.ArticleLike{}).
@@ -211,7 +211,7 @@ func (s *HotService) rebuild(ctx context.Context) error {
 	// 空榜的每个请求都会重新走到这里。
 	// TTL 让榜单每小时自然失效一次，避免变成历史快照。
 	pipe.Set(ctx, hotReadyKey, "1", hotReadyTTL) //把设置 ready 标志位的命令也塞进管道
-	if _, err := pipe.Exec(ctx); err != nil { //提交事务
+	if _, err := pipe.Exec(ctx); err != nil {    //提交事务
 		return fmt.Errorf("rebuild hot zset: %w", err)
 	}
 	return nil

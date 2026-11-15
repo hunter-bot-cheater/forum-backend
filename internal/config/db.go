@@ -46,7 +46,6 @@ func InitDB(cfg *MySQLConfig) (*gorm.DB, error) {
 	// 小于 MySQL 的 wait_timeout（默认 8 小时），避免拿到被服务端单方面关掉的连接。
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
-
 	if err := db.AutoMigrate(&model.User{}, &model.Article{}, &model.Comment{}, &model.ArticleLike{}, &model.OutboxEvent{}, &model.Notification{}, &model.FloorEvent{}, &model.FloorPrize{}); err != nil {
 		return nil, fmt.Errorf("failed to auto-migrate database: %w", err)
 	}

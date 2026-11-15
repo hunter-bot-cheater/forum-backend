@@ -17,18 +17,18 @@ const (
 	pongWait       = 60 * time.Second
 	pingPeriod     = (pongWait * 9) / 10
 	maxMessageSize = 1024 //防止黑客发超大文件，瞬间撑爆服务器内存（OOM 攻击）
-	sendBuffer     = 16 //核心发件箱的容量
+	sendBuffer     = 16   //核心发件箱的容量
 )
 
 // Client 是一条 WebSocket 连接。
 // 读和写各占一个 goroutine，send 是两者之间唯一的传递通道。
 type Client struct {
-	hub    *Hub //大厅指针，方便注销时找组织
+	hub    *Hub            //大厅指针，方便注销时找组织
 	conn   *websocket.Conn //底层的 TCP 连接对象
 	userID uint
 
 	// send 有界，满了就丢连接。容量决定能容忍多慢的客户端。
-	send   chan []byte //无锁发件箱（带缓冲的 Channel）
+	send   chan []byte   //无锁发件箱（带缓冲的 Channel）
 	closed chan struct{} //广播站，用来通知 WriteLoop 和 ReadLoop 赶紧停机
 	once   sync.Once
 	//保证 Close() 里面关连接的动作永远只执行一次。
@@ -41,7 +41,7 @@ func NewClient(hub *Hub, conn *websocket.Conn, userID uint) *Client {
 		hub:    hub,
 		conn:   conn,
 		userID: userID,
-		send:   make(chan []byte, sendBuffer),//send容量16
+		send:   make(chan []byte, sendBuffer), //send容量16
 		closed: make(chan struct{}),
 	}
 }
@@ -59,7 +59,7 @@ func (c *Client) Send(msg PushMessage) bool {
 		return true
 	default:
 		return false
-	}//带 default 的 select，这叫非阻塞写入
+	} //带 default 的 select，这叫非阻塞写入
 }
 
 // Close 幂等关闭。Hub 踢人、读泵退出、进程关停可能同时调用它。
@@ -68,7 +68,7 @@ func (c *Client) Close() {
 		close(c.closed) //相当于拉响了防空警报，WriteLoop 接收到信号后会立刻退出
 		// 单元测试不建立真实连接，conn 可能是 nil。
 		if c.conn != nil {
-			_ = c.conn.Close() //关闭底层的网络连接 c.conn.Close() 
+			_ = c.conn.Close() //关闭底层的网络连接 c.conn.Close()
 		}
 	})
 }
@@ -84,7 +84,7 @@ func (c *Client) WriteLoop() {
 
 	for {
 		select {
-		case data := <-c.send://发业务消息
+		case data := <-c.send: //发业务消息
 			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if err := c.conn.WriteMessage(websocket.TextMessage, data); err != nil {
 				return

@@ -1,10 +1,10 @@
 package like
 
 import (
-	"forum-backend/internal/domain"
 	"context"
 	"errors"
 	"fmt"
+	"forum-backend/internal/domain"
 	"log"
 	"strconv"
 
@@ -99,7 +99,7 @@ func (s *LikeService) writeRelation(ctx context.Context, articleID, userID uint,
 			changed = res.RowsAffected > 0
 		}
 
-		if !changed || !add { //重复点赞 或者 取消点赞 不发通知 直接结束 
+		if !changed || !add { //重复点赞 或者 取消点赞 不发通知 直接结束
 			return nil
 		}
 		// 点赞作用在文章上，Target 就是这篇文章。

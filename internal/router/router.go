@@ -58,7 +58,7 @@ func New(deps Deps) (*gin.Engine, error) {
 
 	// API 文档只在调试模式暴露。生产用 GIN_MODE=release 关闭。
 	if gin.IsDebugging() {
-		r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler,ginSwagger.PersistAuthorization(true), ))
+		r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler, ginSwagger.PersistAuthorization(true)))
 	}
 
 	// 不信任任何代理网段的 X-Forwarded-For。
@@ -87,7 +87,6 @@ func New(deps Deps) (*gin.Engine, error) {
 	// 抢楼活动共用一个 redis.Client：发号器就在 Redis 里。
 	floorSvc := floor.NewService(deps.DB, deps.Redis)
 	floorHandler := floor.NewHandler(floorSvc)
-
 
 	// 限流参数集中在 router 里给，middleware 不自己读配置。
 	rateCfg := middleware.RateLimitConfig{

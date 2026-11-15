@@ -78,7 +78,7 @@ func (h *ArticleHandler) Detail(c *gin.Context) {
 		httputil.MapServiceError(c, "article detail", err)
 		return
 	}
-	response.OK(c,toArticleDetailResp(a))
+	response.OK(c, toArticleDetailResp(a))
 }
 
 // Create godoc

@@ -32,14 +32,14 @@ type winnerResp struct {
 // eventResp 是活动详情对外的形状。
 // NextFloor 是发号器当前发出的最后一个号码，等于「已经有多少人抢过」。
 type eventResp struct {
-	ID          uint          `json:"id"`
-	ArticleID   uint          `json:"article_id"`
-	Title       string        `json:"title"`
-	LuckyFloors []int         `json:"lucky_floors"`
-	StartsAt    time.Time     `json:"starts_at"`
-	EndsAt      time.Time     `json:"ends_at"`
-	NextFloor   int64         `json:"next_floor"`
-	Winners     []winnerResp  `json:"winners"`
+	ID          uint         `json:"id"`
+	ArticleID   uint         `json:"article_id"`
+	Title       string       `json:"title"`
+	LuckyFloors []int        `json:"lucky_floors"`
+	StartsAt    time.Time    `json:"starts_at"`
+	EndsAt      time.Time    `json:"ends_at"`
+	NextFloor   int64        `json:"next_floor"`
+	Winners     []winnerResp `json:"winners"`
 }
 
 // grabResp 是一次抢楼的结果。

@@ -2,10 +2,10 @@
 package comment
 
 import (
-	"forum-backend/internal/domain"
 	"context"
 	"errors"
 	"fmt"
+	"forum-backend/internal/domain"
 	"strings"
 
 	"gorm.io/gorm"

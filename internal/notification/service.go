@@ -1,9 +1,9 @@
 package notification
 
 import (
-	"forum-backend/internal/domain"
 	"context"
 	"fmt"
+	"forum-backend/internal/domain"
 
 	"gorm.io/gorm"
 

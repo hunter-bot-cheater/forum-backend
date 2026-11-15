@@ -66,7 +66,7 @@ func Load() (*Config, error) {
 	// 读配置：把"文件不存在"和"格式错误"区分开，错误都带上下文
 	if err := v.ReadInConfig(); err != nil {
 		var notFound viper.ConfigFileNotFoundError
-		if errors.As(err, &notFound)  || errors.Is(err, fs.ErrNotExist){
+		if errors.As(err, &notFound) || errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("config file not found: %w", err)
 		}
 		return nil, fmt.Errorf("read config: %w", err)
