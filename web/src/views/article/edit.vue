@@ -1,13 +1,15 @@
 <template>
   <div class="composer">
-    <!-- 顶部一行只放「返回」和页面名：写文章是单任务页面，
+    <!-- 顶部一行只放「返回」和页面名：写作是单任务页面，
          不需要导航和侧栏，视线应该直接落到标题输入框上。 -->
     <div class="composer__head">
       <button type="button" class="composer__back" @click="leave">← 返回</button>
-      <span class="composer__label">写文章</span>
+      <span class="composer__label">{{ isEdit ? '编辑文章' : '写文章' }}</span>
     </div>
 
-    <div class="fs-card composer__card">
+    <div v-if="loading" v-loading="true" class="composer__loading" />
+
+    <div v-else class="fs-card composer__card">
       <!-- 标题与正文都不用 el-form 包一层：只有两个字段、没有联动校验，
            表单组件在这里只会多出一圈 label 和 margin。 -->
       <el-input
@@ -40,7 +42,7 @@
             正文超出上限（约 1.6 万汉字），请删减后再发布
           </template>
           <template v-else>
-            {{ contentLength }} 字<span class="composer__hint"> · Ctrl + Enter 发布</span>
+            {{ contentLength }} 字<span class="composer__hint"> · Ctrl + Enter {{ isEdit ? '保存' : '发布' }}</span>
           </template>
         </div>
 
@@ -52,7 +54,7 @@
             :disabled="!canSubmit"
             @click="submit"
           >
-            发布
+            {{ isEdit ? '保存' : '发布' }}
           </el-button>
         </div>
       </div>
@@ -62,13 +64,36 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { onBeforeRouteLeave, useRouter } from 'vue-router'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type InputInstance } from 'element-plus'
-import { createArticle } from '@/api/article'
+import { createArticle, getArticle, updateArticle } from '@/api/article'
 import { useArticleStore } from '@/store/modules/article'
+import { useUserStore } from '@/store/modules/user'
 
+const route = useRoute()
 const router = useRouter()
 const articleStore = useArticleStore()
+const user = useUserStore()
+
+// 同一个组件承担两种用法：/write 写新文章，/articles/:id/edit 改旧文章。
+// 合成一页而不是拆两份：表单、字数统计、离开确认、快捷键完全相同，
+// 拆开后就是两份一样的模板各自演化，改一处忘一处。
+const articleId = computed(() => {
+  const raw = Number(route.params.id)
+  if (Number.isFinite(raw) && raw > 0) {
+    return raw
+  }
+  return 0
+})
+const isEdit = computed(() => articleId.value > 0)
+
+// loading 只服务编辑态：拉原文期间先不渲染表单，
+// 否则用户会看到一屏空白输入框，并在内容回填之前就开始打字。
+const loading = ref(false)
+
+// original 是进入编辑页那一刻的原文，用来判断「到底改没改」。
+// 创建态没有原文，dirty 退回成「有没有输入内容」。
+const original = ref({ title: '', content: '' })
 
 // 与后端 internal/article/service.go 的两个上限保持一致：
 // 标题 varchar(128) 按字符计，正文 text 按字节计（50000 字节）。
@@ -102,21 +127,38 @@ const overLimit = computed(() => contentBytes.value > contentByteLimit)
 // 但计数时它仍是用户敲进去的字符。
 const hasContent = computed(() => content.value.trim() !== '')
 
-// 两个字段都有内容、正文没超长才允许发布。
-const canSubmit = computed(() => {
-  return title.value.trim() !== '' && hasContent.value && !overLimit.value
+// dirty 的含义随模式变：
+//   - 写新文章：输入框里有内容就算「有还没保存的东西」
+//   - 编辑旧文章：要和原文真的不同才算，否则点进来什么都不做，
+//     一出页面就弹「还没保存」，属于打扰
+const dirty = computed(() => {
+  if (isEdit.value) {
+    return title.value !== original.value.title || content.value !== original.value.content
+  }
+  return title.value.trim() !== '' || content.value.trim() !== ''
 })
 
-// 有内容未发布时，离开页面要确认一次。
-// 误点导航或刷新都会丢掉刚写的东西，而写文章往往是整页最费时的操作。
-const dirty = computed(() => title.value.trim() !== '' || content.value.trim() !== '')
+// 两个字段都有内容、正文没超长才允许提交。
+const canSubmit = computed(() => {
+  if (title.value.trim() === '' || !hasContent.value || overLimit.value) {
+    return false
+  }
+  // 编辑态一个字符都没改，保存按钮保持禁用：
+  // 发一次「把原文再写一遍」的请求没有意义，按钮状态本身也在告诉用户「还没动手」。
+  if (isEdit.value && !dirty.value) {
+    return false
+  }
+  return true
+})
 
 onBeforeRouteLeave(async () => {
   if (submitted.value || !dirty.value) {
     return true
   }
+  // 两种模式的确认文案不同：写新文章丢的是刚写的内容，编辑丢的是这次的修改。
+  const tip = isEdit.value ? '修改还没有保存，离开后会丢失，确定离开？' : '内容还没有发布，离开后不会保存，确定离开？'
   try {
-    await ElMessageBox.confirm('内容还没有发布，离开后不会保存，确定离开？', '离开页面', {
+    await ElMessageBox.confirm(tip, '离开页面', {
       confirmButtonText: '离开',
       cancelButtonText: '继续编辑',
       type: 'warning',
@@ -128,10 +170,34 @@ onBeforeRouteLeave(async () => {
   }
 })
 
-// 进页面自动聚焦标题：写文章的第一动作永远是敲标题，
+// 进页面自动聚焦标题：写作的第一动作永远是敲标题，
 // 多一次点击才能开始打字是没必要的。
 // 窄屏不聚焦：手机上自动聚焦会立刻弹出软键盘，把刚打开的页面顶掉一半。
-onMounted(() => {
+onMounted(async () => {
+  if (isEdit.value) {
+    loading.value = true
+    try {
+      const article = await getArticle(articleId.value)
+      // 别人的文章拉得到内容却改不了（后端一律 404）。提前拦下来，
+      // 免得用户改完一大段才被告知没权限。author 缺失时不做判断，交给后端兜底。
+      if (user.userId > 0 && article.author && article.author.id !== user.userId) {
+        ElMessage.warning('只能编辑自己的文章')
+        await router.replace('/articles/' + String(articleId.value))
+        return
+      }
+      title.value = article.title
+      content.value = article.content
+      original.value = { title: article.title, content: article.content }
+    } catch {
+      // 404 与网络错误都已由拦截器弹过提示，这里不再弹第二个框。
+      // 拿不到原文就没法编辑，退回详情页比留一个空表单安全。
+      await router.replace('/articles/' + String(articleId.value))
+      return
+    } finally {
+      loading.value = false
+    }
+  }
+
   if (window.innerWidth > 720) {
     titleRef.value?.focus()
   }
@@ -159,26 +225,39 @@ async function submit() {
   }
   submitting.value = true
   try {
-    const created = await createArticle(title.value.trim(), content.value.trim())
-    // 先让列表失效再跳转：回到列表时才会重拉第一页，
-    // 否则用户看到的是发布前的旧列表，会怀疑自己没发出去。
+    let targetID = articleId.value
+    if (isEdit.value) {
+      const updated = await updateArticle(articleId.value, title.value.trim(), content.value.trim())
+      targetID = updated.id
+      ElMessage.success('已保存')
+    } else {
+      const created = await createArticle(title.value.trim(), content.value.trim())
+      targetID = created.id
+      ElMessage.success('发布成功')
+    }
+    // 先让列表失效再跳转：回到列表时才会重拉第一页。
+    // 编辑也要失效——列表里显示的是标题与摘要，改完不刷新会看到旧标题。
     articleStore.invalidate()
     submitted.value = true
-    ElMessage.success('发布成功')
-    // replace 而不是 push：发布完成后不该还能「后退回到编辑页」，
-    // 那样会看到一个空白编辑器，再点发布就发出第二篇。
-    await router.replace('/articles/' + String(created.id))
+    // replace 而不是 push：提交完成后不该还能「后退回到编辑页」，
+    // 那样会看到一个内容已经旧了的编辑器，再点保存又覆盖一次。
+    await router.replace('/articles/' + String(targetID))
   } catch {
-    // 失败提示已由请求拦截器统一弹出（400 是标题/正文不合法，401 会跳登录）。
-    // 这里不重复弹，也不清空输入——用户改几个字就能重新提交。
+    // 失败提示已由请求拦截器统一弹出（400 是标题/正文不合法，401 会跳登录，
+    // 404 是文章不存在或不是本人的）。这里不重复弹，也不清空输入。
   } finally {
     submitting.value = false
   }
 }
 
 // 取消与返回都走这里，而不是让按钮自己调 router：
-// 两条路径都要经过路由守卫的「未发布确认」，统一成一个函数就不会漏。
+// 两条路径都要经过路由守卫的「未保存确认」，统一成一个函数就不会漏。
+// 编辑态回详情页，创建态回列表：从哪里来回哪里去。
 function leave() {
+  if (isEdit.value) {
+    void router.push('/articles/' + String(articleId.value))
+    return
+  }
   void router.push('/articles')
 }
 </script>
@@ -221,6 +300,12 @@ function leave() {
 
 .composer__card {
   padding: 28px 28px 20px;
+}
+
+/* 编辑态拉原文时的占位高度：给一个和卡片相近的高度，
+   避免加载完成后页面整体跳一下。 */
+.composer__loading {
+  height: 420px;
 }
 
 /* 标题输入框去掉 el-input 的默认边框与内边距：

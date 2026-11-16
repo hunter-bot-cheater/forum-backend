@@ -65,14 +65,22 @@ export interface LikeResp {
 
 // listArticles 拉一页文章，page 从 1 开始。
 //
+// authorId 可选：传了就只看这个人的文章（用户主页的「文章」标签），不传是全站列表。
 // page_size 默认取 10（与后端一致），上限 50 由后端校验：
 // 前端不重复判，传超了会拿到 400，拦截器会把提示弹出来。
 // 空结果时 list 是 []，不是 null，可以直接遍历。
-export function listArticles(page = 1, pageSize = 10) {
+export function listArticles(page = 1, pageSize = 10, authorId = 0) {
+  const params: Record<string, number> = { page, page_size: pageSize }
+  // 只在有作者时才带这个参数：后端对空串会当 400，
+  // 而传 author_id=0 虽然等价于全站，但请求 URL 里多一个无意义参数，
+  // 排查问题时容易误以为「按作者 0 过滤了」。
+  if (authorId > 0) {
+    params.author_id = authorId
+  }
   return request<ArticleListResp>({
     url: '/articles',
     method: 'get',
-    params: { page, page_size: pageSize },
+    params,
   })
 }
 
@@ -94,6 +102,19 @@ export function createArticle(title: string, content: string) {
   return request<ArticleResp>({
     url: '/articles',
     method: 'post',
+    data: { title, content },
+  })
+}
+
+// updateArticle 编辑一篇文章，返回编辑后的详情（含点赞数），前端可直接替换本地状态。
+//
+// 只允许作者本人：不是作者会拿到 404，后端不区分「不存在」和「不是你的」，
+// 所以前端不要指望用这个接口探测文章归属。
+// 标题与正文都是全量提交，没有「只改一项」的用法。
+export function updateArticle(id: number, title: string, content: string) {
+  return request<ArticleDetailResp>({
+    url: '/articles/' + String(id),
+    method: 'put',
     data: { title, content },
   })
 }

@@ -26,9 +26,9 @@ const (
 // 三个字段都用指针：nil 表示「这次不动这一项」，空字符串表示「清空」。
 // 用值类型就没法区分这两种意图，前端只想改头像时会把昵称一起覆盖成空串。
 type ProfilePatch struct {
-	Nickname  *string //昵称
-	AvatarURL *string //头像图片的url
-	Bio       *string //个人简介
+	Nickname  *string // 昵称
+	AvatarURL *string // 头像图片的地址
+	Bio       *string // 个人简介
 }
 
 // GetByID 按 id 查用户，查不到统一返回 domain.ErrNotFound。

@@ -216,6 +216,7 @@ func (s *HotService) readyState(ctx context.Context) (readyState, error) {
 	if err != nil {
 		// 值不是数字（手工写进去的、或更早的版本只写 "1"）：
 		// 当成「建过且可能有数据」，让空榜检查走一次重建把值修正成真实条数。
+		//nolint:nilerr // 坏值按「建过且可能有数据」处理是刻意的降级，为的是触发一次重建把值修正回来
 		return readyState{initialized: true, rows: 1}, nil
 	}
 	return readyState{initialized: true, rows: rows}, nil
@@ -240,7 +241,14 @@ func (s *HotService) topFromZSet(ctx context.Context, n int) ([]hotRow, error) {
 
 	rows := make([]hotRow, 0, len(pairs))
 	for _, p := range pairs {
-		id, err := strconv.ParseUint(p.Member.(string), 10, 64)
+		// 用带 ok 的断言：成员总是字符串（写的时候就是 FormatUint 的产物），
+		// 但万一有人手工往榜单里写了个非字符串成员，裸断言会 panic，
+		// 把一次「榜单脏了」升级成「热榜接口挂了」。
+		member, ok := p.Member.(string)
+		if !ok {
+			return nil, fmt.Errorf("hot member %v is not a string", p.Member)
+		}
+		id, err := strconv.ParseUint(member, 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("parse hot member %v: %w", p.Member, err)
 		}

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -154,5 +155,121 @@ func TestDetailSurvivesLikedCheckFailure(t *testing.T) {
 	}
 	if data.ID != post.ID {
 		t.Errorf("详情仍然要正常返回，实际 id = %d", data.ID)
+	}
+}
+
+// doUpdate 发一次编辑请求，返回原始响应，由调用方按状态码分流断言。
+// loggedIn 为 false 时不挂 asUser，模拟没带 token 的请求。
+func doUpdate(t *testing.T, h *ArticleHandler, articleID, userID uint, body string, loggedIn bool) *httptest.ResponseRecorder {
+	t.Helper()
+
+	r := gin.New()
+	if loggedIn {
+		r.PUT("/api/articles/:id", asUser(userID), h.Update)
+	} else {
+		r.PUT("/api/articles/:id", h.Update)
+	}
+
+	path := "/api/articles/" + strconv.FormatUint(uint64(articleID), 10)
+	req := httptest.NewRequest(http.MethodPut, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// TestUpdateReturnsUpdatedDetail 验证编辑成功后回的是详情形状。
+//
+// 前端保存完要直接拿它替换页面上的文章，所以 content 必须是最新的，
+// like_count 也必须在（少了它就退回成「先 PUT 再 GET」两次请求）。
+func TestUpdateReturnsUpdatedDetail(t *testing.T) {
+	db := testutil.NewDB(t)
+	svc := NewArticleService(db, testutil.NewRedis(t))
+	author := testutil.SeedUser(t, db, "updatehandler")
+	post := testutil.SeedArticle(t, db, author.ID, "待修改的标题")
+
+	h := NewArticleHandler(svc, &fakeLiked{})
+	w := doUpdate(t, h, post.ID, author.ID, `{"title":"改后的标题","content":"改后的正文"}`, true)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200，body=%s", w.Code, w.Body.String())
+	}
+	var env struct {
+		Code int `json:"code"`
+		Data struct {
+			ID        uint   `json:"id"`
+			Title     string `json:"title"`
+			Content   string `json:"content"`
+			LikeCount int64  `json:"like_count"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if env.Data.Title != "改后的标题" || env.Data.Content != "改后的正文" {
+		t.Errorf("返回的内容没更新：title=%q content=%q", env.Data.Title, env.Data.Content)
+	}
+	if env.Data.ID != post.ID {
+		t.Errorf("返回 id = %d，期望 %d", env.Data.ID, post.ID)
+	}
+}
+
+// TestUpdateWithoutLoginIs401 验证没身份直接拒，不会落到 service 里用 0 号用户去改。
+func TestUpdateWithoutLoginIs401(t *testing.T) {
+	db := testutil.NewDB(t)
+	svc := NewArticleService(db, testutil.NewRedis(t))
+	author := testutil.SeedUser(t, db, "nologinuser")
+	post := testutil.SeedArticle(t, db, author.ID, "不需要登录也能试的文章")
+
+	h := NewArticleHandler(svc, &fakeLiked{})
+	w := doUpdate(t, h, post.ID, 0, `{"title":"标题","content":"正文"}`, false)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("状态码 = %d，期望 401，body=%s", w.Code, w.Body.String())
+	}
+}
+
+// TestUpdateRejectsBadRequest 覆盖三种 400：id 不是数字、body 不是 JSON、字段类型不对。
+// 三条都必须在 handler 边界挡掉，不能带进 service。
+func TestUpdateRejectsBadRequest(t *testing.T) {
+	db := testutil.NewDB(t)
+	svc := NewArticleService(db, testutil.NewRedis(t))
+	author := testutil.SeedUser(t, db, "badrequestuser")
+	post := testutil.SeedArticle(t, db, author.ID, "参数校验用的文章")
+	h := NewArticleHandler(svc, &fakeLiked{})
+
+	r := gin.New()
+	r.PUT("/api/articles/:id", asUser(author.ID), h.Update)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/api/articles/abc", strings.NewReader(`{}`)))
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("非数字 id：状态码 = %d，期望 400", w.Code)
+	}
+
+	if got := doUpdate(t, h, post.ID, author.ID, `not-json`, true); got.Code != http.StatusBadRequest {
+		t.Errorf("坏 JSON：状态码 = %d，期望 400", got.Code)
+	}
+
+	if got := doUpdate(t, h, post.ID, author.ID, `{"title":123,"content":"正文"}`, true); got.Code != http.StatusBadRequest {
+		t.Errorf("字段类型不对：状态码 = %d，期望 400", got.Code)
+	}
+}
+
+// TestUpdateOtherUserReturns404 验证改别人的文章回 404 而不是 403。
+//
+// 403 等于确认「这篇文章存在但不归你」，配合遍历 id 就能摸清站内有哪些文章。
+// 与 Delete 的口径保持一致：两者对外都只说找不到。
+func TestUpdateOtherUserReturns404(t *testing.T) {
+	db := testutil.NewDB(t)
+	svc := NewArticleService(db, testutil.NewRedis(t))
+	author := testutil.SeedUser(t, db, "articleowner")
+	other := testutil.SeedUser(t, db, "articleintruder")
+	post := testutil.SeedArticle(t, db, author.ID, "别人改不动的文章")
+
+	h := NewArticleHandler(svc, &fakeLiked{})
+	w := doUpdate(t, h, post.ID, other.ID, `{"title":"篡改","content":"篡改"}`, true)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("状态码 = %d，期望 404，body=%s", w.Code, w.Body.String())
 	}
 }

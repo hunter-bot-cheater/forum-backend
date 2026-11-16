@@ -30,6 +30,12 @@
                         "description": "每页条数，默认 10，最大 50",
                         "name": "page_size",
                         "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "只看某个作者的文章，不传为全站",
+                        "name": "author_id",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -52,7 +58,7 @@
                         }
                     },
                     "400": {
-                        "description": "分页参数越界",
+                        "description": "分页参数越界或 author_id 非法",
                         "schema": {
                             "type": "string"
                         }
@@ -210,6 +216,80 @@
                     },
                     "404": {
                         "description": "文章不存在",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            "put": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "只允许作者本人；标题与正文都必填，规则与发布完全一致。",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "articles"
+                ],
+                "summary": "编辑文章",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "文章 ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "标题与正文",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/article.createArticleReq"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/article.articleDetailResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "id 或请求体格式不正确、标题正文不合法",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "文章不存在或不属于当前用户",
                         "schema": {
                             "type": "string"
                         }

@@ -82,9 +82,12 @@ func LoadJSON(ctx context.Context, rdb *redis.Client, key string, dst any) (bool
 		// 不删掉的话，TTL 到期前每次请求都会解析失败、每次都回源，
 		// 缓存等于彻底失效，还多了一次 Redis 往返。
 		if delErr := rdb.Del(ctx, key).Err(); delErr != nil {
-			return false, fmt.Errorf("%w: %s: %v（清理坏值失败: %v）", ErrBadValue, key, err, delErr)
+			// 两个错误都要留下：err 是解析失败的原因，delErr 是清理失败。
+			// Go 1.20 起 fmt.Errorf 支持多个 %w，errors.Is 能同时匹配到任意一个，
+			// 所以这里不退回 %v，免得调用方只能看到一段拼在文案里的字符串。
+			return false, fmt.Errorf("%w: %s: %w（清理坏值失败: %w）", ErrBadValue, key, err, delErr)
 		}
-		return false, fmt.Errorf("%w: %s: %v", ErrBadValue, key, err)
+		return false, fmt.Errorf("%w: %s: %w", ErrBadValue, key, err)
 	}
 	return true, nil
 }

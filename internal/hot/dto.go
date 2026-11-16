@@ -23,10 +23,7 @@ type HotListResp struct {
 // ToHotArticleResp 把 service 的结果转成对外结构体，转换留在 module 内。
 // 导出是因为 handler 在 like 模块，跨包调用必须大写。
 func ToHotArticleResp(item HotArticle) HotArticleResp {
-	return HotArticleResp{
-		ArticleID: item.ArticleID,
-		Score:     item.Score,
-		Title:     item.Title,
-		LikeCount: item.LikeCount,
-	}
+	// 两个结构体的字段名、类型、顺序完全一致，用类型转换代替逐字段抄写。
+	// 以后任一边加字段都会编译失败，提醒同步。
+	return HotArticleResp(item)
 }

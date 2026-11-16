@@ -167,8 +167,8 @@ func warmup(client *http.Client, cfg requestConfig, ids []uint, useID bool) {
 		if err != nil {
 			return
 		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
 	}
 }
 
@@ -221,8 +221,8 @@ func worker(ctx context.Context, client *http.Client, cfg requestConfig, ids []u
 			time.Sleep(time.Millisecond)
 			continue
 		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
 
 		s.latencies = append(s.latencies, elapsed)
 		s.codes[resp.StatusCode]++

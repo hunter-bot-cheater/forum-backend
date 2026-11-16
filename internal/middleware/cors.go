@@ -76,7 +76,7 @@ func CORS(allowedOrigins []string) (gin.HandlerFunc, error) {
 		// 预检（OPTIONS）到此结束，不进业务 handler。
 		// 浏览器在发带 Authorization 或 JSON 体的请求前，会先自动发这一次 OPTIONS 问许可，
 		// 这里把「允许哪些方法、哪些头、能缓存多久」一次性答完。
-		if c.Request.Method == http.MethodOptions { //如果是预检请求 则走这个
+		if c.Request.Method == http.MethodOptions { // 如果是预检请求 则走这个
 			c.Header("Access-Control-Allow-Methods", corsAllowMethods)
 			c.Header("Access-Control-Allow-Headers", corsAllowHeaders)
 			c.Header("Access-Control-Max-Age", corsMaxAge)

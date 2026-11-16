@@ -119,8 +119,17 @@ func RateLimit(rdb *redis.Client, cfg RateLimitConfig) (gin.HandlerFunc, error) 
 		}
 
 		// Lua 返回的整数在 Go 侧统一是 int64，顺序与脚本里的 return 一致。
-		allowed := res[0].(int64)
-		retryMs := res[1].(int64)
+		// 用带 ok 的断言：脚本改动后返回值类型可能变，裸断言会 panic，
+		// 而中间件 panic 会让所有经过它的请求一起挂掉。出错就降级放行并记账。
+		allowed, ok := res[0].(int64)
+		if !ok {
+			metrics.RateLimitErrors.Inc()
+			slog.WarnContext(c.Request.Context(), "rate limit script returned unexpected type", "key", key)
+			c.Next()
+			return
+		}
+		// retryMs 只在被限流时才用到，类型不对也不会影响放行路径，取零值即可。
+		retryMs, _ := res[1].(int64)
 
 		if allowed == 0 {
 			metrics.HTTPRateLimited.Inc()

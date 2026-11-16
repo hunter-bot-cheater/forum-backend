@@ -61,7 +61,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "初始化日志失败: %v\n", err)
 		os.Exit(1)
 	}
-	defer closeLog()
+	defer func() { _ = closeLog() }()
 
 	db, err := config.InitDB(&cfg.MySQL)
 	if err != nil {

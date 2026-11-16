@@ -4,7 +4,61 @@ on:
   push:
   pull_request:
 
+# 四个 job 互不依赖，并行跑：
+#   lint     代码风格与静态检查，几十秒出结果，最先拦住低级问题
+#   swagger  接口文档与注解是否同步，忘了重新生成时会红
+#   test     单元 + 集成测试（真实 MySQL），带竞争检测与覆盖率门槛
+#   web      前端类型检查与构建
+#
+# 拆开的好处：改了前端就不会等后端跑完 MySQL 测试才知道结果，
+# 失败时也能一眼看出是哪一类问题。
+
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # gofmt 单独查一遍：golangci-lint 的 gofmt formatter 只看它扫到的文件，
+      # 而且报错信息不如 diff 直观。这一步能把「忘了格式化」直接指到文件。
+      - name: Check gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "以下文件没有用 gofmt 格式化："
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "gofmt: 全部已格式化"
+
+      # 规则见仓库根目录的 .golangci.yml。
+      # 版本固定：不固定的话，linter 发新版会自动引入新规则，
+      # 某天 CI 突然红一片，而代码一行没动。
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          args: --timeout=5m
+
+  swagger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install swag
+        run: go install github.com/swaggo/swag/cmd/swag@v1.16.6
+      - name: Generate API docs
+        run: $(go env GOPATH)/bin/swag init -g cmd/server/main.go -o api/swagger --parseInternal
+      - name: Check docs are up to date
+        # 重新生成后必须与仓库里的文件一致：改了注解却忘了跑 make swagger，
+        # 线上文档就会落后于真实接口，而这种不一致不会有人主动发现。
+        run: git add -N api/swagger && git diff --exit-code -- api/swagger
+
   test:
     runs-on: ubuntu-latest
 
@@ -27,8 +81,8 @@ jobs:
           --health-retries=20
 
     env:
-      # 测试代码认这个变量来连测试库。不设的话集成测试会全部 skip，
-      # 那份全绿的 CI 就是假绿：覆盖率会掉回 20% 出头，一眼能看出来。
+      # 测试代码认这个变量来连测试库。不设的话带 DB 的用例会全部 skip，
+      # 那份全绿的 CI 就是假绿：覆盖率会掉回 20% 出头。
       TEST_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/forum_test?parseTime=true&loc=Local&charset=utf8mb4
 
     steps:
@@ -36,13 +90,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Install swag
-        run: go install github.com/swaggo/swag/cmd/swag@v1.16.6
-      - name: Generate API docs
-        run: $(go env GOPATH)/bin/swag init -g cmd/server/main.go -o api/swagger --parseInternal
-      - name: Check docs are up to date
-        run: git add -N api/swagger && git diff --exit-code -- api/swagger
-      - run: go vet ./...
+
       # -race 只在 CI 跑：本地开它慢两三倍，Windows 上还要额外装 gcc。
       # 它要抓的是 Hub、抢楼这些并发代码里的数据竞争，跑一次比读十遍代码有用。
       # -p 1 串行跑包：所有包共用同一个 forum_test 库，而每个用例开头都会
@@ -50,5 +98,53 @@ jobs:
       # 表现是随机几个用例挂掉、重跑又绿——这种红比不跑更浪费时间。
       - name: Test with race detector
         run: go test -p 1 -race -count=1 -coverprofile=coverage.out ./...
+
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1
+
+      # 覆盖率门槛：只防倒退，不追求数字好看。
+      # 当前约 50%，门槛设 45%，留出重构时正常波动的空间。
+      # 加新功能却一行测试都不写时，这一步会先把人拦下来。
+      - name: Check coverage threshold
+        run: |
+          total=$(go tool cover -func=coverage.out | tail -1 | awk '{print $3}' | tr -d '%')
+          echo "总覆盖率：${total}%"
+          if [ -z "$total" ]; then
+            echo "读不出覆盖率，检查 coverage.out 是否生成成功"
+            exit 1
+          fi
+          awk -v t="$total" 'BEGIN { if (t + 0 < 45) { printf "覆盖率 %.1f%% 低于门槛 45%%\n", t; exit 1 } }'
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: warn
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # npm ci 而不是 npm install：锁文件与 package.json 不一致时直接失败，
+      # 避免 CI 装出与本地不同的依赖版本。
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run type-check
+
+      # build 会把 vue-tsc 之外的模板错误也暴露出来（比如组件名写错、样式引用不存在），
+      # 只跑 type-check 会漏掉这类问题。
+      - name: Build
+        run: npm run build

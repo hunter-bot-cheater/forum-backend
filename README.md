@@ -160,6 +160,47 @@ go test -cover ./...                                                      # 各�
 go test -coverprofile=c.out ./... && go tool cover -func=c.out | tail -1   # 只看总计
 ```
 
+## 代码检查与 CI
+
+### 本地
+
+```bash
+make lint     # gofmt 检查 + golangci-lint
+```
+
+需要先装 golangci-lint v2（配置按 v2 格式写）：
+
+```bash
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+```
+
+规则在 `.golangci.yml`，只开了确实能指出问题的十几项，分三组：
+
+| 组 | 检查项 | 抓什么 |
+|---|---|---|
+| 基础正确性 | errcheck / govet / ineffassign / staticcheck / unused | 没处理的 error、死赋值、可疑写法 |
+| 错误处理 | errorlint / nilerr / bodyclose / sqlclosecheck / rowserrcheck | `==` 比错误、吞错误、连接没关 |
+| 代码质量 | gocritic / unconvert / unparam / misspell / whitespace | 多余转换、永远同一个值的参数、拼写与空行 |
+
+刻意没收进来的：`gosec`（这个项目里 HTTP 参数都过了绑定与白名单，它报的多是「用户输入直接进 SQL」的误判，要看 20 条里找 1 条真问题，反而没人看）、`revive`/`stylecheck` 的命名类规则（与项目既有的 `articleSvc`、`userID` 命名冲突）。
+
+原则是：一条规则如果长期靠 `//nolint` 压制，它就是在制造噪音，要么改代码要么关掉。当前代码里只有 4 处 `nolint`，每处都写了为什么（SQL 反引号不能用 `%#q`、websocket 的 resp.Body 被 Conn 接管等）。
+
+### CI
+
+`.github/workflows/ci.yml` 四个 job 并行跑：
+
+| job | 内容 | 失败意味着 |
+|---|---|---|
+| `lint` | gofmt + golangci-lint | 代码风格或静态检查有问题 |
+| `swagger` | 重新生成接口文档并比对 | 改了注解但忘了 `make swagger` |
+| `test` | MySQL service + `-race` + 覆盖率门槛 | 功能坏了，或覆盖率跌破 45% |
+| `web` | `npm ci` + `vue-tsc` + `vite build` | 前端类型或构建错误 |
+
+覆盖率门槛设在 45%（当前约 53%），只防倒退，不追数字。加新功能一行测试都不写时，这一步会先把人拦下来。
+
+前端目前只做类型检查与构建，没有接 ESLint：`vue-tsc` 已经能拦住绝大多数错误，而引入 ESLint 需要先给现有 20 多个组件统一风格，会顺带改掉一批无关文件。要做的话应该单独开一轮，不混在功能提交里。
+
 ## 探活接口
 
 两个接口都在根路径，不挂鉴权、不进限流、不写访问日志，供 Nginx、监控和穿透工具调用：

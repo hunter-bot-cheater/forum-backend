@@ -77,15 +77,8 @@ func (s *ArticleService) Create(ctx context.Context, userID uint, title, content
 	title = strings.TrimSpace(title)
 	content = strings.TrimSpace(content)
 
-	if title == "" || content == "" {
-		return nil, fmt.Errorf("%w: title and content are required", domain.ErrInvalidInput)
-	}
-	// 标题按字符判：articles.title 是 varchar(128)，MySQL 按字符计，
-	// 用 len() 会把 43 个汉字误判成超长。
-	// 正文按字节判：articles.content 是 text，容量上限就是 65535 字节，
-	// 50000 字节留出余量，同时挡住「把整个文件贴进来」这类请求。
-	if textutil.TooLongRunes(title, maxTitleRunes) || textutil.TooLongBytes(content, maxContentBytes) {
-		return nil, fmt.Errorf("%w: title or content too long", domain.ErrInvalidInput)
+	if err := validateArticleInput(title, content); err != nil {
+		return nil, err
 	}
 
 	a := &model.Article{
@@ -104,14 +97,73 @@ func (s *ArticleService) Create(ctx context.Context, userID uint, title, content
 	return a, nil
 }
 
+// validateArticleInput 校验标题与正文，Create 与 Update 共用。
+//
+// 两处各写一份必然漏改一处，以后调上限就会出现「发得出去、改不进去」这种怪现象。
+// 调用方负责先 trim：空标题与「一串空格」要在这里被判成同一件事。
+func validateArticleInput(title, content string) error {
+	if title == "" || content == "" {
+		return fmt.Errorf("%w: title and content are required", domain.ErrInvalidInput)
+	}
+	// 标题按字符判：articles.title 是 varchar(128)，MySQL 按字符计，
+	// 用 len() 会把 43 个汉字误判成超长。
+	// 正文按字节判：articles.content 是 text，容量上限就是 65535 字节，
+	// 50000 字节留出余量，同时挡住「把整个文件贴进来」这类请求。
+	if textutil.TooLongRunes(title, maxTitleRunes) || textutil.TooLongBytes(content, maxContentBytes) {
+		return fmt.Errorf("%w: title or content too long", domain.ErrInvalidInput)
+	}
+	return nil
+}
+
+// Update 编辑文章，只允许作者本人操作，返回编辑后的完整文章（含点赞数）。
+//
+// 权限判断和写入放在同一条 UPDATE 里，由数据库一次完成「是不是作者」与「改内容」，
+// 避免「先查归属再更新」两步之间的竞态（查的时候还是作者，改的时候文章已被转手）。
+func (s *ArticleService) Update(ctx context.Context, id, userID uint, title, content string) (*model.Article, error) {
+	title = strings.TrimSpace(title)
+	content = strings.TrimSpace(content)
+
+	if err := validateArticleInput(title, content); err != nil {
+		return nil, err
+	}
+
+	// 用 map 而不是结构体更新：GORM 用结构体时会跳过零值字段，
+	// 以后要是允许把正文改成空串，结构体更新会静默不生效。
+	res := s.db.WithContext(ctx).Model(&model.Article{}).
+		Where("id = ? AND user_id = ?", id, userID).
+		Updates(map[string]any{"title": title, "content": content})
+	if res.Error != nil {
+		return nil, fmt.Errorf("update article %d: %w", id, res.Error)
+	}
+
+	// 影响行数为 0 只有两种可能：文章不存在，或者存在但不是这个人的。
+	// 两者都回 404，不泄露「这篇文章属于谁」，与 Delete 的口径一致。
+	//
+	// 注意「内容一个字都没改」不会走到这里：GORM 的 Updates 会顺带更新 updated_at，
+	// MySQL 按真正改变的行计数，那一行仍然算改过（TestUpdateSameContentSucceeds 守着这一点）。
+	if res.RowsAffected == 0 {
+		return nil, fmt.Errorf("article %d: %w", id, domain.ErrNotFound)
+	}
+
+	// 内容变了就必须清详情缓存，顺序不能反：先删缓存再写库，中间有窗口会让
+	// 别的请求把旧内容重新回填进去。删除失败只记日志，TTL 是最后一道兜底。
+	s.InvalidateDetailCache(ctx, id)
+
+	// 重新走一次 Detail 而不是拿内存里的 title/content 拼返回值：
+	// 客户端要的是库里的真值（created_at、作者、点赞数都在库里），
+	// 缓存刚被删掉，这一次 Detail 必然回源，不会读到旧值。
+	return s.Detail(ctx, id)
+}
+
 // List 返回一页文章和总数，page 从 1 开始。
 //
+// authorID 大于 0 时只看这个人的文章（用户主页的标签页），0 表示全站。
 // 这里做了两次查询：先 Count 总数（前端要算总页数），再按 Offset 取当前页。
 // 数据量大时 Count 会成为瓶颈，那时该换成游标分页或用缓存存总数，现在不值得。
 //
 // 取回的 article.Content 是空的（列表查询不取全文），正文开头被塞进 Excerpt。
 // 想拿全文必须走 Detail，别在列表结果上读 Content。
-func (s *ArticleService) List(ctx context.Context, page, pageSize int) ([]*model.Article, int64, error) {
+func (s *ArticleService) List(ctx context.Context, authorID uint, page, pageSize int) ([]*model.Article, int64, error) {
 	// handler 层已经用 httputil.ParsePage 校验过一遍，这里再校验是为了保住 service 的边界：
 	// 别的地方（比如以后的后台任务、命令行工具）直接调 service 时也不会传进非法值。
 	// 规则统一走 paging.New，handler 与 service 共用一份上界，不会各写一个数字而漂移。
@@ -120,9 +172,19 @@ func (s *ArticleService) List(ctx context.Context, page, pageSize int) ([]*model
 		return nil, 0, err
 	}
 
+	// 作者条件必须同时作用于 Count 与 Find。
+	// 只给 Find 加，总数仍是全站的，前端按 ceil(total/pageSize) 算页数会多出好几页空页；
+	// 只给 Count 加，则列表里会混进别人的文章。写成闭包是为了让两处共用同一份条件。
+	scope := func(tx *gorm.DB) *gorm.DB {
+		if authorID > 0 {
+			return tx.Where("user_id = ?", authorID)
+		}
+		return tx
+	}
+
 	var total int64
-	if err := s.db.WithContext(ctx).Model(&model.Article{}).Count(&total).Error; err != nil {
-		return nil, 0, fmt.Errorf("count articles: %w", err)
+	if err := scope(s.db.WithContext(ctx).Model(&model.Article{})).Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("count articles author=%d: %w", authorID, err)
 	}
 
 	// 总数为 0 时直接返回空切片，省掉一次没有意义的查询。
@@ -138,7 +200,7 @@ func (s *ArticleService) List(ctx context.Context, page, pageSize int) ([]*model
 	// 第二个参数限定只取展示用的四列，别把密码哈希读进来（见 preloadAuthor）。
 	// Select 只取列表需要的列，正文只截开头（见 articleListColumns）。
 	// Offset 跳过前面几页，Limit 取当前页大小；排序由常量固定，不接收用户输入。
-	err = s.db.WithContext(ctx).
+	err = scope(s.db.WithContext(ctx)).
 		Select(articleListColumns).
 		Preload("User", preloadAuthor).
 		Order(articleListOrder).
@@ -146,7 +208,7 @@ func (s *ArticleService) List(ctx context.Context, page, pageSize int) ([]*model
 		Limit(q.PageSize).
 		Find(&articles).Error
 	if err != nil {
-		return nil, total, fmt.Errorf("list articles page=%d size=%d: %w", page, pageSize, err)
+		return nil, total, fmt.Errorf("list articles author=%d page=%d size=%d: %w", authorID, page, pageSize, err)
 	}
 	return articles, total, nil
 }
@@ -299,7 +361,7 @@ func (s *ArticleService) readArticleCache(ctx context.Context, key string) (*mod
 	val, err := s.rdb.Get(readCtx, key).Result()
 	cancel()
 
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		// redis.Nil 是「key 不存在」的正常未命中，不是故障，别当错误往上抛。
 		metrics.ArticleCacheEvents.WithLabelValues(cacheEventMiss).Inc()
 		return nil, false, nil

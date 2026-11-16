@@ -114,7 +114,8 @@ type articleListResp struct {
 	PageSize int               `json:"page_size"`
 }
 
-// createArticleReq 是发布文章的请求体。
+// createArticleReq 是发布与编辑共用的请求体。
+// 两个接口能改的字段完全一样，各写一份只会让绑定与校验慢慢分叉。
 // 字段里刻意没有 UserID：作者 id 只从 token 取，
 // 客户端传 user_id 会被 encoding/json 忽略，伪造不了作者。
 type createArticleReq struct {

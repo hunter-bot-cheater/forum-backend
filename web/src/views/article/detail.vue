@@ -14,8 +14,12 @@
       <h1 class="dt-title">{{ article.title }}</h1>
 
       <div class="dt-meta">
-        <el-avatar :size="28" :src="authorAvatar">{{ authorInitial }}</el-avatar>
-        <span class="dt-meta__name">{{ authorName }}</span>
+        <!-- 作者区整体可点：从一篇文章进作者主页是最常见的下一步，
+             这里做成一个整体而不是只让名字可点。 -->
+        <el-avatar :size="28" :src="authorAvatar" class="dt-meta__link" @click="goUser(article.author)">
+          {{ authorInitial }}
+        </el-avatar>
+        <span class="dt-meta__name dt-meta__link" @click="goUser(article.author)">{{ authorName }}</span>
         <span class="dt-meta__sep">·</span>
         <span>{{ formatRelativeTime(article.created_at) }}</span>
       </div>
@@ -35,8 +39,10 @@
           <span>{{ article.like_count }}</span>
         </button>
 
-        <!-- 删除只对作者本人出现。这不是安全边界（后端按 token 再判一次），
-             只是不给别人看一个点了必然失败的按钮。 -->
+        <!-- 编辑与删除只对作者本人出现。这不是安全边界（后端按 token 再判一次），
+             只是不给别人看一个点了必然失败的按钮。
+             编辑放前面：改错字比删文章常见得多。 -->
+        <button v-if="isAuthor" class="dt-edit" @click="goEdit">编辑</button>
         <button v-if="isAuthor" class="dt-delete" :disabled="deleting" @click="removeArticle">
           {{ deleting ? '删除中…' : '删除' }}
         </button>
@@ -85,11 +91,13 @@
           />
 
           <div v-for="root in comments" :key="root.id" class="dt-item" :data-cid="root.id">
-            <el-avatar :size="32" :src="avatarOf(root)">{{ initialOf(root) }}</el-avatar>
+            <el-avatar :size="32" :src="avatarOf(root)" class="dt-who" @click="goUser(root.author)">
+              {{ initialOf(root) }}
+            </el-avatar>
 
             <div class="dt-item__body">
               <div class="dt-item__head">
-                <span class="dt-item__name">{{ nameOf(root) }}</span>
+                <span class="dt-item__name dt-who" @click="goUser(root.author)">{{ nameOf(root) }}</span>
                 <span class="dt-item__time">{{ formatRelativeTime(root.created_at) }}</span>
               </div>
               <p class="dt-item__text">{{ root.content }}</p>
@@ -122,11 +130,13 @@
 
               <div v-if="(root.replies ?? []).length > 0" class="dt-replies">
                 <div v-for="reply in root.replies" :key="reply.id" class="dt-reply" :data-cid="reply.id">
-                  <el-avatar :size="24" :src="avatarOf(reply)">{{ initialOf(reply) }}</el-avatar>
+                  <el-avatar :size="24" :src="avatarOf(reply)" class="dt-who" @click="goUser(reply.author)">
+                    {{ initialOf(reply) }}
+                  </el-avatar>
 
                   <div class="dt-item__body">
                     <div class="dt-item__head">
-                      <span class="dt-item__name">{{ nameOf(reply) }}</span>
+                      <span class="dt-item__name dt-who" @click="goUser(reply.author)">{{ nameOf(reply) }}</span>
                       <!-- 回复非顶级评论时显示「回复 @被回复者」，让人看清这条挂在谁名下。
                            被回复者注销后 reply_to 整个缺失，此时只显示名字不显示这段。 -->
                       <span v-if="reply.reply_to" class="dt-reply__to">
@@ -210,6 +220,7 @@ import {
 } from '@/api/comment'
 import { useArticleStore } from '@/store/modules/article'
 import { useUserStore } from '@/store/modules/user'
+import type { Brief } from '@/api/message'
 import { formatRelativeTime, initials } from '@/utils/format'
 
 // 路由给这个组件配了 props: true，所以 id 从 props 拿而不是从 route.params 取，
@@ -405,6 +416,12 @@ const isAuthor = computed(() => {
 
 const deleting = ref(false)
 
+// goEdit 跳到编辑页。用 push 而不是 replace：
+// 用户改完想回来看详情，浏览器返回应该还在原来这一篇。
+function goEdit() {
+  void router.push('/articles/' + String(articleId.value) + '/edit')
+}
+
 // removeArticle 删除文章。先确认再请求：删除不可撤销，
 // 且会连带删掉评论与点赞，一次误点代价太大。
 async function removeArticle() {
@@ -579,6 +596,16 @@ function avatarOf(target: CommentResp): string | undefined {
   return undefined
 }
 
+// goUser 跳作者 / 评论者的主页。
+// author 可能整个缺失（账号注销后后端省掉这个字段），此时什么都不做：
+// 跳 /users/undefined 会落到 404 页，比不响应更糟。
+function goUser(author?: Brief) {
+  if (!author || !author.id) {
+    return
+  }
+  void router.push('/users/' + String(author.id))
+}
+
 function initialOf(target: CommentResp): string {
   return initials(nameOf(target))
 }
@@ -704,8 +731,25 @@ function initialOf(target: CommentResp): string {
 /* 删除推到最右：它是低频且破坏性的动作，不该紧挨着点赞。
    靠 margin-left:auto 而不是给容器加 space-between——
    加 space-between 会让只有点赞按钮时的排版也变，作者与非作者看到的两套布局不一致。 */
-.dt-delete {
+/* 编辑按钮排在删除前面，由它把整组作者操作推到右侧，
+   两个按钮之间留 8px，看起来是一组而不是两个散落的入口。 */
+.dt-edit {
   margin-left: auto;
+  padding: 7px 6px;
+  border: none;
+  background: none;
+  color: var(--dt-text-weak);
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.dt-edit:hover {
+  color: var(--fs-primary);
+}
+
+.dt-delete {
+  margin-left: 8px;
   padding: 7px 6px;
   border: none;
   background: none;
@@ -807,6 +851,21 @@ function initialOf(target: CommentResp): string {
   font-size: 13px;
   font-weight: 600;
   color: var(--fs-text-2);
+}
+
+/* 可点的作者信息：头像和昵称都是入口，hover 时给一点反馈，
+   否则用户不知道这里有链接（正文里没有下划线这类提示）。 */
+.dt-who,
+.dt-meta__link {
+  cursor: pointer;
+}
+
+.dt-meta__link:hover {
+  color: var(--fs-primary);
+}
+
+.dt-item__name.dt-who:hover {
+  color: var(--fs-primary);
 }
 
 .dt-item__time {

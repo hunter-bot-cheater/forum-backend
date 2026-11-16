@@ -51,11 +51,9 @@ type updateProfileReq struct {
 // toProfilePatch 把请求体转成 service 的入参。
 // 请求结构与业务入参分开，handler 之外的地方（比如以后的批量导入）不改 DTO 也能复用 service。
 func toProfilePatch(req updateProfileReq) ProfilePatch {
-	return ProfilePatch{
-		Nickname:  req.Nickname,
-		AvatarURL: req.AvatarURL,
-		Bio:       req.Bio,
-	}
+	// 两者字段完全一致，直接转换。类型仍然分开，handler 之外可以只依赖
+	// ProfilePatch 而不认识 HTTP 请求体；一旦哪边加字段，这里编译失败提醒同步。
+	return ProfilePatch(req)
 }
 
 // loginResp 是登录成功后 data 的形状。

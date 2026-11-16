@@ -40,6 +40,7 @@ func dialWS(t *testing.T, hub *realtime.Hub, userID uint) *websocket.Conn {
 	t.Cleanup(srv.Close)
 
 	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	//nolint:bodyclose // 握手成功后 resp.Body 由 Conn 接管，关掉会断开连接
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("连接测试 WS 失败: %v", err)

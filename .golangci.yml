@@ -1,0 +1,97 @@
+# golangci-lint 配置（v2 格式，对应 golangci-lint v2.x）。
+#
+# 设计原则：
+#   1. 只开「能指出真问题」的检查，不为凑数量把整套 linter 全打开。
+#      一条规则如果长期靠 nolint 压制，它就是在制造噪音，应该关掉。
+#   2. 测试文件放宽。测试里忽略错误、用长函数名都很常见，
+#      在这些地方较劲会让人把精力花在讨好 linter 上，而不是写好断言。
+#   3. 生成的 swagger 文件整体跳过，那不是人写的代码。
+#
+# 本地运行：golangci-lint run ./...
+# CI 运行：见 .github/workflows/ci.yml 的 lint job。
+version: "2"
+
+run:
+  # 单次检查的上限。项目约 1 万行，5 分钟足够；
+  # 超过这个时间通常是 linter 卡在某个包上，而不是代码本身需要那么久。
+  timeout: 5m
+  # 连测试文件一起查：测试里的错误被静默吞掉，会让断言假绿。
+  tests: true
+
+linters:
+  # 默认全关，再逐个打开。用 default: standard 的话，
+  # 以后升级 linter 会突然多出一批新规则，CI 无缘无故变红。
+  default: none
+
+  enable:
+    # ---- 基础正确性 ----
+    - errcheck        # 没处理的 error
+    - govet           # 官方 vet 的全部检查
+    - ineffassign     # 赋值后从未使用的变量
+    - staticcheck     # 一大类静态缺陷（含 SA/S/ST 系列）
+    - unused          # 未使用的标识符
+
+    # ---- 错误处理 ----
+    - errorlint       # 用 errors.Is / errors.As 而不是 == 比较错误
+    - nilerr          # 明明 err != nil 却返回 nil
+    - bodyclose       # HTTP 响应体没关
+    - sqlclosecheck   # sql.Rows / Stmt 没关
+    - rowserrcheck    # 忘了检查 rows.Err()
+
+    # ---- 代码质量 ----
+    - gocritic        # 风格与性能建议
+    - unconvert       # 多余的显式类型转换
+    - unparam         # 永远传同一个值的参数、永远不用的返回值
+    - misspell        # 英文拼写错误（注释里也会查）
+    - whitespace      # 多余的空行与行尾空格
+
+  settings:
+    errcheck:
+      # 类型断言不加 ok 时 panic，与错误被忽略同级，必须查。
+      check-type-assertions: true
+      # 只检查「没接住」的情况；显式写 _ = 表示作者知道在做什么，不再报。
+      check-blank: false
+
+    gocritic:
+      # 只开诊断与性能两类。style 与 opinionated 里有大量主观偏好
+      # （比如要求把 if-else 改成 switch），这批规则容易引发无意义的改动。
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        # 参数是结构体就提示拷贝，与项目里「接收者用值还是指针」的既有写法冲突。
+        - hugeParam
+        # 与上一条同源：超过 80 字节的返回值也提示，噪音大于价值。
+        - rangeValCopy
+
+    misspell:
+      locale: US
+
+  exclusions:
+    # std-error-handling 会放过 fmt.Fprintf / os.Remove 这类「忽略也无所谓」的调用，
+    # 否则日志与清理代码里会堆满 nolint。
+    presets:
+      - std-error-handling
+
+    rules:
+      # 测试文件：错误处理与参数检查放宽。
+      # 测试的意义是断言失败时能定位，不是把每个 error 都包装一遍。
+      - path: _test\.go
+        linters:
+          - errcheck
+          - unparam
+          - gocritic
+          - errorlint
+
+      # swag 生成的文件，不要手工改，也不要让它的告警挡住 CI。
+      - path: api/swagger/
+        linters:
+          - ALL
+
+formatters:
+  enable:
+    - gofmt
+  settings:
+    gofmt:
+      # -s：合并冗余的类型声明、简化 range 等。与 gofmt -l 的判据一致。
+      simplify: true

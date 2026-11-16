@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -248,7 +249,17 @@ func (r *Reconciler) checkMessageChain(ctx context.Context, rep *ReconcileReport
 	// 这时 XPENDING 会报 NOGROUP，直接按 0 处理，不要让整个对账失败。
 	// 用 XInfoGroups 探一下，比匹配错误字符串可靠：错误文案会随客户端版本变。
 	groups, err := r.rdb.XInfoGroups(ctx, event.StreamKey).Result()
-	if err != nil || len(groups) == 0 {
+	if err != nil {
+		// stream 还不存在是正常情况（服务没起来过、Redis 刚清空），按 0 处理。
+		// 但连接失败、权限不足这类错误必须上抛：吞掉会把「查不到」当成
+		// 「没有 pending」，对账报告看着正常，实际什么都没核对。
+		if isMissingStreamErr(err) {
+			rep.StreamPending = 0
+			return nil
+		}
+		return fmt.Errorf("xinfo groups %s: %w", event.StreamKey, err)
+	}
+	if len(groups) == 0 {
 		rep.StreamPending = 0
 		return nil
 	}
@@ -325,4 +336,14 @@ func (r *ReconcileReport) HasProblem() bool {
 		return true
 	}
 	return false
+}
+
+// isMissingStreamErr 判断 XINFO GROUPS 的失败是不是「stream 不存在」。
+//
+// Redis 对这两种情况没有结构化错误码，go-redis 只给一个 redis.Error，
+// 只能比文案：key 不存在时是 "ERR no such key"，消费组不存在时是 "NOGROUP ..."。
+// 这两条是 Redis 服务端的固定回应，不随客户端版本变化。
+func isMissingStreamErr(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such key") || strings.Contains(msg, "nogroup")
 }

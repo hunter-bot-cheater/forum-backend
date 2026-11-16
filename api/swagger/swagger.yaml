@@ -552,6 +552,10 @@ paths:
         in: query
         name: page_size
         type: integer
+      - description: 只看某个作者的文章，不传为全站
+        in: query
+        name: author_id
+        type: integer
       produces:
       - application/json
       responses:
@@ -565,7 +569,7 @@ paths:
                   $ref: '#/definitions/article.articleListResp'
               type: object
         "400":
-          description: 分页参数越界
+          description: 分页参数越界或 author_id 非法
           schema:
             type: string
       summary: 文章分页列表
@@ -635,6 +639,51 @@ paths:
           schema:
             type: string
       summary: 文章详情
+      tags:
+      - articles
+    put:
+      consumes:
+      - application/json
+      description: 只允许作者本人；标题与正文都必填，规则与发布完全一致。
+      parameters:
+      - description: 文章 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 标题与正文
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/article.createArticleReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/article.articleDetailResp'
+              type: object
+        "400":
+          description: id 或请求体格式不正确、标题正文不合法
+          schema:
+            type: string
+        "401":
+          description: 未登录
+          schema:
+            type: string
+        "404":
+          description: 文章不存在或不属于当前用户
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 编辑文章
       tags:
       - articles
   /articles/{id}/comments:

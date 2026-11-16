@@ -122,13 +122,16 @@ func (s *LikeService) writeRelation(ctx context.Context, articleID, userID uint,
 		if add {
 			// 直接插入，重复点赞交给 (article_id, user_id) 的唯一索引拦。
 			// 不先 SELECT 再 INSERT：两步之间有竞态，并发双击会同时查到「没点过」。
+			// 三个分支用 switch 而不是 if-else 链：这里判断的是「err 有几种形态」，
+			// 写成平铺的分支更清楚，也免得以后加一种错误时缩进越套越深。
 			err := tx.Create(&model.ArticleLike{ArticleID: articleID, UserID: userID}).Error
-			if err == nil {
+			switch {
+			case err == nil:
 				changed = true
-			} else if errors.Is(err, gorm.ErrDuplicatedKey) {
+			case errors.Is(err, gorm.ErrDuplicatedKey):
 				// 已经点过赞，不是错误。changed 保持 false，后面不会发通知。
 				return nil
-			} else {
+			default:
 				return fmt.Errorf("insert article like: %w", err)
 			}
 		} else {
@@ -139,13 +142,11 @@ func (s *LikeService) writeRelation(ctx context.Context, articleID, userID uint,
 				return fmt.Errorf("delete article like: %w", res.Error)
 			}
 			changed = res.RowsAffected > 0
-		}
-
-		// 没有真正改变状态（重复点赞或取消点赞）就不发通知，直接提交空事务。
-		if !changed || !add {
+			// 取消点赞不发通知，删到没删到都一样，直接结束事务。
 			return nil
 		}
 
+		// 走到这里说明这次真的新增了关系：重复点赞在上面已经提前 return 了。
 		// 点赞作用在文章上，所以事件的目标是这篇文章。
 		// Created 留空：点开通知跳到文章就够了，点赞记录本身的 id 没有消费方。
 		target := event.Target{Type: event.TargetArticle, ID: articleID}

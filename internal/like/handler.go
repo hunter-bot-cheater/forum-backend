@@ -27,12 +27,8 @@ func NewLikeHandler(likeSvc *LikeService, hotSvc *hot.HotService) *LikeHandler {
 // toLikeResp 把 service 的结论转成对外结构体。
 // 转换留在 module 内，service 不需要 import 自己的 handler 层。
 func toLikeResp(r LikeResult) likeResp {
-	return likeResp{
-		ArticleID: r.ArticleID,
-		Count:     r.Count,
-		Changed:   r.Changed,
-		Liked:     r.Liked,
-	}
+	// 字段完全一致，用类型转换；任一边加字段都会编译失败，提醒同步。
+	return likeResp(r)
 }
 
 // Like godoc

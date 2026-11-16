@@ -1,5 +1,5 @@
 # 常用开发命令
-.PHONY: run run-release build build-release migrate test test-integration test-cover tidy swagger web-dev web-build web-preview
+.PHONY: run run-release build build-release migrate test test-integration test-cover lint tidy swagger web-dev web-build web-preview
 
 run:   ## 启动服务
 	go run ./cmd/server
@@ -27,6 +27,15 @@ test-integration: ## 跑集成测试，需要先 export TEST_MYSQL_DSN（见 REA
 
 test-cover: ## 看覆盖率；同样需要 TEST_MYSQL_DSN 才能覆盖到 service 层
 	go test -p 1 -cover ./...
+
+lint: ## 代码检查：gofmt + golangci-lint（需先装 golangci-lint v2，规则见 .golangci.yml）
+	@unformatted=$$(gofmt -l .); \
+	if [ -n "$$unformatted" ]; then \
+		echo "以下文件没有用 gofmt 格式化："; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
+	golangci-lint run ./...
 
 tidy:  ## 整理依赖
 	go mod tidy

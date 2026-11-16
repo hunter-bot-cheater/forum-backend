@@ -45,9 +45,16 @@
           @click="openTarget(item)"
         >
           <!-- 头像右下角挂一个类型角标：一列通知扫下去，
-               不用读文字就能分出哪些是赞、哪些是评论。 -->
+               不用读文字就能分出哪些是赞、哪些是评论。
+               头像本身可点进触发者主页，所以用一个内层元素承接点击并 stop：
+               否则点头像会同时触发整行的「标记已读 + 跳文章」。 -->
           <div class="nt__avatar">
-            <el-avatar :size="40" :src="avatarOf(item)">{{ initialOf(item) }}</el-avatar>
+            <el-avatar
+              :size="40"
+              :src="avatarOf(item)"
+              class="nt__who"
+              @click.stop="goUser(item)"
+            >{{ initialOf(item) }}</el-avatar>
             <span
               v-if="kindOf(item)"
               class="nt__kind"
@@ -57,7 +64,7 @@
 
           <div class="nt__body">
             <p class="nt__line">
-              <span class="nt__name">{{ nameOf(item) }}</span>
+              <span class="nt__name nt__who" @click.stop="goUser(item)">{{ nameOf(item) }}</span>
               <span class="nt__action">{{ actionOf(item) }}</span>
             </p>
 
@@ -193,6 +200,15 @@ function actionOf(item: NotificationResp): string {
     return '评论了你的文章'
   }
   return '和你互动了'
+}
+
+// goUser 进触发者主页。actor 可能缺失（注销后的账号），此时不跳：
+// /users/undefined 会落到 404 页，比不响应更糟。
+function goUser(item: NotificationResp) {
+  if (!item.actor || !item.actor.id) {
+    return
+  }
+  void router.push('/users/' + String(item.actor.id))
 }
 
 // openTarget 跳到通知对应的位置。
@@ -410,6 +426,16 @@ function onPage(next: number) {
 
 .nt__name {
   font-weight: 600;
+}
+
+/* 可点的头像与昵称：给 hover 反馈，并和整行「点了看文章」区分开——
+   点这里去的是人的主页，不是文章。 */
+.nt__who {
+  cursor: pointer;
+}
+
+.nt__name.nt__who:hover {
+  color: var(--fs-primary);
 }
 
 /* 名字和动作之间留 4px：两个 inline 元素紧挨着渲染时，

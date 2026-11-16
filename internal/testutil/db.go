@@ -141,6 +141,7 @@ func connectAndMigrate(dsn string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("连接 MySQL 服务失败: %w", err)
 	}
 	// CREATE DATABASE 用反引号包库名：库名来自 DSN，不能直接拼进语句。
+	//nolint:gocritic // 反引号是 SQL 标识符语法；%#q 生成的是 Go 字符串字面量，语义不对
 	createSQL := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci", cfg.DBName)
 	if _, err := conn.Exec(createSQL); err != nil {
 		conn.Close()

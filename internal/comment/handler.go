@@ -85,12 +85,9 @@ func (h *CommentHandler) Locate(c *gin.Context) {
 		httputil.MapServiceError(c, "locate comment", err)
 		return
 	}
-	response.OK(c, commentAnchorResp{
-		CommentID: anchor.CommentID,
-		ArticleID: anchor.ArticleID,
-		RootID:    anchor.RootID,
-		Index:     anchor.Index,
-	})
+	// Anchor 与对外结构的字段名、类型、顺序完全一致，直接转换。
+	// 以后任一边加字段都会在这里编译失败，正好提醒同步，比逐字段抄一遍安全。
+	response.OK(c, commentAnchorResp(anchor))
 }
 
 // Create godoc

@@ -44,3 +44,80 @@ export function getMe() {
 export function register(data: { username: string; password: string }) {
   return request<UserResp>({ url: '/register', method: 'post', data })
 }
+
+// 下面是用户主页要用的接口，对应后端 internal/user 与 internal/follow。
+
+// getProfile 看别人的主页（也看得到自己）。
+// 与 getMe 的区别：getMe 走 auth 组、只能看自己，profile 走公开组、要带 id。
+// 路由挂了可选鉴权，所以带 token 时 is_following 才是真实值，游客恒为 false。
+export function getProfile(id: number) {
+  return request<UserProfile>({ url: '/users/' + String(id), method: 'get' })
+}
+
+// ProfilePatch 是编辑资料的请求体，对应后端 updateProfileReq。
+// 三个字段都可选：不传 = 不改这一项，传空串 = 清空这一项。
+// 表单是完整回填的，保存时三项目前都会传，但类型仍按可选写，
+// 与后端的指针语义保持一致，以后加「只改头像」这类入口不用改类型。
+export interface ProfilePatch {
+  nickname?: string
+  avatar_url?: string
+  bio?: string
+}
+
+// updateMe 保存当前用户的资料，返回更新后的完整主页结构。
+// 返回的是 profileResp 而不是 userResp：调用方拿到后直接覆盖本地 profile，
+// 关注计数不会因为这次更新被抹成 0。
+export function updateMe(patch: ProfilePatch) {
+  return request<UserProfile>({ url: '/users/me', method: 'put', data: patch })
+}
+
+// FollowState 是关注 / 取关之后的返回。
+// follower_count 是操作后的真实粉丝数，直接覆盖，不要在旧值上加减：
+// 并发下加减会越差越远。
+// changed 表示这次有没有真的改到数据（重复关注、取消没关注的人都是 false）。
+export interface FollowState {
+  following: boolean
+  follower_count: number
+  changed: boolean
+}
+
+export function followUser(id: number) {
+  return request<FollowState>({ url: '/users/' + String(id) + '/follow', method: 'put' })
+}
+
+export function unfollowUser(id: number) {
+  return request<FollowState>({ url: '/users/' + String(id) + '/follow', method: 'delete' })
+}
+
+// FollowItem 是关注 / 粉丝列表里的一行。
+// followed_by_me 供粉丝列表画「回关」按钮（在「我的关注」里恒为 true）。
+export interface FollowItem {
+  id: number
+  username: string
+  nickname: string
+  avatar_url: string
+  followed_at: string
+  followed_by_me: boolean
+}
+
+export interface FollowListResp {
+  list: FollowItem[]
+  total: number
+  page: number
+  page_size: number
+}
+
+// followKind 只有两个取值，用联合类型而不是 string：
+// 写错成 'following'/'fans' 时编译期就能发现，不用等到 404。
+export type FollowKind = 'following' | 'followers'
+
+// listFollows 拉某个人的关注或粉丝列表。
+// 两个接口形状完全一样，只是路径不同，所以合成一个函数 + 一个 kind 参数，
+// 免得在两处各写一份相同的分页与类型。
+export function listFollows(id: number, kind: FollowKind, page = 1, pageSize = 20) {
+  return request<FollowListResp>({
+    url: '/users/' + String(id) + '/' + kind,
+    method: 'get',
+    params: { page, page_size: pageSize },
+  })
+}

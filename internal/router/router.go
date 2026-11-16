@@ -239,6 +239,9 @@ func New(deps Deps) (*gin.Engine, error) {
 			auth.DELETE("/users/:id/follow", followHandler.Unfollow)
 
 			auth.POST("/articles", articleHandler.Create)
+			// 编辑用 PUT 而不是 PATCH：标题与正文都是必填的全量字段，
+			// 没有「只改一项」的语义，完整的资源替换更好理解。
+			auth.PUT("/articles/:id", articleHandler.Update)
 			auth.DELETE("/articles/:id", articleHandler.Delete)
 			auth.POST("/articles/:id/comments", commentHandler.Create)
 			auth.DELETE("/comments/:id", commentHandler.Delete)

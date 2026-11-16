@@ -40,8 +40,9 @@ func NewArticleHandler(svc *ArticleService, liked LikedChecker) *ArticleHandler 
 // @Produce      json
 // @Param        page       query  int  false  "页码，默认 1"
 // @Param        page_size  query  int  false  "每页条数，默认 10，最大 50"
+// @Param        author_id  query  int  false  "只看某个作者的文章，不传为全站"
 // @Success      200  {object}  httputil.SwaggerEnvelope{data=articleListResp}
-// @Failure      400  {string}  string    "分页参数越界"
+// @Failure      400  {string}  string    "分页参数越界或 author_id 非法"
 // @Router       /articles [get]
 // List 处理 GET /api/articles，返回当前页数据与总数。
 func (h *ArticleHandler) List(c *gin.Context) {
@@ -53,7 +54,20 @@ func (h *ArticleHandler) List(c *gin.Context) {
 		return
 	}
 
-	articles, total, err := h.svc.List(c.Request.Context(), page, pageSize)
+	// author_id 可选，只在用户主页传。
+	// 非法值直接 400 而不是当成 0：静默降级会让前端拼错参数时拿到全站列表，
+	// 看起来像「这个人的主页里混进了别人的文章」。
+	var authorID uint
+	if raw := c.Query("author_id"); raw != "" {
+		parsed, parseErr := strconv.ParseUint(raw, 10, 64)
+		if parseErr != nil {
+			response.Error(c, http.StatusBadRequest, "author_id 格式不正确")
+			return
+		}
+		authorID = uint(parsed)
+	}
+
+	articles, total, err := h.svc.List(c.Request.Context(), authorID, page, pageSize)
 	if err != nil {
 		httputil.MapServiceError(c, "list articles", err)
 		return
@@ -165,6 +179,53 @@ func (h *ArticleHandler) Create(c *gin.Context) {
 
 	// 只把 DTO 交给响应包，数据库模型不会直接出现在响应里。
 	response.OK(c, toArticleResp(a))
+}
+
+// Update godoc
+// @Summary      编辑文章
+// @Description  只允许作者本人；标题与正文都必填，规则与发布完全一致。
+// @Tags         articles
+// @Accept       json
+// @Produce      json
+// @Param        id   path  int  true  "文章 ID"
+// @Param        body body createArticleReq true "标题与正文"
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=articleDetailResp}
+// @Failure      400  {string}  string    "id 或请求体格式不正确、标题正文不合法"
+// @Failure      401  {string}  string    "未登录"
+// @Failure      404  {string}  string    "文章不存在或不属于当前用户"
+// @Security     Bearer
+// @Router       /articles/{id} [put]
+// Update 处理 PUT /api/articles/:id，返回编辑后的详情（含点赞数）。
+func (h *ArticleHandler) Update(c *gin.Context) {
+	userID, ok := httputil.CurrentUserID(c)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "未登录")
+		return
+	}
+
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Error(c, http.StatusBadRequest, "id 格式不正确")
+		return
+	}
+
+	// 与发布共用同一个请求体：能改的字段完全一样（标题、正文），
+	// 各写一个结构体只会让两边的绑定与校验慢慢分叉。
+	var req createArticleReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, http.StatusBadRequest, "请求体格式不正确")
+		return
+	}
+
+	a, err := h.svc.Update(c.Request.Context(), uint(id), userID, req.Title, req.Content)
+	if err != nil {
+		// 不存在、不是作者都映射成 404；标题正文不合法映射成 400。
+		httputil.MapServiceError(c, "update article", err)
+		return
+	}
+
+	// 返回详情形状：前端保存后可以整体替换本地状态，不用再补发一次 GET。
+	response.OK(c, toArticleDetailResp(a))
 }
 
 // Delete 处理 DELETE /api/articles/:id，仅作者本人可删。

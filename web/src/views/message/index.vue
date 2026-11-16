@@ -75,10 +75,15 @@
         <template v-if="peer">
           <header class="im-chat__head">
             <el-button v-if="isMobile" text class="im-chat__back" @click="backToList">返回</el-button>
-            <el-avatar :size="34" :src="avatarOf(peer.nickname, peer.avatar_url)">
+            <el-avatar
+              :size="34"
+              :src="avatarOf(peer.nickname, peer.avatar_url)"
+              class="im-chat__peer"
+              @click="goUser(peer.id)"
+            >
               {{ initials(peer.nickname) }}
             </el-avatar>
-            <div class="im-chat__who">
+            <div class="im-chat__who" @click="goUser(peer.id)">
               <div class="im-chat__name">{{ peer.nickname }}</div>
               <!-- 连着的时候显示 @用户名；昵称本来就是用户名时不显示，
                    否则「123456789 / @123456789」上下重复一遍，纯占地方。
@@ -434,6 +439,15 @@ function onConvChange(item: ConvRow) {
     return
   }
   router.push('/messages/' + String(item.id))
+}
+
+// goUser 从聊天头部进对方主页。
+// 聊天页本身也不是「只能聊天」的终点：想看看对方写过什么，最自然的入口是这里的头像。
+function goUser(id: number) {
+  if (!id) {
+    return
+  }
+  router.push('/users/' + String(id))
 }
 
 function backToList() {
@@ -962,6 +976,17 @@ onBeforeUnmount(() => {
 
 .im-chat__who {
   min-width: 0;
+  cursor: pointer;
+}
+
+/* 头部头像可点进主页，hover 时给一点透明度变化作为反馈。 */
+.im-chat__peer {
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.im-chat__peer:hover {
+  opacity: 0.8;
 }
 
 .im-chat__name {

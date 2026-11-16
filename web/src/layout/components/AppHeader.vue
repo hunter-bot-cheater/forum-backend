@@ -50,7 +50,9 @@
           </div>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="logout">退出登录</el-dropdown-item>
+              <el-dropdown-item command="profile">我的主页</el-dropdown-item>
+              <el-dropdown-item command="settings">编辑资料</el-dropdown-item>
+              <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -121,7 +123,30 @@ const initial = computed(() => {
 function onCommand(command: string) {
   if (command === 'logout') {
     logout()
+    return
   }
+  if (command === 'profile') {
+    goProfile()
+    return
+  }
+  if (command === 'settings') {
+    goSettings()
+  }
+}
+
+// 下拉里的「我的主页」要拼自己的 id。profile 还没拉回来时 userId 是 0，
+// 这时点了也拼不出正确地址，直接忽略——这一瞬间只有几百毫秒，
+// 比跳到 /users/0 再吃一个 404 好。
+function goProfile() {
+  if (userStore.userId === 0) {
+    return
+  }
+  void router.push('/users/' + String(userStore.userId))
+}
+
+// 编辑资料页自己从 store / 接口取资料，不需要 id，任何时候都能进。
+function goSettings() {
+  void router.push('/settings/profile')
 }
 
 // 写文章是登录后才能做的事。这里不自己判 token，交给路由守卫：

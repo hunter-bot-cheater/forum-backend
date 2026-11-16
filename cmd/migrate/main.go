@@ -46,7 +46,7 @@ func run() int {
 		slog.Error("初始化日志失败", "error", err)
 		return 2
 	}
-	defer closeLog()
+	defer func() { _ = closeLog() }()
 
 	db, err := config.InitDB(&cfg.MySQL)
 	if err != nil {

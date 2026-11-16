@@ -73,6 +73,13 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
+  // applyProfile 用一份完整资料替换本地状态。
+  // 只给「资料刚改完」的场景用：顶栏的昵称头像要立刻变，
+  // 等下一次 fetchMe 才刷新的话，用户会以为没保存成功。
+  function applyProfile(data: UserProfile) {
+    profile.value = data
+  }
+
   async function login(data: { username: string; password: string }) {
     const resp = await loginApi(data)
     applyLogin(resp)
@@ -97,5 +104,5 @@ export const useUserStore = defineStore('user', () => {
     runLogoutHooks()
   }
 
-  return { token, profile, username, displayName, userId, login, register, fetchMe, resetToken }
+  return { token, profile, username, displayName, userId, login, register, fetchMe, applyProfile, resetToken }
 })
