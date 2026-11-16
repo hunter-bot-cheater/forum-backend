@@ -3,6 +3,7 @@ module forum-backend
 go 1.26.0
 
 require (
+	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
@@ -34,6 +35,7 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/prometheus/common v0.72.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.uber.org/atomic v1.12.0 // indirect
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/tools v0.49.0 // indirect

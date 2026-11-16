@@ -56,3 +56,8 @@ Desktop.ini
 # ============ 日志 ============
 *.log
 logs/
+
+# ============ 测试产物 ============
+# go test -coverprofile 的输出，只在本地临时看覆盖率，不该进仓库。
+coverage.out
+c.out

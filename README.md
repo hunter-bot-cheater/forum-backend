@@ -16,6 +16,7 @@
 - 对外响应结构体集中在 `internal/handler/dto.go`，与 handler 同包。注册与登录不再直接序列化 `model.User`，响应 JSON 形状与改动前一致。取舍依据见 02 章 8.0。
 - `go.mod` 声明 `go 1.26.0`，本机实测 `go1.27.3`。先运行 `go version` 确认本机版本满足要求。旧版 README 写的 1.25.0 已作废。
 - `go build ./...` 与 `go test ./...` 当前可通过，测试文件以工作树里的 `*_test.go` 为准（03a 章有 `internal/service/article_cache_test.go`，04 章 4.10 会新增 `internal/handler/dto_test.go`）。仓库里多处源码尚未 `gofmt`，用 `gofmt -l ./cmd ./internal ./pkg` 查差异，落地后对本次改过的文件跑 `gofmt -w`。
+- 测试地基已落地：`internal/testutil` 提供真实 MySQL（`TEST_MYSQL_DSN` 开关）与 miniredis 两套夹具，`internal/comment` 已作为示范补齐 service 与 handler 测试，包覆盖率从 0% 到 81%（总覆盖率 21.7% → 24.4%）。CI 增加了 MySQL service 与 `-race`。其余依赖数据库的包仍待补，用法见「测试」一节。
 
 ## 计划实现的功能
 
@@ -69,6 +70,46 @@ go run ./cmd/server
 ```
 
 默认从项目根目录运行时，配置读取 `config/config.yaml`。启动链路会校验 JWT 配置、连接 MySQL 并执行自动迁移，所以要先创建配置中的数据库并确认 MySQL 正在运行。连不上数据库时进程会退出，先修依赖再试 HTTP 请求。
+
+## 测试
+
+测试分两类，靠环境变量 `TEST_MYSQL_DSN` 开关：
+
+| 类型 | 依赖 | 跑法 | 覆盖内容 |
+|---|---|---|---|
+| 纯单测 | 无 | `go test ./...` 默认就会跑 | 配置解析、中间件、纯函数、指标、日志轮转 |
+| 集成测试 | MySQL + 进程内 Redis | 设好 `TEST_MYSQL_DSN` 后同样一条命令 | service 的 SQL、事务、外键、事件写入 |
+
+不设 `TEST_MYSQL_DSN` 时集成测试走 `t.Skip`，没装 MySQL 的机器照样能跑单测；CI 里配了 MySQL service 并注入这个变量，所以不会出现「本地跳过、CI 假绿」。
+
+```bash
+# bash / macOS / CI
+export TEST_MYSQL_DSN="root:你的密码@tcp(127.0.0.1:3306)/forum_test?parseTime=true&loc=Local&charset=utf8mb4"
+go test -count=1 ./...
+```
+
+```powershell
+# PowerShell
+$env:TEST_MYSQL_DSN="root:你的密码@tcp(127.0.0.1:3306)/forum_test?parseTime=true&loc=Local&charset=utf8mb4"
+go test -count=1 ./...
+```
+
+也可以 `make test-integration`（先 export 上面那个变量）或 `make test-cover`。
+
+三个刻意的选择：
+
+- **测试库必须和开发库分开**。`internal/testutil` 每个用例开始前会 `TRUNCATE` 所有表，指错库就是把开发数据清空，所以它拒绝不带库名的 DSN，也请把库名固定成 `forum_test`。
+- **用真实 MySQL 而不是 sqlite 内存库**。项目的 SQL 用到 `LEFT()` 截摘要、`RESTRICT` 外键、条件 `UPDATE` 抢名额，sqlite 要么不支持要么语义不同，用它跑出来的绿是假绿。
+- **Redis 用 miniredis**。进程内起一个、每个用例一份，既不用额外装服务，也不会把本地开发的热榜与限流桶清掉。
+
+新增表时要把表名补进 `internal/testutil/db.go` 的 `testTables`，漏一张就会让脏数据串到下一个用例，典型症状是「单独跑能过、整包一起跑就挂」。
+
+看覆盖率：
+
+```bash
+go test -cover ./...                                                      # 各包一行
+go test -coverprofile=c.out ./... && go tool cover -func=c.out | tail -1   # 只看总计
+```
 
 ## 探活接口
 

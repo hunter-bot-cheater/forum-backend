@@ -7,6 +7,30 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    # 集成测试连真实 MySQL。service 容器与 job 共享 network namespace，
+    # 所以 127.0.0.1:3306 直接可达，不需要额外配 hosts。
+    # 固定 8.0 而不是 latest：本地开发也是 8.x，避免 CI 绿、本机炸。
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: forum_test
+        ports:
+          - 3306:3306
+        # 没有健康检查就开始跑测试，第一次连接会撞上「MySQL 还在初始化」。
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    env:
+      # 测试代码认这个变量来连测试库。不设的话集成测试会全部 skip，
+      # 那份全绿的 CI 就是假绿：覆盖率会掉回 20% 出头，一眼能看出来。
+      TEST_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/forum_test?parseTime=true&loc=Local&charset=utf8mb4
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -19,4 +43,9 @@ jobs:
       - name: Check docs are up to date
         run: git add -N api/swagger && git diff --exit-code -- api/swagger
       - run: go vet ./...
-      - run: go test ./...
+      # -race 只在 CI 跑：本地开它慢两三倍，Windows 上还要额外装 gcc。
+      # 它要抓的是 Hub、抢楼这些并发代码里的数据竞争，跑一次比读十遍代码有用。
+      - name: Test with race detector
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
