@@ -5,10 +5,12 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
 	"forum-backend/internal/httputil"
+	"forum-backend/internal/textutil"
 	"forum-backend/pkg/response"
 )
 
@@ -36,13 +38,16 @@ func NewArticleHandler(svc *ArticleService, liked LikedChecker) *ArticleHandler 
 
 // List godoc
 // @Summary      文章分页列表
+// @Description  可按作者、关键词或标签筛选；关键词同时匹配标题与正文，不区分大小写
 // @Tags         articles
 // @Produce      json
-// @Param        page       query  int  false  "页码，默认 1"
-// @Param        page_size  query  int  false  "每页条数，默认 10，最大 50"
-// @Param        author_id  query  int  false  "只看某个作者的文章，不传为全站"
+// @Param        page       query  int     false  "页码，默认 1"
+// @Param        page_size  query  int     false  "每页条数，默认 10，最大 50"
+// @Param        author_id  query  int     false  "只看某个作者的文章，不传为全站"
+// @Param        keyword    query  string  false  "搜索关键词，同时匹配标题与正文，最长 50 字"
+// @Param        tag        query  string  false  "只看带这个标签的文章，按名字精确匹配"
 // @Success      200  {object}  httputil.SwaggerEnvelope{data=articleListResp}
-// @Failure      400  {string}  string    "分页参数越界或 author_id 非法"
+// @Failure      400  {string}  string    "分页参数越界、author_id 非法、关键词或标签过长"
 // @Router       /articles [get]
 // List 处理 GET /api/articles，返回当前页数据与总数。
 func (h *ArticleHandler) List(c *gin.Context) {
@@ -67,7 +72,24 @@ func (h *ArticleHandler) List(c *gin.Context) {
 		authorID = uint(parsed)
 	}
 
-	articles, total, err := h.svc.List(c.Request.Context(), authorID, page, pageSize)
+	// keyword 可选，trim 后为空当作「没搜」：只敲几个空格不该算出一次搜索。
+	// 超长在这里判 400 而不是截断：截断会返回与用户输入不符的结果，
+	// 静默忽略又会让人以为搜索功能没生效。
+	keyword := strings.TrimSpace(c.Query("keyword"))
+	if textutil.TooLongRunes(keyword, maxKeywordRunes) {
+		response.Error(c, http.StatusBadRequest, "关键词最长 50 个字")
+		return
+	}
+
+	// tag 可选，按名字精确匹配。与关键词一样 trim 后判长度：
+	// 标签本来就短，超过上限只可能是拼错或恶意构造，给 400 比返回空列表更好排查。
+	tagName := strings.TrimSpace(c.Query("tag"))
+	if textutil.TooLongRunes(tagName, maxTagRunes) {
+		response.Error(c, http.StatusBadRequest, "标签最长 32 个字")
+		return
+	}
+
+	articles, total, err := h.svc.List(c.Request.Context(), authorID, keyword, tagName, page, pageSize)
 	if err != nil {
 		httputil.MapServiceError(c, "list articles", err)
 		return
@@ -89,6 +111,26 @@ func (h *ArticleHandler) List(c *gin.Context) {
 		PageSize: pageSize,
 	}
 	response.OK(c, resp)
+}
+
+// ListTags godoc
+// @Summary      热门标签
+// @Description  按文章数倒序返回前 20 个标签，供前端做标签云与筛选入口
+// @Tags         articles
+// @Produce      json
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=tagListResp}
+// @Router       /tags [get]
+// ListTags 处理 GET /api/tags。
+//
+// 这个接口不需要登录：标签云是列表页的公开入口，游客也应该能看到有哪些标签。
+func (h *ArticleHandler) ListTags(c *gin.Context) {
+	tags, err := h.svc.TopTags(c.Request.Context(), topTagsLimit)
+	if err != nil {
+		httputil.MapServiceError(c, "list tags", err)
+		return
+	}
+	// TopTags 内部用 Scan 装结果，空表时是空切片而不是 nil，可以直接下发。
+	response.OK(c, tagListResp{List: tags})
 }
 
 // Detail godoc
@@ -117,14 +159,44 @@ func (h *ArticleHandler) Detail(c *gin.Context) {
 		httputil.MapServiceError(c, "article detail", err)
 		return
 	}
-	// 详情比列表多一个 like_count 与 liked，所以用另一个 DTO 包一层。
+	// 详情比列表多一个 like_count、view_count 与 liked，所以用另一个 DTO 包一层。
 	resp := toArticleDetailResp(a)
 
-	// liked 不能跟着文章进缓存：缓存里存的是文章本身（含 like_count），
+	// 同一个身份后面还要用来查「我点过没」，先取一次，别在两处各取一遍。
+	userID, loggedIn := httputil.CurrentUserID(c)
+
+	// 浏览数在这里计，而不是在 service 的 Detail 里：只有「详情接口被请求」
+	// 才算一次浏览，内部调用（编辑后回读、测试）不该涨这个数字。
+	// 登录用户按 id 去重，游客按 IP：两个前缀不能共用，否则 4 号用户
+	// 和「IP 末尾是 4」的游客会互相把对方的标记占掉。
+	//
+	// 放在 Detail 成功之后：文章不存在时不该往 Redis 写去重标记，
+	// 否则刷随机 id 就能批量制造要 30 分钟才过期的垃圾 key。
+	viewer := "ip:" + c.ClientIP()
+	if loggedIn {
+		viewer = "u:" + strconv.FormatUint(uint64(userID), 10)
+	}
+	if err := h.svc.RecordView(c.Request.Context(), uint(id), viewer); err != nil {
+		// 浏览数记不上不该让整篇文章打不开：正文、作者、点赞都已经拿到了。
+		slog.WarnContext(c.Request.Context(), "record article view",
+			"article_id", id, "viewer", viewer, "error", err)
+	}
+
+	// 用库里的最新值覆盖缓存里的浏览数。缓存值是回填那一刻的快照，
+	// 直接展示会让同一读者刷新两次看到数字变小（第一次回源读到旧值 + 本次计数的补偿，
+	// 第二次命中缓存，快照还是更早的）。查询失败就沿用缓存值，不因此让详情报错。
+	if n, err := h.svc.ViewCount(c.Request.Context(), uint(id)); err != nil {
+		slog.WarnContext(c.Request.Context(), "read article view count",
+			"article_id", id, "error", err)
+	} else {
+		resp.ViewCount = n
+	}
+
+	// liked 不能跟着文章进缓存：缓存里存的是文章本身（含 like_count、view_count），
 	// 「我点过没」每个用户都不同，只能按当前访问者实时查。
 	// 路由挂了 OptionalJWTAuth，没登录或 token 过期时 CurrentUserID 返回 false，
 	// 此时保持 false——游客没有可判断的身份。
-	if userID, ok := httputil.CurrentUserID(c); ok && h.liked != nil {
+	if loggedIn && h.liked != nil {
 		liked, err := h.liked.HasLiked(c.Request.Context(), uint(id), userID)
 		if err != nil {
 			// 点赞状态查不出来不该让整篇文章打不开：正文已经拿到了。
@@ -141,10 +213,11 @@ func (h *ArticleHandler) Detail(c *gin.Context) {
 
 // Create godoc
 // @Summary      发布文章
+// @Description  tags 留空时，若服务端开启了 llm.enabled，会自动生成一个标签；生成失败不影响发布
 // @Tags         articles
 // @Accept       json
 // @Produce      json
-// @Param        body body createArticleReq true "标题与正文"
+// @Param        body body createArticleReq true "标题、正文与标签（标签可为空数组）"
 // @Success      200  {object}  httputil.SwaggerEnvelope{data=articleResp}
 // @Failure      400  {string}  string    "请求体格式不正确"
 // @Failure      401  {string}  string    "未登录"
@@ -169,10 +242,10 @@ func (h *ArticleHandler) Create(c *gin.Context) {
 		return
 	}
 
-	// 三个入参里，只有后两个来自客户端；userID 来自中间件校验过的 token。
-	a, err := h.svc.Create(c.Request.Context(), userID, req.Title, req.Content)
+	// 三个入参里，只有后三个来自客户端；userID 来自中间件校验过的 token。
+	a, err := h.svc.Create(c.Request.Context(), userID, req.Title, req.Content, req.Tags)
 	if err != nil {
-		// 标题正文为空、超长都会走到这里，由 MapServiceError 映射成 400。
+		// 标题正文为空、超长、标签过多或过长都会走到这里，由 MapServiceError 映射成 400。
 		httputil.MapServiceError(c, "create article", err)
 		return
 	}
@@ -217,9 +290,9 @@ func (h *ArticleHandler) Update(c *gin.Context) {
 		return
 	}
 
-	a, err := h.svc.Update(c.Request.Context(), uint(id), userID, req.Title, req.Content)
+	a, err := h.svc.Update(c.Request.Context(), uint(id), userID, req.Title, req.Content, req.Tags)
 	if err != nil {
-		// 不存在、不是作者都映射成 404；标题正文不合法映射成 400。
+		// 不存在、不是作者都映射成 404；标题正文或标签不合法映射成 400。
 		httputil.MapServiceError(c, "update article", err)
 		return
 	}

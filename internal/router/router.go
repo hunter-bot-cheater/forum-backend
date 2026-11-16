@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -21,6 +22,7 @@ import (
 	"forum-backend/internal/follow"
 	"forum-backend/internal/hot"
 	"forum-backend/internal/like"
+	"forum-backend/internal/llm"
 	"forum-backend/internal/message"
 	"forum-backend/internal/metrics"
 	"forum-backend/internal/middleware"
@@ -50,6 +52,9 @@ type Deps struct {
 	Metrics        config.MetricsConfig
 	// Admin 是管理类接口的白名单，为空表示没人能调（安全默认）。
 	Admin config.AdminConfig
+	// LLM 是自动生成标签的大模型配置。Enabled 或 APIKey 缺一个就不启用，
+	// 由 router 决定是否给 article 服务注入 tagger。
+	LLM config.LLMConfig
 }
 
 // New 组装出完整的 HTTP 服务：创建 gin 引擎 → 装全局中间件 → 建各业务对象 → 注册路由。
@@ -147,7 +152,20 @@ func New(deps Deps) (*gin.Engine, error) {
 	userHandler := user.NewUserHandler(userSvc, deps.JWT, followSvc)
 	followHandler := follow.NewHandler(followSvc)
 
-	articleSvc := article.NewArticleService(deps.DB, deps.Redis)
+	// 自动标签是可选的：开关打开且填了密钥才注入，否则传 nil，
+	// 文章服务在「没填标签」时就不去调模型，发布请求也不会多一次网络等待。
+	// 这里用 var 声明接口而不是 *llm.Client：后者为 nil 时装进接口是非 nil 接口，
+	// article 里那句 `s.tagger == nil` 会失效，结果是没密钥也去发一次 401 请求。
+	var tagger article.TagSuggester
+	if deps.LLM.Enabled && deps.LLM.APIKey != "" {
+		tagger = llm.NewClient(llm.Options{
+			BaseURL: deps.LLM.BaseURL,
+			APIKey:  deps.LLM.APIKey,
+			Model:   deps.LLM.Model,
+			Timeout: time.Duration(deps.LLM.TimeoutSeconds) * time.Second,
+		})
+	}
+	articleSvc := article.NewArticleService(deps.DB, deps.Redis, tagger)
 
 	// 点赞会触发文章缓存失效并写热榜，所以 like 要拿到 articleSvc。
 	// 反过来 article 的详情要显示「我点过没」，需要 likeSvc.HasLiked；
@@ -200,6 +218,9 @@ func New(deps Deps) (*gin.Engine, error) {
 		// 详情接口据此回填 liked。没带 token 或 token 过期时降级成游客，照常能看。
 		optionalAuth := middleware.OptionalJWTAuth(deps.JWT)
 		api.GET("/articles", articleHandler.List)
+		// 标签云公开：它是列表页的筛选入口，游客也应该看得到有哪些标签。
+		// 放在 /articles 之后、/articles/:id 之前只是阅读顺序，gin 按静态段优先匹配，不受影响。
+		api.GET("/tags", articleHandler.ListTags)
 		api.GET("/articles/:id", optionalAuth, articleHandler.Detail)
 		api.GET("/articles/:id/comments", commentHandler.List)
 		// 评论定位同样公开：通知点进来时游客也可能落在详情页（比如链接被分享），

@@ -75,7 +75,7 @@ func doLike(t *testing.T, h *LikeHandler, articleID, userID uint, method string,
 func TestLikeEndpointReturnsState(t *testing.T) {
 	db := testutil.NewDB(t)
 	rdb := testutil.NewRedis(t)
-	articleSvc := article.NewArticleService(db, rdb)
+	articleSvc := article.NewArticleService(db, rdb, nil)
 	h := NewLikeHandler(NewLikeService(db, rdb, articleSvc), nil)
 
 	author := testutil.SeedUser(t, db, "httplikeauthor")
@@ -110,7 +110,7 @@ func TestLikeEndpointReturnsState(t *testing.T) {
 func TestLikeEndpointRequiresLogin(t *testing.T) {
 	db := testutil.NewDB(t)
 	rdb := testutil.NewRedis(t)
-	h := NewLikeHandler(NewLikeService(db, rdb, article.NewArticleService(db, rdb)), nil)
+	h := NewLikeHandler(NewLikeService(db, rdb, article.NewArticleService(db, rdb, nil)), nil)
 
 	author := testutil.SeedUser(t, db, "anonauthor")
 	post := testutil.SeedArticle(t, db, author.ID, "游客点赞的文章")
@@ -128,7 +128,7 @@ func TestLikeEndpointRequiresLogin(t *testing.T) {
 func TestLikeEndpointBadID(t *testing.T) {
 	db := testutil.NewDB(t)
 	rdb := testutil.NewRedis(t)
-	h := NewLikeHandler(NewLikeService(db, rdb, article.NewArticleService(db, rdb)), nil)
+	h := NewLikeHandler(NewLikeService(db, rdb, article.NewArticleService(db, rdb, nil)), nil)
 
 	r := gin.New()
 	r.PUT("/api/articles/:id/like", asUser(1), h.Like)
@@ -144,7 +144,7 @@ func TestLikeEndpointBadID(t *testing.T) {
 func TestLikeEndpointMissingArticle(t *testing.T) {
 	db := testutil.NewDB(t)
 	rdb := testutil.NewRedis(t)
-	h := NewLikeHandler(NewLikeService(db, rdb, article.NewArticleService(db, rdb)), nil)
+	h := NewLikeHandler(NewLikeService(db, rdb, article.NewArticleService(db, rdb, nil)), nil)
 	reader := testutil.SeedUser(t, db, "missingliker")
 
 	code, _ := doLike(t, h, 999999, reader.ID, http.MethodPut, true)

@@ -21,7 +21,11 @@ const articleDetailKeyPrefix = "article:detail:"
 // 以后给 model.Article 加字段、改 JSON tag 时，把 v1 改成 v2：
 // 新代码只读 v2 的 key，老 key 因为没人再读会自然过期，
 // 不需要半夜跑脚本批量清理，也不会把旧格式的数据解析成新结构体。
-const articleDetailCacheVersion = "v1"
+//
+// 已经升过两次：v1 → v2 对应 model.Article 新增 view_count，v2 → v3 对应新增 tags。
+// 不升的话，旧缓存里没有这个字段，反序列化出来是空值，
+// 详情页会先显示「没有标签」/「0 次浏览」，等缓存过期才跳到真值。
+const articleDetailCacheVersion = "v3"
 
 // articleDetailKey 拼出一篇详情的缓存 key，形如 article:detail:v1:42。
 // 用 strconv.FormatUint 而不是 fmt.Sprintf：这里只做十进制转换，
@@ -45,6 +49,14 @@ const articleDetailTTLJitter = 2 * time.Minute
 // 空标记挡的是反复查询不存在 id 的请求（缓存穿透），所以不能没有；
 // 但也留不久：留太久会让这条记录后来真被写入时，仍有一段时间查不到。
 const articleEmptyTTL = 60 * time.Second
+
+// viewDedupTTL 是同一个访问者重复看同一篇文章的去重窗口。
+//
+// 30 分钟是「一次阅读会话」的量级：读者点进来、刷新几次、又返回来看，
+// 都算同一次浏览；过半小时再回来才算新的。窗口太短等于浏览数随刷新次数涨，
+// 太长则一篇文章在一个人眼里永远只加一，热榜看不出热度变化。
+// 这个值只影响去重标记的存活时间，不影响 view_count 本身。
+const viewDedupTTL = 30 * time.Minute
 
 // articleDetailTTL 返回本次回填应该用的 TTL。
 // 每次调用都重新取随机数，所以同一批写入的 key 不会撞在同一秒过期。

@@ -118,6 +118,27 @@ export function newClientMsgId(): string {
   return Date.now().toString(36) + '-' + rand
 }
 
+// formatCount 把浏览数这类计数压成短形式。
+//
+// 四位以内原样显示：刚发布的文章是 0、十几个、几百，精确数字更有信息量。
+// 上万之后改成「1.2 万」：卡片底部那一行很窄，五位数会把作者名挤掉，
+// 而读者看阅读数只关心量级，不关心个位。
+// 不用 k：中文社区里「1.2k」反而要多想一步。
+export function formatCount(n: number): string {
+  if (!Number.isFinite(n) || n < 0) {
+    return '0'
+  }
+  if (n < 10000) {
+    return String(n)
+  }
+  // 保留一位小数，末尾的 .0 去掉：10000 显示「1 万」而不是「1.0 万」。
+  const wan = (n / 10000).toFixed(1)
+  if (wan.endsWith('.0')) {
+    return wan.slice(0, -2) + ' 万'
+  }
+  return wan + ' 万'
+}
+
 // initials 取昵称首字给头像兜底。
 // 用户没上传头像时 el-avatar 会显示一片空白，放一个字至少能区分不同的人。
 export function initials(name: string): string {

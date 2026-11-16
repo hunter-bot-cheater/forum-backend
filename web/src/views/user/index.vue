@@ -677,8 +677,14 @@ onMounted(() => {
   font-weight: 500;
 }
 
-.up__skeleton,
+/* 同文章列表：间距由卡片的上下内边距提供，容器不再留 gap，
+   否则两张卡片之间的空白点不进任何一篇。 */
 .up__list {
+  display: flex;
+  flex-direction: column;
+}
+
+.up__skeleton {
   display: flex;
   flex-direction: column;
   gap: 12px;

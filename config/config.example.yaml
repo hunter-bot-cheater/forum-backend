@@ -97,3 +97,18 @@ metrics:
 # 列表类型不支持用环境变量覆盖（viper 不会把逗号分隔的字符串拆成切片），改完重启生效。
 admin:
   user_ids: []
+
+# 自动标签：发布文章时如果一个标签都没填，让大模型给它起一个。
+# 必须 enabled: true 且 api_key 非空才生效，关闭时发布接口不会发任何外部请求。
+# 协议是 OpenAI 兼容的 /chat/completions，智谱、DeepSeek、本地 vLLM 都通用，
+# 换供应商只改 base_url 与 model，不用改代码。
+#
+# api_key 是机密：真实的密钥只写在本机的 config.yaml 里（已被 .gitignore 忽略），
+# 不要填进这个模板文件，也不要提交到仓库。也可以留空并用环境变量 LLM_API_KEY 覆盖。
+# timeout_seconds 同时是「发布请求最多被拖慢多久」：超时就放弃标签，不影响文章发布。
+llm:
+  enabled: false
+  base_url: "https://open.bigmodel.cn/api/paas/v4"
+  model: "glm-4-flash"
+  api_key: ""
+  timeout_seconds: 8

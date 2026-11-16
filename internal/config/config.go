@@ -25,6 +25,7 @@ type Config struct {
 	Log       LogConfig       `mapstructure:"log"`
 	Metrics   MetricsConfig   `mapstructure:"metrics"`
 	Admin     AdminConfig     `mapstructure:"admin"`
+	LLM       LLMConfig       `mapstructure:"llm"`
 }
 
 // AdminConfig 是管理类接口的白名单。
@@ -122,6 +123,28 @@ type MetricsConfig struct {
 	Token string `mapstructure:"token"`
 }
 
+// LLMConfig 是自动生成标签用的大模型接入参数。
+//
+// 目前只支持 OpenAI 兼容的 /chat/completions 协议，智谱、DeepSeek、本地 vLLM
+// 都走这一套，换供应商只改 base_url 与 model，不用改代码。
+//
+// Enabled 与 APIKey 都要成立才会真的发请求：只填地址没填密钥时按关闭处理，
+// 而不是每次发布都发一次注定 401 的请求、再在日志里刷一行失败。
+type LLMConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// BaseURL 不含结尾的 /chat/completions，只到版本段，例如
+	// https://open.bigmodel.cn/api/paas/v4
+	BaseURL string `mapstructure:"base_url"`
+	// APIKey 是供应商密钥，属于机密：只能写在被 .gitignore 忽略的 config.yaml 里，
+	// 或者用环境变量 LLM_API_KEY 覆盖，不要写进仓库里的任何模板文件。
+	APIKey string `mapstructure:"api_key"`
+	Model  string `mapstructure:"model"`
+	// TimeoutSeconds 是单次生成的上限。
+	// 它同时是「发布文章最多被拖慢多久」：文章已经写进库，标签只是附加信息，
+	// 超时就直接放弃这个标签，不能让一次网络抖动把发布卡住十几秒。
+	TimeoutSeconds int `mapstructure:"timeout_seconds"`
+}
+
 // LogFileConfig 是日志文件的切分与保留策略。
 type LogFileConfig struct {
 	Path       string `mapstructure:"path"`
@@ -177,6 +200,16 @@ func Load() (*Config, error) {
 	// 指标默认开着：本机看 /metrics 不需要额外配置，生产模板里按需加 token。
 	v.SetDefault("metrics.enabled", true)
 	v.SetDefault("metrics.token", "")
+	// 自动标签默认关闭：没有密钥时开着只会让每次发布多等一次网络失败。
+	// 打开需要在 config.yaml 里显式写 enabled: true 并填 api_key。
+	// base_url / model 给默认值，是为了让配置里只需要出现「开关 + 密钥」两行；
+	// 换供应商时再覆盖这两项。超时 8 秒：正常的短文本分类不到 1 秒，
+	// 8 秒还没回来说明链路有问题，继续等只会拖慢发布。
+	v.SetDefault("llm.enabled", false)
+	v.SetDefault("llm.base_url", "https://open.bigmodel.cn/api/paas/v4")
+	v.SetDefault("llm.model", "glm-4-flash")
+	v.SetDefault("llm.api_key", "")
+	v.SetDefault("llm.timeout_seconds", 8)
 
 	// 第二步：决定读哪个文件。部署时用 CONFIG_PATH 传绝对路径，本机默认读项目内的 config/config.yaml。
 	configPath := os.Getenv("CONFIG_PATH")

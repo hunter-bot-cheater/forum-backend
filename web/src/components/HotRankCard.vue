@@ -88,12 +88,13 @@ const more = computed(() => props.items.length > props.limit)
 }
 
 /* 每行 hover 加一层浅底：榜单条目之间的分割靠间距，
-   但点击区域要明确，否则不知道哪一行能点。 */
+   但点击区域要明确，否则不知道哪一行能点。
+   上下给到 9px：13px 字号的行高只有 31px，鼠标扫过去容易点到缝里。 */
 .hr__link {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 8px;
+  padding: 9px 8px;
   border-radius: var(--fs-radius-sm);
   transition: background-color 0.15s;
 }

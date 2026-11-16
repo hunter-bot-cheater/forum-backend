@@ -33,6 +33,47 @@
         :disabled="submitting"
       />
 
+      <!-- 标签放在正文下面：它是「归类」动作，写的时候想不到要填什么，
+           写完回头看一遍才知道该给哪几个。
+
+           用裸输入框而不是带下拉的选择器：下拉里的候选要靠一次额外请求
+           拉全站标签，而它弹出来正好挡住正文最后几行；真正有用的候选
+           其实也猜不到（谁知道别人把「MySQL」写成「mysql」还是「数据库」）。
+           回车或逗号确认，标签右侧的 × 删掉；一个都不填也没关系，
+           发布时后端会让大模型起一个（见 config.yaml 的 llm 段）。 -->
+      <div class="composer__tags">
+        <div class="composer__tags-box">
+          <span v-for="(name, index) in tags" :key="name" class="composer__tag">
+            {{ name }}
+            <button
+              class="composer__tag-x"
+              type="button"
+              :disabled="submitting"
+              :aria-label="'删除标签 ' + name"
+              @click="removeTag(index)"
+            >
+              ×
+            </button>
+          </span>
+          <input
+            v-model="tagDraft"
+            class="composer__tag-input"
+            type="text"
+            maxlength="32"
+            :disabled="submitting || tags.length >= tagLimit"
+            :placeholder="tags.length >= tagLimit ? '最多 3 个' : '加标签，回车确认'"
+            @keydown.enter.prevent="confirmTag($event)"
+            @keydown="onTagKeydown"
+            @blur="confirmTag()"
+          />
+        </div>
+        <span class="composer__tags-hint">{{ tags.length }}/{{ tagLimit }}</span>
+      </div>
+      <!-- 提示只在「还没填」时出现，填了第一枚就撤掉，不占着位置。 -->
+      <p v-if="tags.length === 0 && !isEdit" class="composer__tags-tip">
+        不填也没关系，发布时会自动生成一个标签
+      </p>
+
       <div class="composer__foot">
         <!-- 左侧实时统计，右侧操作。
              这里的「字」按字符算，与后端上限（字节）不是同一口径，
@@ -93,7 +134,7 @@ const loading = ref(false)
 
 // original 是进入编辑页那一刻的原文，用来判断「到底改没改」。
 // 创建态没有原文，dirty 退回成「有没有输入内容」。
-const original = ref({ title: '', content: '' })
+const original = ref({ title: '', content: '', tags: [] as string[] })
 
 // 与后端 internal/article/service.go 的两个上限保持一致：
 // 标题 varchar(128) 按字符计，正文 text 按字节计（50000 字节）。
@@ -101,9 +142,16 @@ const original = ref({ title: '', content: '' })
 // 这里只拦「一定过不了」的长度，避免用户写满一屏才被 400 打回来。
 const titleLimit = 128
 const contentByteLimit = 50000
+// 标签数量上限与 internal/article/tag.go 的 maxTagsPerArticle 一致。
+// 两边都写死 3 是有意的：前端要即时拦住第四个，后端要防绕过前端直接调接口。
+const tagLimit = 3
 
 const title = ref('')
 const content = ref('')
+// tags 是已确认的标签名，tagDraft 是输入框里还没回车的那半截。
+// 两者分开：输入框清空不代表标签已加，回车（或失焦）才算，用户还有反悔的余地。
+const tags = ref<string[]>([])
+const tagDraft = ref('')
 const submitting = ref(false)
 // submitted 用来区分「发布成功后跳转」和「用户主动离开」：
 // 前者不能再弹「内容还没发布」，否则每次发布成功都会被自己的确认框拦住。
@@ -133,10 +181,31 @@ const hasContent = computed(() => content.value.trim() !== '')
 //     一出页面就弹「还没保存」，属于打扰
 const dirty = computed(() => {
   if (isEdit.value) {
-    return title.value !== original.value.title || content.value !== original.value.content
+    return (
+      title.value !== original.value.title ||
+      content.value !== original.value.content ||
+      !sameTags(tags.value, original.value.tags)
+    )
   }
-  return title.value.trim() !== '' || content.value.trim() !== ''
+  return title.value.trim() !== '' || content.value.trim() !== '' || tags.value.length > 0
 })
+
+// sameTags 比较两份标签是否一致。
+//
+// 顺序敏感：用户把「后端、数据库」调成「数据库、后端」也算改过。
+// 存储层按标签创建顺序返回，顺序变了详情页的展示顺序就变了，
+// 当成「没改」会让保存按钮在用户眼里失灵。
+function sameTags(a: string[], b: string[]) {
+  if (a.length !== b.length) {
+    return false
+  }
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) {
+      return false
+    }
+  }
+  return true
+}
 
 // 两个字段都有内容、正文没超长才允许提交。
 const canSubmit = computed(() => {
@@ -187,7 +256,8 @@ onMounted(async () => {
       }
       title.value = article.title
       content.value = article.content
-      original.value = { title: article.title, content: article.content }
+      tags.value = article.tags
+      original.value = { title: article.title, content: article.content, tags: article.tags }
     } catch {
       // 404 与网络错误都已由拦截器弹过提示，这里不再弹第二个框。
       // 拿不到原文就没法编辑，退回详情页比留一个空表单安全。
@@ -203,6 +273,45 @@ onMounted(async () => {
   }
   window.addEventListener('keydown', onKeydown)
 })
+
+// confirmTag 把输入框里的字变成一枚标签。
+//
+// 浏览器原生输入法还在组词时按回车不能算确认：那一下是「选字」，
+// 直接吞掉会让输入法用户的词永远打不出来，所以先看 event.isComposing。
+// 失焦时也调一次（不传 event），把用户输了一半就点发布的情况兜住。
+function confirmTag(event?: KeyboardEvent) {
+  if (event && event.isComposing) {
+    return
+  }
+  const name = tagDraft.value.trim()
+  tagDraft.value = ''
+  if (name === '' || tags.value.length >= tagLimit) {
+    return
+  }
+  // 大小写不同视为同一个标签：后端也会去重，但前端先拦住能避免
+  // 出现「3/3 里两个其实是一个」，用户还得自己删一个。
+  const exists = tags.value.some((item) => item.toLowerCase() === name.toLowerCase())
+  if (exists) {
+    return
+  }
+  tags.value.push(name)
+}
+
+// onTagKeydown 把中英文逗号也当成确认键：
+// 输入「后端, 数据库」比敲两次回车顺手，中文输入下更是只会打出「，」。
+// 回车已经由模板上的 @keydown.enter.prevent 处理，这里不重复。
+function onTagKeydown(event: KeyboardEvent) {
+  if (event.key === ',' || event.key === '，') {
+    event.preventDefault()
+    confirmTag(event)
+  }
+}
+
+// removeTag 删掉第 index 枚标签。编辑态允许删到 0：标签是整体替换的，
+// 一个都不剩就是「这篇文章不属于任何分类」，后端不会自动补。
+function removeTag(index: number) {
+  tags.value.splice(index, 1)
+}
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown)
@@ -227,11 +336,11 @@ async function submit() {
   try {
     let targetID = articleId.value
     if (isEdit.value) {
-      const updated = await updateArticle(articleId.value, title.value.trim(), content.value.trim())
+      const updated = await updateArticle(articleId.value, title.value.trim(), content.value.trim(), tags.value)
       targetID = updated.id
       ElMessage.success('已保存')
     } else {
-      const created = await createArticle(title.value.trim(), content.value.trim())
+      const created = await createArticle(title.value.trim(), content.value.trim(), tags.value)
       targetID = created.id
       ElMessage.success('发布成功')
     }
@@ -252,13 +361,23 @@ async function submit() {
 
 // 取消与返回都走这里，而不是让按钮自己调 router：
 // 两条路径都要经过路由守卫的「未保存确认」，统一成一个函数就不会漏。
-// 编辑态回详情页，创建态回列表：从哪里来回哪里去。
+//
+// 用 back 而不是 push 回详情页：编辑页是从详情 push 进来的，
+// 再 push 一层详情会让历史变成「详情 → 编辑 → 详情」，
+// 用户在详情点「← 返回」又落回编辑页，两个页面来回跳，看起来像死循环。
+// 直接打开编辑地址（没有上一页）时 back 会离开站点，这时改用 replace，
+// 退回对应的落地页：编辑态回详情，新建态回列表。
 function leave() {
-  if (isEdit.value) {
-    void router.push('/articles/' + String(articleId.value))
+  const back = window.history.state ? window.history.state.back : null
+  if (typeof back === 'string' && back !== '') {
+    router.back()
     return
   }
-  void router.push('/articles')
+  if (isEdit.value) {
+    void router.replace('/articles/' + String(articleId.value))
+    return
+  }
+  void router.replace('/articles')
 }
 </script>
 
@@ -355,6 +474,101 @@ function leave() {
 
 .composer__body :deep(.el-textarea__inner::placeholder) {
   color: #c0c4cc;
+}
+
+/* 标签行靠左，与正文左边界对齐；不占满整行——它是次要字段，
+   占满会让人以为必须填。 */
+.composer__tags {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+/* 标签与输入框同处一个描边盒子里，像一个多选输入框。
+   宽度上限 420：标签最多 3 个，写满也就三枚窄胶囊加一截输入位，
+   真放不下时在盒子内部换行，不会把右侧的计数挤出去。 */
+.composer__tags-box {
+  display: flex;
+  flex: 0 1 420px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 240px;
+  padding: 3px 8px;
+  border: 1px solid var(--fs-line);
+  border-radius: var(--fs-radius-sm);
+  background: var(--fs-surface);
+  transition: border-color 0.15s;
+}
+
+/* 焦点在内部任意位置时整圈变主色：里面只有一个裸 input，
+   它自己的 outline 已经被去掉，不给盒子反馈会看不出「正在输入」。 */
+.composer__tags-box:focus-within {
+  border-color: var(--fs-primary);
+}
+
+.composer__tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 4px 2px 8px;
+  border-radius: 10px;
+  background: var(--fs-primary-weak);
+  color: var(--fs-primary);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+.composer__tag-x {
+  padding: 0 2px;
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+}
+
+.composer__tag-x:hover {
+  opacity: 1;
+}
+
+/* 输入框自己不要边框：外框由 .composer__tags-box 提供，
+   两层边框套在一起会变成双线。 */
+.composer__tag-input {
+  flex: 1;
+  min-width: 110px;
+  padding: 2px 0;
+  border: none;
+  outline: none;
+  background: none;
+  color: var(--fs-text-1);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.composer__tag-input::placeholder {
+  color: var(--fs-text-3);
+}
+
+.composer__tag-input:disabled {
+  cursor: not-allowed;
+}
+
+.composer__tags-hint {
+  font-size: 12px;
+  color: var(--fs-text-3);
+}
+
+/* 自动标签的说明。字号比正文小一档、颜色最浅，
+   它是一句补充说明，不该抢走「发布」按钮上方的注意力。 */
+.composer__tags-tip {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--fs-text-3);
 }
 
 /* 操作栏与正文之间用一条浅线分隔，不描整圈边框。

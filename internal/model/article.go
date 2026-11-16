@@ -17,6 +17,18 @@ type Article struct {
 	Content   string `gorm:"type:text;not null" json:"content"`
 	LikeCount int64  `gorm:"default:0" json:"like_count"` // 与 Redis 计数最终一致
 
+	// ViewCount 是浏览数，只在详情接口被访问时自增，由 article.RecordView 维护。
+	//
+	// 它是「尽力而为」的计数：同一访问者 30 分钟内看同一篇只算一次（Redis SETNX 去重），
+	// Redis 故障期间降级成每次都算。所以这个数字适合排序与展示，
+	// 不适合当审计依据——要看真实访问得从 access log 里数。
+	ViewCount int64 `gorm:"default:0" json:"view_count"`
+
+	// Tags 是这篇文章的标签名，不落在 articles 表里（gorm:"-" 让 GORM 忽略它）。
+	// 由 article 包在查询后从 article_tags 关联表填充，随文章一起写进详情缓存，
+	// 所以命中缓存的请求也能直接拿到，不必再查一次关联表。
+	Tags []string `gorm:"-" json:"tags"`
+
 	// Excerpt 不是数据库列，只是列表查询时用 SQL 截出来的正文开头。
 	// gorm:"->" 表示只读：写入时 GORM 跳过它，AutoMigrate 也不会给它建列。
 	// json:"-" 是因为 model 不直接对外序列化，且详情缓存会把它整个 marshal 进 Redis，

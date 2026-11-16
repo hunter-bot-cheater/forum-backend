@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -52,6 +53,7 @@ func asUser(id uint) gin.HandlerFunc {
 type detailData struct {
 	ID        uint  `json:"id"`
 	LikeCount int64 `json:"like_count"`
+	ViewCount int64 `json:"view_count"`
 	Liked     bool  `json:"liked"`
 }
 
@@ -95,7 +97,7 @@ func doDetail(t *testing.T, h *ArticleHandler, articleID uint, loggedIn bool) de
 // 按钮还是灰的，再点一次会被后端判成「重复点赞」——看起来像点了没反应。
 func TestDetailFillsLikedForLoggedInUser(t *testing.T) {
 	db := testutil.NewDB(t)
-	svc := NewArticleService(db, testutil.NewRedis(t))
+	svc := NewArticleService(db, testutil.NewRedis(t), nil)
 	author := testutil.SeedUser(t, db, "author")
 	post := testutil.SeedArticle(t, db, author.ID, "点过赞的文章")
 
@@ -118,7 +120,7 @@ func TestDetailFillsLikedForLoggedInUser(t *testing.T) {
 // 没有登录态就打不开。
 func TestDetailGuestSkipsLikedCheck(t *testing.T) {
 	db := testutil.NewDB(t)
-	svc := NewArticleService(db, testutil.NewRedis(t))
+	svc := NewArticleService(db, testutil.NewRedis(t), nil)
 	author := testutil.SeedUser(t, db, "author")
 	post := testutil.SeedArticle(t, db, author.ID, "游客也能看的文章")
 
@@ -143,7 +145,7 @@ func TestDetailGuestSkipsLikedCheck(t *testing.T) {
 // 如果这里跟着报错，一次 Redis 抖动就会让整篇文章打不开，代价与收益完全不对等。
 func TestDetailSurvivesLikedCheckFailure(t *testing.T) {
 	db := testutil.NewDB(t)
-	svc := NewArticleService(db, testutil.NewRedis(t))
+	svc := NewArticleService(db, testutil.NewRedis(t), nil)
 	author := testutil.SeedUser(t, db, "author")
 	post := testutil.SeedArticle(t, db, author.ID, "点赞查询会失败的文章")
 
@@ -184,7 +186,7 @@ func doUpdate(t *testing.T, h *ArticleHandler, articleID, userID uint, body stri
 // like_count 也必须在（少了它就退回成「先 PUT 再 GET」两次请求）。
 func TestUpdateReturnsUpdatedDetail(t *testing.T) {
 	db := testutil.NewDB(t)
-	svc := NewArticleService(db, testutil.NewRedis(t))
+	svc := NewArticleService(db, testutil.NewRedis(t), nil)
 	author := testutil.SeedUser(t, db, "updatehandler")
 	post := testutil.SeedArticle(t, db, author.ID, "待修改的标题")
 
@@ -217,7 +219,7 @@ func TestUpdateReturnsUpdatedDetail(t *testing.T) {
 // TestUpdateWithoutLoginIs401 验证没身份直接拒，不会落到 service 里用 0 号用户去改。
 func TestUpdateWithoutLoginIs401(t *testing.T) {
 	db := testutil.NewDB(t)
-	svc := NewArticleService(db, testutil.NewRedis(t))
+	svc := NewArticleService(db, testutil.NewRedis(t), nil)
 	author := testutil.SeedUser(t, db, "nologinuser")
 	post := testutil.SeedArticle(t, db, author.ID, "不需要登录也能试的文章")
 
@@ -233,7 +235,7 @@ func TestUpdateWithoutLoginIs401(t *testing.T) {
 // 三条都必须在 handler 边界挡掉，不能带进 service。
 func TestUpdateRejectsBadRequest(t *testing.T) {
 	db := testutil.NewDB(t)
-	svc := NewArticleService(db, testutil.NewRedis(t))
+	svc := NewArticleService(db, testutil.NewRedis(t), nil)
 	author := testutil.SeedUser(t, db, "badrequestuser")
 	post := testutil.SeedArticle(t, db, author.ID, "参数校验用的文章")
 	h := NewArticleHandler(svc, &fakeLiked{})
@@ -261,7 +263,7 @@ func TestUpdateRejectsBadRequest(t *testing.T) {
 // 与 Delete 的口径保持一致：两者对外都只说找不到。
 func TestUpdateOtherUserReturns404(t *testing.T) {
 	db := testutil.NewDB(t)
-	svc := NewArticleService(db, testutil.NewRedis(t))
+	svc := NewArticleService(db, testutil.NewRedis(t), nil)
 	author := testutil.SeedUser(t, db, "articleowner")
 	other := testutil.SeedUser(t, db, "articleintruder")
 	post := testutil.SeedArticle(t, db, author.ID, "别人改不动的文章")
@@ -271,5 +273,145 @@ func TestUpdateOtherUserReturns404(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("状态码 = %d，期望 404，body=%s", w.Code, w.Body.String())
+	}
+}
+
+// listData 是列表响应里本文件关心的字段。
+type listData struct {
+	Total int `json:"total"`
+	List  []struct {
+		Title string `json:"title"`
+	} `json:"list"`
+}
+
+// doList 发一次列表请求，返回状态码与解出的 data。
+// query 是完整的查询串（不带 ?），中文等字符由调用方用 url.QueryEscape 编码。
+func doList(t *testing.T, h *ArticleHandler, query string) (int, listData) {
+	t.Helper()
+
+	r := gin.New()
+	r.GET("/api/articles", h.List)
+
+	path := "/api/articles"
+	if query != "" {
+		path += "?" + query
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+
+	var env struct {
+		Data listData `json:"data"`
+	}
+	// 400 时 data 是空的，解析失败不算问题，只看状态码。
+	_ = json.Unmarshal(w.Body.Bytes(), &env)
+	return w.Code, env.Data
+}
+
+// TestListSearchFiltersByKeyword 验证关键词从 query 传到 service 并真的筛掉不匹配的文章。
+//
+// 这里不复刻 service 的全部搜索规则（正文命中、元字符转义在 service_test 里测），
+// 只确认 handler 没有把 keyword 丢掉、也没有把 total 与列表搞成两套口径。
+func TestListSearchFiltersByKeyword(t *testing.T) {
+	db := testutil.NewDB(t)
+	svc := NewArticleService(db, testutil.NewRedis(t), nil)
+	author := testutil.SeedUser(t, db, "searchuser")
+	testutil.SeedArticle(t, db, author.ID, "gin 的路由分组")
+	testutil.SeedArticle(t, db, author.ID, "gorm 的预加载")
+	h := NewArticleHandler(svc, &fakeLiked{})
+
+	code, data := doList(t, h, "keyword="+url.QueryEscape("gin"))
+	if code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200", code)
+	}
+	if data.Total != 1 || len(data.List) != 1 {
+		t.Fatalf("total=%d len=%d，期望 1/1（只有标题含 gin 的那篇）", data.Total, len(data.List))
+	}
+	if data.List[0].Title != "gin 的路由分组" {
+		t.Errorf("命中 %q，期望「gin 的路由分组」", data.List[0].Title)
+	}
+
+	// 不带 keyword 时是全站，用来确认上面那 1 篇确实是被筛出来的，
+	// 而不是「handler 一直只返回第一篇」这类假象。
+	code, data = doList(t, h, "")
+	if code != http.StatusOK {
+		t.Fatalf("全站列表状态码 = %d，期望 200", code)
+	}
+	if data.Total != 2 {
+		t.Errorf("全站 total=%d，期望 2", data.Total)
+	}
+}
+
+// TestListSearchRejectsLongKeyword 验证超长关键词在 handler 边界被挡成 400。
+//
+// 不截断也不忽略：截断会返回与输入不符的结果，忽略等于把一次全表扫
+// 伪装成「没搜」，用户无从判断是没结果还是参数错了。
+func TestListSearchRejectsLongKeyword(t *testing.T) {
+	db := testutil.NewDB(t)
+	svc := NewArticleService(db, testutil.NewRedis(t), nil)
+	h := NewArticleHandler(svc, &fakeLiked{})
+
+	// 51 个汉字：上限 50 是按字符算的，用 len() 判断时这里会被误判成 153。
+	long := strings.Repeat("字", maxKeywordRunes+1)
+	code, _ := doList(t, h, "keyword="+url.QueryEscape(long))
+	if code != http.StatusBadRequest {
+		t.Errorf("超长关键词状态码 = %d，期望 400", code)
+	}
+
+	// 正好 50 个字要放行，避免上限写成了 < 而不是 <=。
+	ok := strings.Repeat("字", maxKeywordRunes)
+	if code, _ := doList(t, h, "keyword="+url.QueryEscape(ok)); code != http.StatusOK {
+		t.Errorf("刚好到上限的关键词状态码 = %d，期望 200", code)
+	}
+}
+
+// TestListBlankKeywordIsIgnored 验证只有空格的关键词等同于没搜。
+//
+// 拼 URL 时很容易带出一个 "keyword=" 或 "keyword=%20"，把它当成真实条件
+// 会让用户看到一个莫名其妙被筛过的列表。
+func TestListBlankKeywordIsIgnored(t *testing.T) {
+	db := testutil.NewDB(t)
+	svc := NewArticleService(db, testutil.NewRedis(t), nil)
+	author := testutil.SeedUser(t, db, "blankkwuser")
+	testutil.SeedArticle(t, db, author.ID, "第一篇")
+	testutil.SeedArticle(t, db, author.ID, "第二篇")
+	h := NewArticleHandler(svc, &fakeLiked{})
+
+	code, data := doList(t, h, "keyword=%20%20")
+	if code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200", code)
+	}
+	if data.Total != 2 {
+		t.Errorf("空白关键词 total=%d，期望 2（等同于不筛选）", data.Total)
+	}
+}
+
+// TestDetailCountsViewOncePerViewer 验证详情接口计浏览数：同一个人只算一次，
+// 且响应里的数字在重复访问时不会变小。
+//
+// 后半条是最容易做错的：浏览数存在详情缓存里时，第一次回源读到 0 再补 1，
+// 第二次命中缓存又会读出 0。用户刷新一下看到数字从 1 变 0，只会认为这功能坏了。
+// 现在的实现每次都用库里的最新值覆盖响应，所以两次都必须是 1。
+func TestDetailCountsViewOncePerViewer(t *testing.T) {
+	db := testutil.NewDB(t)
+	svc := NewArticleService(db, testutil.NewRedis(t), nil)
+	author := testutil.SeedUser(t, db, "author")
+	post := testutil.SeedArticle(t, db, author.ID, "浏览数会被累加的文章")
+
+	h := NewArticleHandler(svc, &fakeLiked{})
+
+	// 第一次访问：文章由 cache miss 回源，然后计入一次浏览。
+	if data := doDetail(t, h, post.ID, true); data.ViewCount != 1 {
+		t.Fatalf("首次访问 view_count = %d，期望 1", data.ViewCount)
+	}
+
+	// 第二次同一个身份：去重生效，不计数；同时详情缓存命中，
+	// 响应仍要显示库里的 1，不能回退成缓存快照里的 0。
+	if data := doDetail(t, h, post.ID, true); data.ViewCount != 1 {
+		t.Errorf("同一访问者第二次 view_count = %d，期望仍是 1（不能变小）", data.ViewCount)
+	}
+
+	// 游客是另一个访问者（按 IP 去重），浏览数应当变成 2。
+	if data := doDetail(t, h, post.ID, false); data.ViewCount != 2 {
+		t.Errorf("换一个访问者后 view_count = %d，期望 2", data.ViewCount)
 	}
 }

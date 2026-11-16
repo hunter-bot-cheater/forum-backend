@@ -68,7 +68,9 @@ func InitDB(cfg *MySQLConfig) (*gorm.DB, error) {
 func Migrate(db *gorm.DB) error {
 	// AutoMigrate 只加表、加列、加索引，不删列也不改类型，所以可以安全重复跑。
 	// 新增模型时要记得补进这个列表，否则表不会建出来。
-	if err := db.AutoMigrate(&model.User{}, &model.Article{}, &model.Comment{}, &model.ArticleLike{}, &model.OutboxEvent{}, &model.Notification{}, &model.FloorEvent{}, &model.FloorPrize{}, &model.Follow{}, &model.Conversation{}, &model.Message{}); err != nil {
+	// Tag 与 ArticleTag 有先后依赖：关联表上的外键指向 articles 与 tags，
+	// AutoMigrate 按参数顺序建表，所以 tags 必须排在 article_tags 前面。
+	if err := db.AutoMigrate(&model.User{}, &model.Article{}, &model.Tag{}, &model.ArticleTag{}, &model.Comment{}, &model.ArticleLike{}, &model.OutboxEvent{}, &model.Notification{}, &model.FloorEvent{}, &model.FloorPrize{}, &model.Follow{}, &model.Conversation{}, &model.Message{}); err != nil {
 		return fmt.Errorf("auto-migrate database: %w", err)
 	}
 	return nil

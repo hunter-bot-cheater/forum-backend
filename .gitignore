@@ -16,6 +16,9 @@ web/dist-prod/
 web/.env
 web/.env.local
 web/*.log
+# vite 启动时写的配置时间戳缓存，正常退出会自己删；
+# 进程被强杀时会留下，别让它进仓库。
+web/vite.config.ts.timestamp-*
 
 # 调试/临时构建目录
 dist_probe/

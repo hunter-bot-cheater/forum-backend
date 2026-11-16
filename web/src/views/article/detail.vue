@@ -22,6 +22,16 @@
         <span class="dt-meta__name dt-meta__link" @click="goUser(article.author)">{{ authorName }}</span>
         <span class="dt-meta__sep">·</span>
         <span>{{ formatRelativeTime(article.created_at) }}</span>
+        <span class="dt-meta__sep">·</span>
+        <span class="dt-meta__views">{{ formatCount(article.view_count) }} 阅读</span>
+      </div>
+
+      <!-- 标签紧跟 meta：它和「谁写的、什么时候」同属这篇的元信息，
+           放到正文之后会被当成正文的一部分来读。 -->
+      <div v-if="article.tags.length > 0" class="dt-tags">
+        <button v-for="name in article.tags" :key="name" class="dt-tag" @click="goTag(name)">
+          {{ name }}
+        </button>
       </div>
 
       <!-- 正文原样输出：后端存的是纯文本，没有富文本或 markdown，
@@ -221,7 +231,7 @@ import {
 import { useArticleStore } from '@/store/modules/article'
 import { useUserStore } from '@/store/modules/user'
 import type { Brief } from '@/api/message'
-import { formatRelativeTime, initials } from '@/utils/format'
+import { formatCount, formatRelativeTime, initials } from '@/utils/format'
 
 // 路由给这个组件配了 props: true，所以 id 从 props 拿而不是从 route.params 取，
 // 少一次对 URL 结构的耦合。
@@ -556,7 +566,15 @@ function isMine(target: CommentResp): boolean {
 function goBack() {
   // 用 back 而不是 push('/articles')：从列表第 3 页点进来时，
   // push 会把人送回第 1 页，丢失刚才翻页的位置。
-  router.back()
+  //
+  // 直接打开分享链接时没有上一页，back 会直接离开站点（PWA 里就是白屏），
+  // history.state.back 为空正对应这种情况，此时退回列表。
+  const back = window.history.state ? window.history.state.back : null
+  if (typeof back === 'string' && back !== '') {
+    router.back()
+    return
+  }
+  void router.replace('/articles')
 }
 
 const authorName = computed(() => {
@@ -609,6 +627,12 @@ function goUser(author?: Brief) {
 function initialOf(target: CommentResp): string {
   return initials(nameOf(target))
 }
+
+// goTag 点标签进列表页的标签筛选。
+// 用 push 而不是 replace：读者是从文章点进来的，后退应该回到这篇文章。
+function goTag(name: string) {
+  void router.push({ path: '/articles', query: { tag: name } })
+}
 </script>
 
 <style scoped>
@@ -632,17 +656,23 @@ function initialOf(target: CommentResp): string {
 }
 
 /* 返回按钮用纯文本而不是 el-button：
-   这是一条导航动作，不是页面里的操作，做成按钮会和下面的「发布」抢视觉权重。 */
+   这是一条导航动作，不是页面里的操作，做成按钮会和下面的「发布」抢视觉权重。
+   左右留 10px 热区并用负 margin 抵掉：文字还是贴着左边界，
+   但点击范围从「三个字」变成 60px 宽的一条，点偏一点也有反应。 */
 .dt-back {
-  padding: 6px 0;
+  margin-left: -10px;
+  padding: 6px 10px;
   border: none;
+  border-radius: var(--fs-radius-sm);
   background: none;
   color: var(--dt-text-weak);
   font-size: 13px;
   cursor: pointer;
+  transition: color 0.15s, background-color 0.15s;
 }
 
 .dt-back:hover {
+  background: var(--fs-surface-hover);
   color: var(--dt-text);
 }
 
@@ -675,6 +705,31 @@ function initialOf(target: CommentResp): string {
 
 .dt-meta__sep {
   color: var(--fs-text-3);
+}
+
+/* 标签单独一行，紧跟在 meta 的细线下面。
+   不给下内边距：正文自己有 20px 的上内边距，两层加起来会显得中间空了一块。 */
+.dt-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 14px;
+}
+
+.dt-tag {
+  padding: 3px 10px;
+  border: none;
+  border-radius: 12px;
+  background: var(--fs-bg);
+  color: var(--fs-text-2);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.dt-tag:hover {
+  background: var(--fs-primary-weak);
+  color: var(--fs-primary);
 }
 
 /* 正文行高比列表大：长文连续阅读需要更多呼吸空间。
@@ -732,34 +787,43 @@ function initialOf(target: CommentResp): string {
    靠 margin-left:auto 而不是给容器加 space-between——
    加 space-between 会让只有点赞按钮时的排版也变，作者与非作者看到的两套布局不一致。 */
 /* 编辑按钮排在删除前面，由它把整组作者操作推到右侧，
-   两个按钮之间留 8px，看起来是一组而不是两个散落的入口。 */
+   两个按钮之间留 8px，看起来是一组而不是两个散落的入口。
+   左右 10px 热区：纯文字按钮只有文字本身可点时，「编辑」「删除」这种两字按钮
+   鼠标略偏就点空，还会误点到旁边的点赞。 */
 .dt-edit {
   margin-left: auto;
-  padding: 7px 6px;
+  padding: 7px 10px;
   border: none;
+  border-radius: var(--fs-radius-sm);
   background: none;
   color: var(--dt-text-weak);
   font-size: 13px;
   cursor: pointer;
-  transition: color 0.15s;
+  transition: color 0.15s, background-color 0.15s;
 }
 
 .dt-edit:hover {
+  background: var(--fs-surface-hover);
   color: var(--fs-primary);
 }
 
 .dt-delete {
-  margin-left: 8px;
-  padding: 7px 6px;
+  /* 两侧热区各比原来宽 4px，间距从 8 收到 0 才能保持原来的 20px 文字间隔；
+     右侧再补 -4px，删除两个字仍然贴着原来那条右边界。 */
+  margin-left: 0;
+  margin-right: -4px;
+  padding: 7px 10px;
   border: none;
+  border-radius: var(--fs-radius-sm);
   background: none;
   color: var(--dt-text-weak);
   font-size: 13px;
   cursor: pointer;
-  transition: color 0.15s;
+  transition: color 0.15s, background-color 0.15s;
 }
 
 .dt-delete:hover:not(:disabled) {
+  background: var(--fs-like-weak);
   color: var(--fs-like);
 }
 

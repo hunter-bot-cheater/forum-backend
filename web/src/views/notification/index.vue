@@ -297,7 +297,8 @@ function onPage(next: number) {
 }
 
 /* tab 用胶囊按钮而不是 el-tabs：Element Plus 的 tab 带下划线和大内边距，
-   放在这里会比页面标题还重。 */
+   放在这里会比页面标题还重。
+   高度做到 32px：原来是 26px，鼠标点「赞 / 评论」这种两字按钮经常点空。 */
 .nt__tabs {
   display: flex;
   gap: 8px;
@@ -309,9 +310,9 @@ function onPage(next: number) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 14px;
+  padding: 7px 16px;
   border: none;
-  border-radius: 15px;
+  border-radius: 16px;
   background: var(--fs-bg);
   color: var(--fs-text-2);
   font-size: 13px;
@@ -372,17 +373,31 @@ function onPage(next: number) {
   background: var(--fs-primary-faint);
 }
 
-/* 角标要压住头像右下角，所以容器必须是定位上下文。 */
+/* 未读行的 hover 必须单独写一条：
+   `.nt__item.is-unread` 与 `.nt__item:hover` 的权重都是两个类，
+   后者按顺序被这条未读底色盖掉，鼠标移上去完全没有变化，
+   看起来就跟不可点一样。这里换成深一档的浅蓝，
+   让「可点」这件事在未读行上同样成立，又不会深成选中态。 */
+.nt__item.is-unread:hover {
+  background: var(--fs-primary-weak);
+}
+
+/* 角标要压住头像右下角，所以容器必须是定位上下文。
+   padding + 负 margin 把热区从 40px 撑到 44px（鼠标更好点），
+   视觉位置不动：负 margin 抵掉了多出来的 2px，行高也不受影响。 */
 .nt__avatar {
   position: relative;
   flex: none;
+  margin: -2px;
+  padding: 2px;
   line-height: 0;
 }
 
 .nt__kind {
   position: absolute;
-  right: -4px;
-  bottom: -4px;
+  /* 容器有 2px padding，偏移要多推 2px 才能让角标和原来贴着头像一样。 */
+  right: -6px;
+  bottom: -6px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -434,8 +449,18 @@ function onPage(next: number) {
   cursor: pointer;
 }
 
+/* 昵称只有两三个字时热区太窄，左右各扩 3px、上下各扩 2px：
+   上下 2px 在 21px 行高里不会溢出，不会被 .nt__line 的 overflow 裁掉。 */
+.nt__name.nt__who {
+  display: inline-block;
+  margin: -2px -3px;
+  padding: 2px 3px;
+  border-radius: 3px;
+}
+
 .nt__name.nt__who:hover {
   color: var(--fs-primary);
+  background: var(--fs-surface-hover);
 }
 
 /* 名字和动作之间留 4px：两个 inline 元素紧挨着渲染时，

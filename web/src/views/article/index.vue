@@ -4,7 +4,37 @@
     <div class="feed__main">
       <div class="feed__head">
         <h1 class="feed__title">文章</h1>
-        <span v-if="store.total > 0" class="feed__count">共 {{ store.total }} 篇</span>
+        <!-- 搜索态换成「找到 N 篇」：用户此刻关心的是「这个关键词有多少结果」，
+             「共 N 篇」会被误读成站内文章总数。 -->
+        <span v-if="store.total > 0" class="feed__count">
+          {{ store.keyword ? `找到 ${store.total} 篇` : `共 ${store.total} 篇` }}
+        </span>
+
+        <!-- 搜索框放在标题行右侧：搜索是列表页的次要动作，
+             不该单独占一行把文章流往下推。窄屏时折到下一行并占满宽度。 -->
+        <el-input
+          v-model="draft"
+          class="feed__search"
+          placeholder="搜索标题或正文"
+          :prefix-icon="Search"
+          clearable
+          @keyup.enter="submitSearch"
+          @clear="clearSearch"
+        />
+      </div>
+
+      <!-- 标签云已经去掉：标签一多会撑成好几排，把文章流整体往下推。
+           每篇文章的标签现在显示在它自己的卡片里（见 ArticleCard），
+           点击卡片上的标签同样进这个筛选。
+
+           但筛选态必须可见——列表突然变短、又没有任何提示，
+           用户会以为文章丢了。所以只在真的按标签筛着的时候留一条窄提示。 -->
+      <div v-if="store.tag" class="feed__filter">
+        <span class="feed__filter-label">标签</span>
+        <button class="feed__filter-chip" @click="clearTag">
+          {{ store.tag }}
+          <el-icon class="feed__filter-x"><Close /></el-icon>
+        </button>
       </div>
 
       <!-- 首屏用骨架屏：三张卡片的轮廓，加载完不会有一次高度跳变。
@@ -24,15 +54,17 @@
         </el-card>
       </div>
 
-      <!-- 空态给一个「写第一篇」的按钮：整站只有顶栏一个写文章入口，
-           列表全空时读者更可能在找「怎么开始」，这里是最自然的落点。 -->
+      <!-- 空态分三种：搜索没结果、标签下没文章、一篇都没有。
+           三种情况该给的按钮不同，用同一个会让人莫名其妙。 -->
       <el-empty
         v-else-if="store.list.length === 0"
         class="fs-card feed__empty"
-        description="还没有文章"
+        :description="emptyText"
         :image-size="96"
       >
-        <el-button type="primary" @click="goWrite">写第一篇</el-button>
+        <el-button v-if="store.tag" @click="clearTag">清除标签筛选</el-button>
+        <el-button v-else-if="store.keyword" @click="clearSearch">清除搜索</el-button>
+        <el-button v-else type="primary" @click="goWrite">写第一篇</el-button>
       </el-empty>
 
       <div v-else v-loading="store.loading" class="feed__list">
@@ -76,8 +108,9 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { Close, Search } from '@element-plus/icons-vue'
 import ArticleCard from '@/components/ArticleCard.vue'
 import HotRankCard from '@/components/HotRankCard.vue'
 import { useArticleStore } from '@/store/modules/article'
@@ -85,21 +118,97 @@ import { useHotStore } from '@/store/modules/hot'
 import { useImStore } from '@/store/modules/im'
 import { useNotificationStore } from '@/store/modules/notification'
 
+const route = useRoute()
 const router = useRouter()
 const store = useArticleStore()
 const hot = useHotStore()
 const im = useImStore()
 const notification = useNotificationStore()
 
-onMounted(() => {
-  // 已经加载过就不再拉第一页：从详情页返回时保留原来的页码与滚动位置，
-  // 否则每看一篇文章回来都要重新翻一遍。
-  if (!store.loaded) {
-    void store.load(1)
+// draft 是输入框里的即时内容，store.keyword 是「已经生效的搜索词」。
+// 两者分开：边打字边发请求会让后端每敲一个字扫一次表。
+const draft = ref('')
+
+// 空态文案按「先标签、后搜索」判断：标签是更窄的条件，
+// 同时有搜索词和标签时，用户更想知道的是「这个标签下有没有东西」。
+const emptyText = computed(() => {
+  if (store.tag !== '') {
+    return '标签「' + store.tag + '」下还没有文章'
   }
+  if (store.keyword !== '') {
+    return '没有找到与「' + store.keyword + '」相关的文章'
+  }
+  return '还没有文章'
+})
+
+// 地址栏是筛选态的唯一来源：首次进入、前进后退、粘一条带 ?q= / ?tag= 的链接，
+// 都从 query 还原，不另外维护一份「当前筛选」。
+// 页面内操作只负责改地址栏（见 submitSearch / selectTag），实际加载统一走这里，
+// 只留一条路径就不会出现「点了能筛、按后退不筛」这种不一致。
+//
+// 两个 query 合并成一个 watch：分开监听的话，带 ?q= 且 ?tag= 的链接进来会触发两次加载。
+watch(
+  () => [route.query.q, route.query.tag],
+  (values) => {
+    const q = typeof values[0] === 'string' ? values[0] : ''
+    const tag = typeof values[1] === 'string' ? values[1] : ''
+    draft.value = q
+    if (q.trim() !== store.keyword || tag.trim() !== store.tag) {
+      void store.applyFilter({ keyword: q, tag })
+      return
+    }
+    // 筛选没变、但列表还是空的（首次进入）：补一次首屏。
+    // 已经加载过就不再拉：从详情页返回时保留原来的页码与滚动位置，
+    // 否则每看一篇文章回来都要重新翻一遍。
+    if (!store.loaded) {
+      void store.load(1)
+    }
+  },
+  { immediate: true },
+)
+
+onMounted(() => {
   // 榜单每次进页面都补一次：它按点赞数排，隔一段时间就旧了。
   void hot.ensure(5)
 })
+
+// buildQuery 拼地址栏参数：没传的项沿用当前值，空串则从 URL 里去掉。
+// 用 undefined 而不是空串：vue-router 会把 undefined 的字段整个删掉，
+// 留一个 tag= 在地址栏里会让人以为在按空标签筛选。
+function buildQuery(next: { keyword?: string; tag?: string }) {
+  const query: Record<string, string> = {}
+  const keyword = next.keyword === undefined ? store.keyword : next.keyword
+  const tag = next.tag === undefined ? store.tag : next.tag
+  if (keyword !== '') {
+    query.q = keyword
+  }
+  if (tag !== '') {
+    query.tag = tag
+  }
+  return query
+}
+
+// submitSearch 只把关键词写进地址栏，加载交给上面的 watch。
+// 用 replace 而不是 push：连搜三次不该在历史里留下三条记录，
+// 否则按一次后退还在搜索页，用户会以为按钮没反应。
+function submitSearch() {
+  void router.replace({ path: '/articles', query: buildQuery({ keyword: draft.value.trim() }) })
+}
+
+// clearSearch 由输入框右侧的清空按钮和空态的「清除搜索」共用。
+function clearSearch() {
+  draft.value = ''
+  void router.replace({ path: '/articles', query: buildQuery({ keyword: '' }) })
+}
+
+// clearTag 清掉标签筛选，保留搜索词：用户可能是在一次搜索里点的标签，
+// 清标签不该顺带把他搜的词也清了。
+//
+// 标签入口现在在卡片和详情页上，进了列表就只剩这条筛选提示；
+// 用 replace 不留在历史里，取消筛选后按返回不该又回到「筛着的列表」。
+function clearTag() {
+  void router.replace({ path: '/articles', query: buildQuery({ tag: '' }) })
+}
 
 function onPage(next: number) {
   void store.load(next)
@@ -148,7 +257,65 @@ function scrollToTop() {
   color: var(--fs-text-3);
 }
 
-.feed__list,
+/* 筛选提示条：只在按标签筛着的时候出现，固定一行高。
+   它不是一个入口（入口在卡片和详情页的标签上），而是「当前列表被筛过」的说明，
+   所以做成主色浅底的胶囊 + 一个 ×，点掉就取消筛选。 */
+.feed__filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 0 2px;
+}
+
+.feed__filter-label {
+  flex: none;
+  font-size: 12px;
+  color: var(--fs-text-3);
+}
+
+.feed__filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 7px 3px 11px;
+  border: 1px solid var(--fs-primary-weak);
+  border-radius: 12px;
+  background: var(--fs-primary-weak);
+  color: var(--fs-primary);
+  font-size: 12.5px;
+  line-height: 18px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.feed__filter-chip:hover {
+  border-color: var(--fs-primary);
+  color: var(--fs-primary-hover);
+}
+
+.feed__filter-x {
+  font-size: 12px;
+}
+
+/* 搜索框往右靠，与标题形成「左标题右工具」的一行。
+   宽度写死是为了点进输入框时标题不再跟着重排。
+   align-self 单独盖成 center：整行是 baseline 对齐，输入框跟着基线摆
+   会比标题低几个像素，看着像没对齐。 */
+.feed__search {
+  width: 240px;
+  margin-left: auto;
+  align-self: center;
+}
+
+/* 列表的上下间距交给卡片自己的内边距（ArticleCard 的 .ac），
+   这里不能再留 gap：两层间距叠起来会变成 24px，
+   而且 gap 那 12px 不属于任何卡片，点在缝里点不开文章。 */
+.feed__list {
+  display: flex;
+  flex-direction: column;
+}
+
 .feed__skeleton {
   display: flex;
   flex-direction: column;
@@ -230,6 +397,22 @@ function scrollToTop() {
      堆下去的话滚到一半会撞见一个「榜单」，读者会以为文章列表结束了。 */
   .feed__rail {
     display: none;
+  }
+}
+
+@media (max-width: 640px) {
+  /* 手机上一行放不下「标题 + 计数 + 搜索框」：
+     让搜索框折到第二行并占满宽度，比把它挤成 120px 更好点。 */
+  .feed__head {
+    flex-wrap: wrap;
+    align-items: center;
+    row-gap: 10px;
+  }
+
+  .feed__search {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
   }
 }
 </style>

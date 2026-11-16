@@ -11,9 +11,14 @@ import (
 
 // TestArticleDetailKey 确认 key 格式稳定，且不同 id 不会撞车。
 // 以后改 key 版本时，这个测试会失败，提醒你同步更新文档和排查命令。
+//
+// 这里刻意写死字面量而不是用 articleDetailKeyPrefix + articleDetailCacheVersion 拼：
+// 拼出来的期望值会跟着实现一起变，等于什么都没守。
+// v1 → v2 是给 model.Article 加 view_count 时升的（旧缓存没有这个字段），
+// v2 → v3 是加 tags 时升的。
 func TestArticleDetailKey(t *testing.T) {
 	got := articleDetailKey(42)
-	want := "article:detail:v1:42"
+	want := "article:detail:v3:42"
 	if got != want {
 		t.Fatalf("articleDetailKey(42) = %q, want %q", got, want)
 	}

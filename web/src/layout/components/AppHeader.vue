@@ -282,6 +282,15 @@ function logout() {
   color: var(--fs-text-1);
 }
 
+/* el-badge 默认是 inline-block，自身带着一行行高和基线对齐，
+   塞进 36px 方框后图标会被往上推 4px：实测铃铛中线在 26px，
+   而头像、写文章按钮都在 30px，一排看过去像是没对齐。
+   改成 flex 让它的高度收缩成图标本身，和两侧元素落在同一条中线上。 */
+.hdr__icon :deep(.el-badge) {
+  display: flex;
+  align-items: center;
+}
+
 /* el-badge 的角标默认贴在内容右上角，图标有内边距时会被裁掉一点，
    这里给角标单独推几像素。 */
 .hdr__icon :deep(.el-badge__content) {

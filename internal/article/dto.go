@@ -39,6 +39,8 @@ type articleResp struct {
 	Content   string          `json:"content"`
 	Author    *user.BriefResp `json:"author,omitempty"`
 	CreatedAt time.Time       `json:"created_at"`
+	// Tags 是这篇文章挂的标签名，发布与编辑之后前端直接拿它回显。
+	Tags []string `json:"tags"`
 }
 
 // toArticleResp 把数据库模型转成带正文的对外结构体，转换只发生在 handler 层。
@@ -50,7 +52,19 @@ func toArticleResp(a *model.Article) articleResp {
 		Content:   a.Content,
 		Author:    authorBrief(a),
 		CreatedAt: a.CreatedAt,
+		Tags:      tagsOrEmpty(a.Tags),
 	}
+}
+
+// tagsOrEmpty 把空标签统一成空切片。
+//
+// nil 会被序列化成 null，前端就得同时处理 null、[] 和 undefined 三种「没有标签」，
+// 而这三种在页面上表现完全一样。统一成 [] 之后只有一个分支。
+func tagsOrEmpty(tags []string) []string {
+	if tags == nil {
+		return []string{}
+	}
+	return tags
 }
 
 // articleExcerptLimit 是列表摘要保留的字符数（按 rune 算，不是字节）。
@@ -71,6 +85,13 @@ type articleListItem struct {
 	Excerpt   string          `json:"excerpt"`
 	Author    *user.BriefResp `json:"author,omitempty"`
 	CreatedAt time.Time       `json:"created_at"`
+	// ViewCount 给列表卡片上那行小字用。它是详情缓存之外的一份库内值，
+	// 可能比详情页刚显示的数字略旧（详情页会补上本次访问的一次），
+	// 但列表本来就不需要精确到个位。
+	ViewCount int64 `json:"view_count"`
+	// Tags 是这篇文章挂的标签名，按标签筛选时前端靠它高亮当前标签，
+	// 也让卡片上能显示「这篇属于什么」。
+	Tags []string `json:"tags"`
 }
 
 // toArticleListItem 把数据库模型转成列表项。
@@ -82,6 +103,8 @@ func toArticleListItem(a *model.Article) articleListItem {
 		Excerpt:   excerptOf(a.Excerpt),
 		Author:    authorBrief(a),
 		CreatedAt: a.CreatedAt,
+		ViewCount: a.ViewCount,
+		Tags:      tagsOrEmpty(a.Tags),
 	}
 }
 
@@ -121,15 +144,23 @@ type articleListResp struct {
 type createArticleReq struct {
 	Title   string `json:"title"`
 	Content string `json:"content"`
+	// Tags 是标签名，最多 3 个、每个最长 32 字，具体校验在 service 的 normalizeTags。
+	// 用名字而不是 tag id：前端发帖时标签可能是当场新建的，还没有 id。
+	Tags []string `json:"tags"`
 }
 
-// articleDetailResp 是详情接口专用的响应，比列表多一个点赞数。
+// articleDetailResp 是详情接口专用的响应，比列表多点赞数与浏览数。
 // 匿名嵌入 articleResp，encoding/json 会把里面的字段平铺到同一层，
-// 输出仍是 id、title、content、author、created_at，再加一个 like_count。
-// 发布接口继续用 articleResp，不带这个字段。
+// 输出仍是 id、title、content、author、created_at，再加 like_count 与 view_count。
+// 发布接口继续用 articleResp，不带这两个字段。
 type articleDetailResp struct {
 	articleResp
 	LikeCount int64 `json:"like_count"`
+
+	// ViewCount 是库里的浏览数。缓存里也存了一份，但 handler 会用
+	// ViewCount() 查到的实时值覆盖它（见 Detail），因为缓存里的值只是
+	// 回填那一刻的快照，展示出来会偏旧甚至变小。
+	ViewCount int64 `json:"view_count"`
 
 	// Liked 是「当前访问者点过没」，决定详情页的点赞按钮要不要点亮。
 	//
@@ -145,5 +176,6 @@ func toArticleDetailResp(a *model.Article) articleDetailResp {
 	return articleDetailResp{
 		articleResp: toArticleResp(a),
 		LikeCount:   a.LikeCount,
+		ViewCount:   a.ViewCount,
 	}
 }

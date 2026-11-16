@@ -35,6 +35,10 @@ var testTables = []string{
 	"conversations",
 	"comments",
 	"article_likes",
+	// 关联表要排在 articles / tags 前面：虽然 TRUNCATE 前已经关了外键检查，
+	// 但顺序按「子表在前」写，将来改成 DELETE 也不会被外键挡住。
+	"article_tags",
+	"tags",
 	"outbox_events",
 	"notifications",
 	"floor_prizes",
@@ -169,6 +173,8 @@ func connectAndMigrate(dsn string) (*gorm.DB, error) {
 	if err := db.AutoMigrate(
 		&model.User{},
 		&model.Article{},
+		&model.Tag{},
+		&model.ArticleTag{},
 		&model.Comment{},
 		&model.ArticleLike{},
 		&model.OutboxEvent{},

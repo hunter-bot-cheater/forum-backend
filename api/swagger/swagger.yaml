@@ -1,5 +1,12 @@
 basePath: /api
 definitions:
+  article.TagCount:
+    properties:
+      count:
+        type: integer
+      name:
+        type: string
+    type: object
   article.articleDetailResp:
     properties:
       author:
@@ -20,8 +27,19 @@ definitions:
           存进去就会让 A 点过赞之后 B 也看到高亮的按钮。
           游客（没登录或 token 过期）恒为 false：没有身份就无从判断。
         type: boolean
+      tags:
+        description: Tags 是这篇文章挂的标签名，发布与编辑之后前端直接拿它回显。
+        items:
+          type: string
+        type: array
       title:
         type: string
+      view_count:
+        description: |-
+          ViewCount 是库里的浏览数。缓存里也存了一份，但 handler 会用
+          ViewCount() 查到的实时值覆盖它（见 Detail），因为缓存里的值只是
+          回填那一刻的快照，展示出来会偏旧甚至变小。
+        type: integer
     type: object
   article.articleListItem:
     properties:
@@ -33,8 +51,21 @@ definitions:
         type: string
       id:
         type: integer
+      tags:
+        description: |-
+          Tags 是这篇文章挂的标签名，按标签筛选时前端靠它高亮当前标签，
+          也让卡片上能显示「这篇属于什么」。
+        items:
+          type: string
+        type: array
       title:
         type: string
+      view_count:
+        description: |-
+          ViewCount 给列表卡片上那行小字用。它是详情缓存之外的一份库内值，
+          可能比详情页刚显示的数字略旧（详情页会补上本次访问的一次），
+          但列表本来就不需要精确到个位。
+        type: integer
     type: object
   article.articleListResp:
     properties:
@@ -62,6 +93,11 @@ definitions:
         type: string
       id:
         type: integer
+      tags:
+        description: Tags 是这篇文章挂的标签名，发布与编辑之后前端直接拿它回显。
+        items:
+          type: string
+        type: array
       title:
         type: string
     type: object
@@ -69,8 +105,22 @@ definitions:
     properties:
       content:
         type: string
+      tags:
+        description: |-
+          Tags 是标签名，最多 3 个、每个最长 32 字，具体校验在 service 的 normalizeTags。
+          用名字而不是 tag id：前端发帖时标签可能是当场新建的，还没有 id。
+        items:
+          type: string
+        type: array
       title:
         type: string
+    type: object
+  article.tagListResp:
+    properties:
+      list:
+        items:
+          $ref: '#/definitions/article.TagCount'
+        type: array
     type: object
   comment.commentAnchorResp:
     properties:
@@ -543,6 +593,7 @@ info:
 paths:
   /articles:
     get:
+      description: 可按作者、关键词或标签筛选；关键词同时匹配标题与正文，不区分大小写
       parameters:
       - description: 页码，默认 1
         in: query
@@ -556,6 +607,14 @@ paths:
         in: query
         name: author_id
         type: integer
+      - description: 搜索关键词，同时匹配标题与正文，最长 50 字
+        in: query
+        name: keyword
+        type: string
+      - description: 只看带这个标签的文章，按名字精确匹配
+        in: query
+        name: tag
+        type: string
       produces:
       - application/json
       responses:
@@ -569,7 +628,7 @@ paths:
                   $ref: '#/definitions/article.articleListResp'
               type: object
         "400":
-          description: 分页参数越界或 author_id 非法
+          description: 分页参数越界、author_id 非法、关键词或标签过长
           schema:
             type: string
       summary: 文章分页列表
@@ -578,8 +637,9 @@ paths:
     post:
       consumes:
       - application/json
+      description: tags 留空时，若服务端开启了 llm.enabled，会自动生成一个标签；生成失败不影响发布
       parameters:
-      - description: 标题与正文
+      - description: 标题、正文与标签（标签可为空数组）
         in: body
         name: body
         required: true
@@ -1437,6 +1497,24 @@ paths:
       summary: 用户注册
       tags:
       - users
+  /tags:
+    get:
+      description: 按文章数倒序返回前 20 个标签，供前端做标签云与筛选入口
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/article.tagListResp'
+              type: object
+      summary: 热门标签
+      tags:
+      - articles
   /users/{id}:
     get:
       description: 公开信息，不需要登录；未设置昵称时 nickname 回退为用户名。

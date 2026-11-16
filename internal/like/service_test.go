@@ -37,7 +37,7 @@ func newLikeFixture(t *testing.T) *likeFixture {
 
 	db := testutil.NewDB(t)
 	rdb := testutil.NewRedis(t)
-	articleSvc := article.NewArticleService(db, rdb)
+	articleSvc := article.NewArticleService(db, rdb, nil)
 
 	return &likeFixture{
 		db:         db,

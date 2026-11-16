@@ -44,6 +44,18 @@
 - 删根评论会连它下面的回复一起删（同事务），删回复只删那一条。不做级联的话，列表里会出现点不进父级、又找不到归属的孤儿回复。
 - 单条已读：`PUT /notifications/:id/read`，点开哪条就清哪条的红点（和抖音一致），`affected` 为 0 表示本来就已读；`read-all` 才是整页清零。归属判断在 `WHERE id = ? AND user_id = ?`，别人的通知返回 404。
 - 回复配额按根评论算：每页每条根评论最多带 200 条回复（`ROW_NUMBER() OVER (PARTITION BY root_id)`，MySQL 8），不是整页共用一个上限——共用时一条热帖会把配额吃光，后面的根评论回复为空而 `reply_count` 照常显示几百。
+- 文章列表支持关键词搜索：`GET /articles?keyword=xxx` 同时匹配标题与正文，可与 `author_id` 叠加，两个条件必须同时作用于 `Count` 与 `Find`（只给一边加会出现「总数 N 篇、翻页只有 M 条」）。关键词里的 `%`、`_`、`\` 先转义再拼进 `LIKE`，不转义时搜一个 `%` 会返回全站；空白关键词按「没搜」处理；超过 50 个字返回 400 而不是截断，截断会让结果与输入对不上。搜索走 `LIKE '%kw%'` 用不上索引，数据量上去后换 MySQL 全文索引或 04e 章的 Meilisearch，当前站内量级下全表扫在毫秒级，先不引入第二个组件。前端把搜索词放在地址栏 `?q=`，进入页面、前进后退、粘链接都从同一个入口还原，页面里的提交动作只负责改地址栏。
+- 浏览数已落地：`articles.view_count`，只在详情接口被请求时 +1（内部调用如编辑后回读不算）。同一访问者 30 分钟内重复打开只算一次，去重靠 Redis `SETNX article:view:v1:{id}:{viewer}`，登录用户按 `u:<user_id>`、游客按 `ip:<客户端 IP>`，两种前缀不共用——否则 4 号用户会和「IP 末尾是 4」的游客互相占掉对方的标记。自增走一条 `UPDATE view_count = view_count + 1`，用 `UpdateColumn` 而不是 `Update`：后者会顺带写 `updated_at`，文章被看一眼「更新时间」就跳到当前。Redis 故障时降级为照常计数（宁可多算，不要在抖动期间一条都不记），降级方向与详情缓存相反。
+- 详情响应里的浏览数用库里最新的值覆盖，不用详情缓存里那份快照。缓存 TTL 是 10~12 分钟，期间数字一直在涨，直接展示会越看越旧；更糟的是同一读者刷新两次，第二次命中缓存反而看到比第一次小的数字。代价是详情接口多一次主键单列查询（不走 JOIN、不 COUNT 点赞、不搬正文），换来的是准确且单调不减。缓存值只在这次查询失败时兜底。因为这个字段，详情缓存的 key 版本从 `v1` 升到了 `v2`，旧缓存无人读取、自然过期。
+- 浏览数的展示在列表卡片与详情页的 meta 行（`N 阅读`），四位以内原样显示、上万后压成 `1.2 万`（`utils/format.ts` 的 `formatCount`）：卡片底部那一行很窄，五位数会把作者名挤掉。数字不适合当审计依据（去重窗口 + 降级都会让它偏离真实访问量），要精确统计得从 access log 数。
+- 标签已落地：`tags`（`name` 唯一，varchar(32)）加 `article_tags`（复合主键 `article_id + tag_id`，两个方向都是 RESTRICT 外键）。一篇文章最多 3 个标签，服务端做去空白、按不区分大小写去重（保留第一次出现的写法），超过上限返回 400 而不是静默截断——截断会让用户以为标签都存上了。发布与编辑都是「整体替换」：先删旧关联再写新的，编辑时标签变少才能真的减掉。
+- 删文章要在同一个事务里先清 `article_tags`：外键是 RESTRICT，漏了这一步 MySQL 会直接拒绝删除，作者只看到「删除失败」而猜不到原因。`TestDeleteWithTagsRemovesLinks` 守着它，删掉那一行会真的报 `violates foreign key constraint`。
+- 按标签筛选用子查询（`id IN (SELECT article_id FROM article_tags JOIN tags ...)`）而不是 JOIN 主表：列表的 `Count` 与 `Find` 共用同一个 scope，JOIN 会让一篇文章按标签数重复出现、总数也跟着翻倍，前端算出来的页数比实际多。`GET /articles?tag=后端` 可与 `keyword`、`author_id` 叠加。
+- 标签跟着文章进出详情缓存：`model.Article` 加了 `Tags []string`（`gorm:"-"`，不落 `articles` 表），`queryDetail` 回源时填好，命中缓存也能拿到。因此详情缓存 key 从 `v2` 升到 `v3`；编辑标签走 `Update`，成功后照常删缓存。列表侧不做缓存，一次 JOIN 批量取回本页所有文章的标签，不逐篇查。
+- `GET /api/tags` 返回按文章数倒序的前 20 个标签（平手按 `tags.id` 稳定排序），公开接口。列表页的标签云与写作页的下拉候选都已撤掉（标签一多会撑成好几排，下拉还会挡住正文），这个接口暂时没有前端调用方，留着是为了以后的「全部标签」页。当前没有标签管理（改名、合并、删除）。
+- 前端两处入口：文章卡片标题右侧的标签（紧跟标题，点击进 `?tag=`）、详情页 meta 下方标签（同样进筛选）。筛选态和搜索词一样放在地址栏（`?tag=`），进入页面、前进后退、粘链接都从 query 还原；换标签回第 1 页，清标签保留搜索词。列表页只在真的筛着的时候显示一条「标签 xxx ×」的提示，点掉即取消——标签云没了之后，没有这条提示就没人知道列表为什么变短了。
+- 写作页的标签是裸输入框：回车或中英文逗号确认，胶囊右侧 `×` 删除，限 3 个并显示 `n/3`。输入法组词中的回车不算确认（`isComposing`），否则中文用户永远打不出词。
+- **没填标签会自动生成一个**：发布时 `tags` 为空 → 调大模型（`internal/llm`，OpenAI 兼容的 `/chat/completions`）要一个 2~6 字的分类，返回后同样过 `normalizeTags` 清洗再落库。开关与密钥在 `config.yaml` 的 `llm` 段（`enabled` + `api_key` 都成立才生效）。任何失败（超时、401、内容审核拒绝）只记一条 warn，文章照常发布——标签是附加信息，不该让「起不出名字」变成「发不出去」。编辑接口**不做**这件事：编辑时把标签全删是用户的明确动作，自动补一个等于删不掉。单测用假实现覆盖了「补标签 / 手填不调模型 / 失败不影响发布 / 编辑不补」四条。
 
 ## 计划实现的功能
 
@@ -381,7 +393,7 @@ curl.exe -X POST http://localhost:8080/api/articles `
 
 ## 安全与配置
 
-`config/config.yaml` 是被 Git 跟踪的示例配置，里面已有一份占位密码和示例 JWT secret。不可把真实数据库密码或生产密钥写进去。`.gitignore` 忽略 `.env` 与 `config/config.local.yaml`，不会忽略默认配置。管理类接口走 `admin.user_ids` 白名单（目前只有创建抢楼活动的 `POST /api/floor-events`），填的是用户自增 id；留空表示没人能调，这是刻意的安全默认。当前加载器支持 `CONFIG_PATH`、`JWT_SECRET` 和 `MYSQL_PASSWORD` 环境变量，启动时用环境变量或未跟踪的本地配置提供真实值。提交前再确认一遍没有真实凭据。PowerShell 接口示例使用 `curl.exe`，避免命中 `curl` 别名。Windows 下把内联 JSON 传给原生程序时，单引号里的双引号会被命令行解析吃掉，所以本页写成 `\"`，实测能保住完整 JSON；也可以把 JSON 存成文件后用 `-d @body.json`。Git Bash 里不需要转义，02 章的 bash 示例保持单引号写法。
+`config/config.yaml` 不在 Git 里（`.gitignore` 已忽略），仓库只跟踪 `config/config.example.yaml` 与 `config/config.production.yaml` 两个模板，两者都不含真实凭据。本机配置里的 MySQL 密码、JWT secret、`llm.api_key` 都属于机密，只能写在这份未跟踪的文件里，或者用环境变量给。管理类接口走 `admin.user_ids` 白名单（目前只有创建抢楼活动的 `POST /api/floor-events`），填的是用户自增 id；留空表示没人能调，这是刻意的安全默认。加载器支持 `CONFIG_PATH`、`JWT_SECRET`、`MYSQL_PASSWORD`、`REDIS_PASSWORD`、`LLM_API_KEY` 等环境变量（viper 把 `llm.api_key` 映射成 `LLM_API_KEY`）。提交前再确认一遍没有真实凭据。PowerShell 接口示例使用 `curl.exe`，避免命中 `curl` 别名。Windows 下把内联 JSON 传给原生程序时，单引号里的双引号会被命令行解析吃掉，所以本页写成 `\"`，实测能保住完整 JSON；也可以把 JSON 存成文件后用 `-d @body.json`。Git Bash 里不需要转义，02 章的 bash 示例保持单引号写法。
 
 ## 学习路线
 

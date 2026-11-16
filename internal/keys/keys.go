@@ -9,13 +9,24 @@ import "strconv"
 
 // key 里统一带 v1 版本号：将来结构变了，改成 v2 就能让旧 key 自然过期，
 // 不用写迁移脚本去清理线上残留。
-const LikeSetKeyPrefix = "article:like:v1:"  // 文章点赞用户集合（SET），成员是 user_id
-const HotArticlesKey = "hot:articles:v1"     // 热榜（ZSET），成员是 article_id，score 是热度
-const FloorNextKeyPrefix = "floor:event:v1:" // 抢楼发号器前缀
+const LikeSetKeyPrefix = "article:like:v1:"     // 文章点赞用户集合（SET），成员是 user_id
+const ArticleViewKeyPrefix = "article:view:v1:" // 浏览去重标记（STRING，SETNX 写入，到期自动消失）
+const HotArticlesKey = "hot:articles:v1"        // 热榜（ZSET），成员是 article_id，score 是热度
+const FloorNextKeyPrefix = "floor:event:v1:"    // 抢楼发号器前缀
 
 // LikeSetKey 返回某篇文章点赞用户集合的 Redis key。
 func LikeSetKey(articleID uint) string {
 	return LikeSetKeyPrefix + strconv.FormatUint(uint64(articleID), 10)
+}
+
+// ArticleViewKey 返回「某访问者看过某篇文章」的去重标记 key，形如
+// article:view:v1:42:u:7。
+//
+// viewer 由调用方拼，取值是 u:<user_id>（登录）或 ip:<地址>（游客）。
+// 冒号在两种形态里都只出现在 level 分隔处，用户 id 与 IP 本身不含冒号，不会拼歪。
+// 删除文章时不需要清理这些 key：它们只活 30 分钟，靠 TTL 自然回收。
+func ArticleViewKey(articleID uint, viewer string) string {
+	return ArticleViewKeyPrefix + strconv.FormatUint(uint64(articleID), 10) + ":" + viewer
 }
 
 // FloorNextKey 返回某场抢楼活动的发号计数器 key。

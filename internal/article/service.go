@@ -41,12 +41,19 @@ const maxTitleRunes = 128
 // 列本身按字节计，按字符放行会让 50000 个汉字（15 万字节）撞上列上限。
 const maxContentBytes = 50000
 
+// maxKeywordRunes 是搜索关键词的字符上限。
+//
+// 搜索走 LIKE '%kw%'，用不上索引，关键词越长扫得越慢；
+// 50 个字足够表达一次真实的搜索意图，再长的输入基本是误粘贴。
+// 上限放在 handler 判 400，让用户知道是参数问题，而不是悄悄截断后返回奇怪结果。
+const maxKeywordRunes = 50
+
 // articleListColumns 是列表查询要取的列：不取 content 全文，只截开头当摘要。
 // 原因是一页 10 篇、单篇正文上限 50000 字节，取全文等于每次往内存搬几百 KB，
 // 而列表只需要一小段开头。LEFT() 在 MySQL 里按字符计数，中文不会被截成半个。
 // 上限取 dto.go 的 articleExcerptSourceLimit，两边共用一个数字，改一处就够。
 var articleListColumns = fmt.Sprintf(
-	"id, user_id, title, LEFT(content, %d) AS excerpt, created_at",
+	"id, user_id, title, LEFT(content, %d) AS excerpt, view_count, created_at",
 	articleExcerptSourceLimit,
 )
 
@@ -56,23 +63,31 @@ var articleListColumns = fmt.Sprintf(
 //   - db：MySQL，真正的数据源
 //   - rdb：Redis，只放详情缓存，挂了也要能降级跑
 //   - group：把「同一个 key 的并发回源」合并成一次，只在当前进程内生效
+//   - tagger：没填标签时让大模型起一个，可为 nil（见 NewArticleService）
 //
 // 缓存计数不在结构体里：统一记到 metrics 包的共享计数器上，
 // 这样 /metrics 与 CacheStats() 用的是同一份数字。
 type ArticleService struct {
-	db    *gorm.DB
-	rdb   *redis.Client
-	group singleflight.Group
+	db     *gorm.DB
+	rdb    *redis.Client
+	group  singleflight.Group
+	tagger TagSuggester
 }
 
 // NewArticleService 由 router 在装配期调用一次。group 是零值可用类型，不用初始化。
-func NewArticleService(db *gorm.DB, rdb *redis.Client) *ArticleService {
-	return &ArticleService{db: db, rdb: rdb}
+//
+// tagger 为 nil 表示不做自动标签（配置里没开大模型，或者没有密钥）。
+// 做成接口而不是直接依赖 llm.Client：service 的测试里塞一个假实现就能验证
+// 「没填标签会补一个」「模型失败不影响发布」，不用起 HTTP 服务。
+func NewArticleService(db *gorm.DB, rdb *redis.Client, tagger TagSuggester) *ArticleService {
+	return &ArticleService{db: db, rdb: rdb, tagger: tagger}
 }
 
 // Create 发布一篇文章。作者身份由中间件确认后传入，客户端无法指定。
-// 返回的错误只有两种：domain.ErrInvalidInput（标题或正文不合法）、以及包装过的数据库错误。
-func (s *ArticleService) Create(ctx context.Context, userID uint, title, content string) (*model.Article, error) {
+// tagNames 是客户端给的标签名，清洗与数量校验都在 normalizeTags 里；
+// 一个都没填时会尝试让大模型补一个（suggestTag），补不出来就发一篇没有标签的文章。
+// 返回的错误只有两种：domain.ErrInvalidInput（标题、正文或标签不合法）、以及包装过的数据库错误。
+func (s *ArticleService) Create(ctx context.Context, userID uint, title, content string, tagNames []string) (*model.Article, error) {
 	// 先去掉首尾空白，否则一串空格也能通过「非空」校验。
 	title = strings.TrimSpace(title)
 	content = strings.TrimSpace(content)
@@ -80,15 +95,38 @@ func (s *ArticleService) Create(ctx context.Context, userID uint, title, content
 	if err := validateArticleInput(title, content); err != nil {
 		return nil, err
 	}
+	tags, err := normalizeTags(tagNames)
+	if err != nil {
+		return nil, err
+	}
+	// 只有「一个标签都没填」才自动生成。
+	// 编辑接口（Update）不做这件事：编辑时把标签全删掉是用户的明确意图，
+	// 再自动补一个会让「删标签」这个操作永远不生效。
+	if len(tags) == 0 {
+		tags = s.suggestTag(ctx, title, content)
+	}
 
 	a := &model.Article{
 		UserID:  userID,
 		Title:   title,
 		Content: content,
 	}
-	if err := s.db.WithContext(ctx).Create(a).Error; err != nil {
-		return nil, fmt.Errorf("create article for user %d: %w", userID, err)
+
+	// 文章与标签关联必须一起成功：只写进文章、标签丢了，
+	// 用户会以为是自己没填，重新编辑一次才发现问题。
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(a).Error; err != nil {
+			return fmt.Errorf("create article for user %d: %w", userID, err)
+		}
+		// a.ID 由上面的 INSERT 回填，关联表要用它。
+		return replaceArticleTags(tx, a.ID, tags)
+	})
+	if err != nil {
+		return nil, err
 	}
+
+	// 回填给调用方：发布接口会把这篇的完整形状回给前端，带上标签可以直接渲染。
+	a.Tags = tags
 
 	// id 是写库后由 MySQL 自增生成的，理论上这个 id 不会有旧缓存。
 	// 仍然删一次，是因为 MySQL 重启后自增计数按表内最大 id 重建，
@@ -115,34 +153,48 @@ func validateArticleInput(title, content string) error {
 	return nil
 }
 
-// Update 编辑文章，只允许作者本人操作，返回编辑后的完整文章（含点赞数）。
+// Update 编辑文章，只允许作者本人操作，返回编辑后的完整文章（含点赞数与标签）。
 //
 // 权限判断和写入放在同一条 UPDATE 里，由数据库一次完成「是不是作者」与「改内容」，
 // 避免「先查归属再更新」两步之间的竞态（查的时候还是作者，改的时候文章已被转手）。
-func (s *ArticleService) Update(ctx context.Context, id, userID uint, title, content string) (*model.Article, error) {
+//
+// 标签是整体替换：客户端送来的是「这篇应该有哪些标签」，不是增量。
+func (s *ArticleService) Update(ctx context.Context, id, userID uint, title, content string, tagNames []string) (*model.Article, error) {
 	title = strings.TrimSpace(title)
 	content = strings.TrimSpace(content)
 
 	if err := validateArticleInput(title, content); err != nil {
 		return nil, err
 	}
-
-	// 用 map 而不是结构体更新：GORM 用结构体时会跳过零值字段，
-	// 以后要是允许把正文改成空串，结构体更新会静默不生效。
-	res := s.db.WithContext(ctx).Model(&model.Article{}).
-		Where("id = ? AND user_id = ?", id, userID).
-		Updates(map[string]any{"title": title, "content": content})
-	if res.Error != nil {
-		return nil, fmt.Errorf("update article %d: %w", id, res.Error)
+	tags, err := normalizeTags(tagNames)
+	if err != nil {
+		return nil, err
 	}
 
-	// 影响行数为 0 只有两种可能：文章不存在，或者存在但不是这个人的。
-	// 两者都回 404，不泄露「这篇文章属于谁」，与 Delete 的口径一致。
-	//
-	// 注意「内容一个字都没改」不会走到这里：GORM 的 Updates 会顺带更新 updated_at，
-	// MySQL 按真正改变的行计数，那一行仍然算改过（TestUpdateSameContentSucceeds 守着这一点）。
-	if res.RowsAffected == 0 {
-		return nil, fmt.Errorf("article %d: %w", id, domain.ErrNotFound)
+	// 文章字段与标签关联要么一起改，要么都不改：
+	// 只改了正文而标签还是旧的，用户看到的是一份半成品。
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 用 map 而不是结构体更新：GORM 用结构体时会跳过零值字段，
+		// 以后要是允许把正文改成空串，结构体更新会静默不生效。
+		res := tx.Model(&model.Article{}).
+			Where("id = ? AND user_id = ?", id, userID).
+			Updates(map[string]any{"title": title, "content": content})
+		if res.Error != nil {
+			return fmt.Errorf("update article %d: %w", id, res.Error)
+		}
+
+		// 影响行数为 0 只有两种可能：文章不存在，或者存在但不是这个人的。
+		// 两者都回 404，不泄露「这篇文章属于谁」，与 Delete 的口径一致。
+		//
+		// 注意「内容一个字都没改」不会走到这里：GORM 的 Updates 会顺带更新 updated_at，
+		// MySQL 按真正改变的行计数，那一行仍然算改过（TestUpdateSameContentSucceeds 守着这一点）。
+		if res.RowsAffected == 0 {
+			return fmt.Errorf("article %d: %w", id, domain.ErrNotFound)
+		}
+		return replaceArticleTags(tx, id, tags)
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	// 内容变了就必须清详情缓存，顺序不能反：先删缓存再写库，中间有窗口会让
@@ -158,12 +210,13 @@ func (s *ArticleService) Update(ctx context.Context, id, userID uint, title, con
 // List 返回一页文章和总数，page 从 1 开始。
 //
 // authorID 大于 0 时只看这个人的文章（用户主页的标签页），0 表示全站。
+// keyword 模糊匹配标题与正文；tagName 非空时只留挂了该标签的文章。三者可以叠加。
 // 这里做了两次查询：先 Count 总数（前端要算总页数），再按 Offset 取当前页。
 // 数据量大时 Count 会成为瓶颈，那时该换成游标分页或用缓存存总数，现在不值得。
 //
 // 取回的 article.Content 是空的（列表查询不取全文），正文开头被塞进 Excerpt。
 // 想拿全文必须走 Detail，别在列表结果上读 Content。
-func (s *ArticleService) List(ctx context.Context, authorID uint, page, pageSize int) ([]*model.Article, int64, error) {
+func (s *ArticleService) List(ctx context.Context, authorID uint, keyword, tagName string, page, pageSize int) ([]*model.Article, int64, error) {
 	// handler 层已经用 httputil.ParsePage 校验过一遍，这里再校验是为了保住 service 的边界：
 	// 别的地方（比如以后的后台任务、命令行工具）直接调 service 时也不会传进非法值。
 	// 规则统一走 paging.New，handler 与 service 共用一份上界，不会各写一个数字而漂移。
@@ -172,19 +225,46 @@ func (s *ArticleService) List(ctx context.Context, authorID uint, page, pageSize
 		return nil, 0, err
 	}
 
-	// 作者条件必须同时作用于 Count 与 Find。
+	// 关键词在这里再 trim 一次：handler 会 trim 并判长度，但 service 也可能被
+	// 测试或后台脚本直接调用，一串空格不该变成「搜所有含空格的正文」。
+	keyword = strings.TrimSpace(keyword)
+	tagName = strings.TrimSpace(tagName)
+
+	// 作者、关键词、标签三个条件必须同时作用于 Count 与 Find。
 	// 只给 Find 加，总数仍是全站的，前端按 ceil(total/pageSize) 算页数会多出好几页空页；
-	// 只给 Count 加，则列表里会混进别人的文章。写成闭包是为了让两处共用同一份条件。
+	// 只给 Count 加，则列表里会混进别人的文章、或混进不含关键词的文章。
+	// 写成闭包是为了让两处共用同一份条件。
 	scope := func(tx *gorm.DB) *gorm.DB {
 		if authorID > 0 {
-			return tx.Where("user_id = ?", authorID)
+			tx = tx.Where("user_id = ?", authorID)
+		}
+		if keyword != "" {
+			// 标题和正文都要搜：用户记得往往是正文里的某个词，
+			// 只搜标题会让人以为「这篇明明有却搜不到」。
+			// 括号是显式写出来的：当前 GORM 会自动补（实测生成的 SQL 就是
+			// user_id = ? AND (title LIKE ? OR content LIKE ?)），
+			// 但这是框架的隐式行为，换版本或以后改成拼接原生 SQL 时，
+			// 少一对括号就会变成 (user_id = ? AND title LIKE ?) OR content LIKE ?，
+			// 别人的文章只要正文命中就会混进来。
+			pattern := likePattern(keyword)
+			tx = tx.Where("(title LIKE ? OR content LIKE ?)", pattern, pattern)
+		}
+		if tagName != "" {
+			// 用子查询而不是 JOIN：Count 与 Find 共用这个 scope，
+			// JOIN 会让 Count 按关联行数翻倍（一篇文章挂三个标签就数成三篇）。
+			// 子查询只取 article_id，外层仍然是 articles 表的行数。
+			sub := s.db.WithContext(ctx).Model(&model.ArticleTag{}).
+				Select("article_tags.article_id").
+				Joins("JOIN tags ON tags.id = article_tags.tag_id").
+				Where("tags.name = ?", tagName)
+			tx = tx.Where("id IN (?)", sub)
 		}
 		return tx
 	}
 
 	var total int64
 	if err := scope(s.db.WithContext(ctx).Model(&model.Article{})).Count(&total).Error; err != nil {
-		return nil, 0, fmt.Errorf("count articles author=%d: %w", authorID, err)
+		return nil, 0, fmt.Errorf("count articles author=%d keyword=%q: %w", authorID, keyword, err)
 	}
 
 	// 总数为 0 时直接返回空切片，省掉一次没有意义的查询。
@@ -208,9 +288,30 @@ func (s *ArticleService) List(ctx context.Context, authorID uint, page, pageSize
 		Limit(q.PageSize).
 		Find(&articles).Error
 	if err != nil {
-		return nil, total, fmt.Errorf("list articles author=%d page=%d size=%d: %w", authorID, page, pageSize, err)
+		return nil, total, fmt.Errorf("list articles author=%d keyword=%q page=%d size=%d: %w", authorID, keyword, page, pageSize, err)
+	}
+
+	// 标签单独一次 JOIN 查回来再挂到每篇上，不放进上面那条查询：
+	// 一篇多个标签会让主查询出现重复行，还得在 Go 里再去重一次。
+	// 列表页没有标签就渲染不出筛选入口，所以这里失败直接报错，不做「降级成空标签」。
+	if err := s.fillTags(ctx, articles); err != nil {
+		return nil, total, err
 	}
 	return articles, total, nil
+}
+
+// likePattern 把用户输入包成 LIKE 的「包含」模式，并转义 LIKE 的三个元字符。
+//
+// 不转义的话，搜一个 "%" 会匹配全部文章、搜 "_" 会匹配任意单字，
+// 用户看到的结果与输入毫无关系，还会被当成「搜索坏了」。
+// 反斜杠必须排在第一个替换：先替换 % 的话，转义产生的 \% 里的反斜杠
+// 会在下一步被再转一次，变成 \\%，匹配的就不是字面量百分号了。
+//
+// LIKE 的默认转义字符是反斜杠，MySQL 在两种 sql_mode 下都这么认，
+// 所以这里不需要额外写 ESCAPE 子句。
+func likePattern(keyword string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return "%" + replacer.Replace(keyword) + "%"
 }
 
 // preloadAuthor 限定 Preload("User") 只取展示作者需要的列。
@@ -238,6 +339,11 @@ func (s *ArticleService) Delete(ctx context.Context, id, userID uint) error {
 		}
 		// 点赞关系同样是 RESTRICT 外键，顺序不能反。
 		if err := tx.Where("article_id = ?", id).Delete(&model.ArticleLike{}).Error; err != nil {
+			return err
+		}
+		// 标签关联也是 RESTRICT：漏了这一句，删带标签的文章会直接报外键错误，
+		// 而作者看到的是「删除失败」，完全猜不到是标签拦住了。
+		if err := tx.Where("article_id = ?", id).Delete(&model.ArticleTag{}).Error; err != nil {
 			return err
 		}
 
@@ -349,6 +455,71 @@ func (s *ArticleService) Detail(ctx context.Context, id uint) (*model.Article, e
 	return article, nil
 }
 
+// RecordView 给一篇文章的浏览数 +1，同一访问者 30 分钟内只算一次。
+//
+// 去重靠 Redis 的 SETNX：每个「访问者 + 文章」在窗口内只留一个标记，
+// 抢到标记的那个请求才去写库。不用「先 GET 再 SET」，那两步之间是竞态，
+// 双击打开两个标签页会同时判定「没看过」，把一次阅读记成两次。
+//
+// viewer 由 handler 拼好传进来（登录用户是 u:<id>，游客是 ip:<地址>），
+// service 不认识 gin，也不该自己去看 HTTP 头。
+//
+// 写库用一条 UPDATE view_count = view_count + 1，交给数据库做原子自增：
+// 先 SELECT 再写 +1 的写法在两个并发请求下会读到同一个旧值，最后少算一次。
+//
+// 调用方必须在确认文章存在之后再调用：否则刷不存在 id 的请求
+// 会在 Redis 里留下一堆 30 分钟才过期的去重标记，等于把缓存穿透换个地方重现。
+func (s *ArticleService) RecordView(ctx context.Context, id uint, viewer string) error {
+	key := keys.ArticleViewKey(id, viewer)
+
+	dedupCtx, cancel := cache.WithTimeout(ctx)
+	fresh, err := s.rdb.SetNX(dedupCtx, key, "1", viewDedupTTL).Result()
+	cancel()
+
+	// Redis 出错时降级成「这次算数」：浏览数是低价值数据，
+	// 宁可 Redis 抖动期间多记几次，也不要一条都不记，让热榜彻底失去依据。
+	// 降级方向和详情缓存相反——那边失败要让请求继续回源，这边失败不能丢数据。
+	if err != nil {
+		slog.WarnContext(ctx, "dedup article view", "article_id", id, "viewer", viewer, "error", err)
+		fresh = true
+	}
+	if !fresh {
+		return nil
+	}
+
+	// UpdateColumn 而不是 Update：后者会顺带更新 updated_at，
+	// 于是每被看一次，文章的「更新时间」就跳到当前，按更新时间排序的地方全会乱。
+	// 浏览数不是内容变更，不该留下编辑痕迹。
+	res := s.db.WithContext(ctx).Model(&model.Article{}).
+		Where("id = ?", id).
+		UpdateColumn("view_count", gorm.Expr("view_count + 1"))
+	if res.Error != nil {
+		return fmt.Errorf("record view for article %d: %w", id, res.Error)
+	}
+	// 影响行数为 0 说明文章在这一瞬间被删了。不是错误，只是这次浏览没有落点。
+	return nil
+}
+
+// ViewCount 读一篇文章当前的浏览数，供详情接口展示。
+//
+// 为什么不直接用详情缓存里的 view_count：那个值是回填缓存那一刻的快照，
+// 缓存 TTL 是 10~12 分钟，期间浏览数一直在涨。直接展示会越看越旧，
+// 更糟的是同一读者刷新两次，第二次命中缓存反而看到比第一次小的数字。
+//
+// 代价是详情接口多一次主键单列查询。这一步比回源查正文轻得多
+// （不走 JOIN、不 COUNT 点赞、不搬 content），换来的是数字准确且单调不减。
+// 真到了扛不住的量级，再给这一列单开一层 Redis 计数器，而不是把旧值塞回去。
+func (s *ArticleService) ViewCount(ctx context.Context, id uint) (int64, error) {
+	var n int64
+	err := s.db.WithContext(ctx).Model(&model.Article{}).
+		Where("id = ?", id).
+		Pluck("view_count", &n).Error
+	if err != nil {
+		return 0, fmt.Errorf("read view count for article %d: %w", id, err)
+	}
+	return n, nil
+}
+
 // readArticleCache 读一次详情缓存，并判断这次请求还需不需要回源。
 // handled 为 true 表示「已经有结论」：要么是文章，要么是确定的不存在。
 // Redis 故障、key 不存在、缓存内容损坏都返回 handled=false，让调用方回源；
@@ -453,6 +624,12 @@ func (s *ArticleService) queryDetail(ctx context.Context, id uint) (*model.Artic
 		return nil, fmt.Errorf("count article likes %d: %w", id, err)
 	}
 	a.LikeCount = likeCount
+
+	// 标签跟着文章一起进出缓存：命中缓存的请求不用再查一次关联表。
+	// 代价是编辑标签之后必须删缓存，Update 里已经这么做了。
+	if err := s.fillTags(ctx, []*model.Article{&a}); err != nil {
+		return nil, err
+	}
 	return &a, nil
 }
 
