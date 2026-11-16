@@ -4,24 +4,18 @@ import (
 	"time"
 
 	"forum-backend/internal/model"
+	"forum-backend/internal/user"
 )
 
 // 本文件集中存放评论模块对外响应的结构体，以及从 model 到响应结构体的转换函数。
 
-// userBrief 只暴露作者的两个字段，避免把整个 User 对象带出去。
-// 文章模块也有自己的 userBrief（按模块内聚，不跨包共享）。
-type userBrief struct {
-	ID       uint   `json:"id"`
-	Username string `json:"username"`
-}
-
 // commentResp 是评论对外的形状，不直接序列化 model.Comment。
 type commentResp struct {
-	ID        uint       `json:"id"`
-	ArticleID uint       `json:"article_id"`
-	Content   string     `json:"content"`
-	CreatedAt time.Time  `json:"created_at"`
-	Author    *userBrief `json:"author,omitempty"` // Author 用指针，omitempty 才生效
+	ID        uint            `json:"id"`
+	ArticleID uint            `json:"article_id"`
+	Content   string          `json:"content"`
+	CreatedAt time.Time       `json:"created_at"`
+	Author    *user.BriefResp `json:"author,omitempty"` // Author 用指针，omitempty 才生效
 }
 
 // commentListResp 是评论列表接口 data 的形状，字段与文章列表对齐。
@@ -33,6 +27,7 @@ type commentListResp struct {
 }
 
 // toCommentResp 把评论模型转成对外结构体。
+// m.User 只在 Preload 之后才有值；新建评论时没有 Preload，author 会被省略。
 func toCommentResp(m *model.Comment) commentResp {
 	resp := commentResp{
 		ID:        m.ID,
@@ -41,7 +36,7 @@ func toCommentResp(m *model.Comment) commentResp {
 		CreatedAt: m.CreatedAt,
 	}
 	if m.User.ID != 0 {
-		resp.Author = &userBrief{ID: m.User.ID, Username: m.User.Username}
+		resp.Author = user.NewBriefRespPtr(user.NewBrief(&m.User))
 	}
 	return resp
 }

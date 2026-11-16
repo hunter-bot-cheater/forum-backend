@@ -1,6 +1,7 @@
 package notification
 
 import (
+	"context"
 	"testing"
 
 	"forum-backend/internal/event"
@@ -57,8 +58,10 @@ func TestJumpTarget(t *testing.T) {
 }
 
 // 注册表是唯一扩展点。新增行为时加一行，handle 与落库代码不动。
+// TestResolverByTypeRegistry 盯住注册表本身：注册了就一定要能取到 resolver，
+// 没注册的类型则保持缺失（handle 会 ACK，不会误发通知）。
 func TestResolverByTypeRegistry(t *testing.T) {
-	registered := []string{event.TypeLikeCreated, event.TypeCommentCreated}
+	registered := []string{event.TypeLikeCreated, event.TypeCommentCreated, event.TypeMessageCreated}
 	for _, key := range registered {
 		if resolverByType[key] == nil {
 			t.Errorf("event type %s has no resolver", key)
@@ -74,5 +77,31 @@ func TestResolverByTypeRegistry(t *testing.T) {
 		if resolverByType[key] != nil {
 			t.Errorf("event type %s should not have a resolver yet", key)
 		}
+	}
+}
+
+// TestMessageEventProducesNoNotification 验证私信事件在通知消费端被静默跳过。
+//
+// 私信有自己的未读计数与推送链路，如果这里也生成通知，
+// 用户会在消息中心看到两份「新私信」红点。
+// 注册成返回 nil 的 resolver（而不是不注册）还有一层作用：
+// 不注册会走 "no notification resolver" 告警分支，每来一条私信刷一行日志。
+func TestMessageEventProducesNoNotification(t *testing.T) {
+	resolve, ok := resolverByType[event.TypeMessageCreated]
+	if !ok {
+		t.Fatal("message.created 必须注册 resolver，否则每条私信都会打一条告警日志")
+	}
+
+	spec, err := resolve(context.Background(), nil, event.Payload{
+		Type:    event.TypeMessageCreated,
+		ActorID: 1,
+		Target:  event.Target{Type: event.TargetUser, ID: 2},
+		Created: &event.Target{Type: event.TargetMessage, ID: 3},
+	})
+	if err != nil {
+		t.Fatalf("不该报错: %v", err)
+	}
+	if spec != nil {
+		t.Errorf("私信不该产生通知，实际 spec = %+v", spec)
 	}
 }

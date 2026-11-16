@@ -17,14 +17,24 @@ import (
 const (
 	TypeLikeCreated    = "like.created"
 	TypeCommentCreated = "comment.created"
+	TypeMessageCreated = "message.created"
 	StreamKey          = "forum:events:v1"
-	NotifyGroup        = "forum:notify:v1"
+
+	// NotifyGroup 是站内通知的消费组，组内多个实例分摊事件（一条事件只被一个实例处理）。
+	NotifyGroup = "forum:notify:v1"
+
+	// MessageGroup 是私信实时推送的消费组前缀。
+	// 它和 NotifyGroup 的语义不同：推送必须让每个实例都拿到同一条消息，
+	// 才能推给连在该实例上的收件人，所以实际组名是「前缀:实例标识」，
+	// 每个实例一个组，各收一份。详见 message.PushWorker。
+	MessageGroup = "forum:message:v1"
 )
 
 // 目标对象的种类。新增行为时只新增一个取值，Payload 的字段个数不变。
 const (
 	TargetArticle = "article"
 	TargetComment = "comment"
+	TargetMessage = "message"
 	TargetUser    = "user"
 )
 

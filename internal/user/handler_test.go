@@ -1,7 +1,9 @@
 package user
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,11 +31,29 @@ type envelope struct {
 	ErrorCode string          `json:"error_code"`
 }
 
+// stubFollowStats 是关注统计的测试替身。
+// 真实现要查 follows 表，而这里只验证响应形状与错误分支，用固定值更快也更可控。
+type stubFollowStats struct {
+	following   int64
+	followers   int64
+	isFollowing bool
+	err         error
+}
+
+func (s stubFollowStats) Stats(ctx context.Context, userID, viewerID uint) (int64, int64, bool, error) {
+	return s.following, s.followers, s.isFollowing, s.err
+}
+
 // newUserRouter 搭一个只挂用户模块三条路由的最小引擎。
 // 不套真实 JWTAuth：这里测的是 handler 自己的分支，
 // 登录态直接用 asUser 中间件模拟（和中间件写进 context 的键一致）。
 func newUserRouter(svc *UserService, loginAs uint) *gin.Engine {
-	h := NewUserHandler(svc, nil)
+	return newUserRouterWithStats(svc, loginAs, stubFollowStats{})
+}
+
+// newUserRouterWithStats 与 newUserRouter 相同，但允许指定关注统计的返回值。
+func newUserRouterWithStats(svc *UserService, loginAs uint, stats FollowStats) *gin.Engine {
+	h := NewUserHandler(svc, nil, stats)
 	r := gin.New()
 	r.GET("/api/users/:id", h.Detail)
 	r.GET("/api/users/me", asUser(loginAs), h.Me)
@@ -173,5 +193,127 @@ func TestUpdateMeValidationError(t *testing.T) {
 	}
 	if env.ErrorCode != "invalid_input" {
 		t.Errorf("error_code = %q，期望 invalid_input", env.ErrorCode)
+	}
+}
+
+// TestDetailIncludesFollowStats 验证主页响应带上关注数、粉丝数与 is_following。
+// 统计值由替身提供，这里只关心它们是否被正确序列化到顶层。
+func TestDetailIncludesFollowStats(t *testing.T) {
+	db := testutil.NewDB(t)
+	u := testutil.SeedUser(t, db, "erin")
+	stats := stubFollowStats{following: 3, followers: 5, isFollowing: true}
+	r := newUserRouterWithStats(NewUserService(db), u.ID, stats)
+
+	w, env := do(t, r, http.MethodGet, "/api/users/"+strconv.FormatUint(uint64(u.ID), 10), "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d，期望 200", w.Code)
+	}
+
+	// 用匿名结构体接：内嵌的 userResp 字段会被平铺，统计字段也在同一层。
+	var got struct {
+		ID             uint  `json:"id"`
+		FollowingCount int64 `json:"following_count"`
+		FollowerCount  int64 `json:"follower_count"`
+		IsFollowing    bool  `json:"is_following"`
+	}
+	if err := json.Unmarshal(env.Data, &got); err != nil {
+		t.Fatalf("解析 data 失败: %v", err)
+	}
+	if got.ID != u.ID {
+		t.Errorf("id = %d，期望 %d", got.ID, u.ID)
+	}
+	if got.FollowingCount != 3 || got.FollowerCount != 5 {
+		t.Errorf("统计 = %d/%d，期望 3/5", got.FollowingCount, got.FollowerCount)
+	}
+	if !got.IsFollowing {
+		t.Error("is_following 应当为 true")
+	}
+}
+
+// TestDetailStatsErrorMapsTo500 验证统计查询失败时返回 500 而不是空统计。
+// 静默返回 0 会让前端显示「0 粉丝」，比报错更难排查。
+func TestDetailStatsErrorMapsTo500(t *testing.T) {
+	db := testutil.NewDB(t)
+	u := testutil.SeedUser(t, db, "frank")
+	r := newUserRouterWithStats(NewUserService(db), u.ID, stubFollowStats{err: errors.New("boom")})
+
+	w, env := do(t, r, http.MethodGet, "/api/users/"+strconv.FormatUint(uint64(u.ID), 10), "")
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d，期望 500", w.Code)
+	}
+	if env.ErrorCode != "internal_error" {
+		t.Errorf("error_code = %q，期望 internal_error", env.ErrorCode)
+	}
+}
+
+// TestUpdateMeReturnsProfileShape 验证 PUT /users/me 与 GET /users/me 返回同一形状。
+//
+// 前端保存资料后通常直接拿返回值替换本地状态。如果 PUT 只回资料本体、
+// 不带 following_count / follower_count，替换之后主页上的关注数会变成 0，
+// 用户看到的是「刚改完昵称，粉丝没了」。
+func TestUpdateMeReturnsProfileShape(t *testing.T) {
+	db := testutil.NewDB(t)
+	u := testutil.SeedUser(t, db, "grace")
+	stats := stubFollowStats{following: 3, followers: 5}
+	r := newUserRouterWithStats(NewUserService(db), u.ID, stats)
+
+	w, env := do(t, r, http.MethodPut, "/api/users/me", `{"bio":"改个简介"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d，期望 200, body=%s", w.Code, w.Body.String())
+	}
+
+	var got struct {
+		Bio            string `json:"bio"`
+		FollowingCount int64  `json:"following_count"`
+		FollowerCount  int64  `json:"follower_count"`
+	}
+	if err := json.Unmarshal(env.Data, &got); err != nil {
+		t.Fatalf("解析 data 失败: %v", err)
+	}
+	if got.Bio != "改个简介" {
+		t.Errorf("bio = %q，期望 改个简介", got.Bio)
+	}
+	if got.FollowingCount != 3 || got.FollowerCount != 5 {
+		t.Errorf("统计 = %d/%d，期望 3/5", got.FollowingCount, got.FollowerCount)
+	}
+}
+
+// TestUpdateMeClearNicknameRoundTrip 验证「清空昵称」这条链路是自洽的。
+//
+// 传空串后：库里存空串，响应 nickname 回退成用户名，同时 has_custom_nickname 变 false。
+// 少了最后这个布尔值，前端编辑表单拿 nickname 回填会显示成用户名，
+// 用户没法表达「我要清空昵称」，也分不清自己到底设过没有。
+func TestUpdateMeClearNicknameRoundTrip(t *testing.T) {
+	db := testutil.NewDB(t)
+	u := testutil.SeedUser(t, db, "heidi")
+	r := newUserRouter(NewUserService(db), u.ID)
+
+	// 先设一个昵称，确认 has_custom_nickname 变成 true。
+	_, env := do(t, r, http.MethodPut, "/api/users/me", `{"nickname":"海蒂"}`)
+	var set struct {
+		Nickname          string `json:"nickname"`
+		HasCustomNickname bool   `json:"has_custom_nickname"`
+	}
+	if err := json.Unmarshal(env.Data, &set); err != nil {
+		t.Fatalf("解析 data 失败: %v", err)
+	}
+	if set.Nickname != "海蒂" || !set.HasCustomNickname {
+		t.Fatalf("设置后 = %+v，期望 nickname=海蒂 且 has_custom_nickname=true", set)
+	}
+
+	// 再传空串清空：展示名回退成用户名，但「设过没有」必须回到 false。
+	_, env = do(t, r, http.MethodPut, "/api/users/me", `{"nickname":""}`)
+	var cleared struct {
+		Nickname          string `json:"nickname"`
+		HasCustomNickname bool   `json:"has_custom_nickname"`
+	}
+	if err := json.Unmarshal(env.Data, &cleared); err != nil {
+		t.Fatalf("解析 data 失败: %v", err)
+	}
+	if cleared.Nickname != "heidi" {
+		t.Errorf("清空后 nickname = %q，期望回退成 heidi", cleared.Nickname)
+	}
+	if cleared.HasCustomNickname {
+		t.Error("清空后 has_custom_nickname 应为 false")
 	}
 }

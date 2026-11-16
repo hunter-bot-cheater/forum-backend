@@ -52,6 +52,9 @@ type RedisConfig struct {
 	Addr     string `mapstructure:"addr"`
 	Password string `mapstructure:"password"`
 	DB       int    `mapstructure:"db"`
+	// PoolSize 是连接池上限。0 表示交给 go-redis 按 CPU 核数算（10 * GOMAXPROCS）。
+	// 显式设一个值只在「Redis 有连接数配额」时才需要，比如云托管的免费档。
+	PoolSize int `mapstructure:"pool_size"`
 }
 
 type JWTConfig struct {

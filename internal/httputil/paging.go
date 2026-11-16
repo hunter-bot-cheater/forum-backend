@@ -49,3 +49,38 @@ func ParsePage(c *gin.Context) (int, int, error) {
 	}
 	return page, pageSize, nil
 }
+
+// DefaultCursorLimit 是游标分页不给 limit 时的条数。
+// 20 条大约是一屏半，够填满首屏又不会一次拉太多。
+const DefaultCursorLimit = 20
+
+// ParseCursor 从查询串里解析游标分页参数：before_id 与 limit。
+//
+// before_id 缺省为 0，表示「从最新一条往回取」；传上一页返回的
+// next_before_id 就是继续往更早翻。limit 缺省 20，范围 1~MaxPageSize。
+//
+// 为什么消息列表不用 page：记录一直在往后追加，页码会漂。详见 message.MessageQuery。
+func ParseCursor(c *gin.Context) (uint, int, error) {
+	limit := DefaultCursorLimit
+	rawLimit := c.Query("limit")
+	if rawLimit != "" {
+		v, err := strconv.Atoi(rawLimit)
+		if err != nil || v < 1 || v > MaxPageSize {
+			return 0, 0, fmt.Errorf("%w: limit must be between 1 and %d", domain.ErrInvalidInput, MaxPageSize)
+		}
+		limit = v
+	}
+
+	var beforeID uint
+	rawBefore := c.Query("before_id")
+	if rawBefore != "" {
+		// 用 ParseUint 而不是 Atoi：id 不可能是负数，负数直接算参数错误，
+		// 免得 uint(-1) 变成一个巨大的数去查库。
+		v, err := strconv.ParseUint(rawBefore, 10, 64)
+		if err != nil {
+			return 0, 0, fmt.Errorf("%w: before_id must be a non-negative integer", domain.ErrInvalidInput)
+		}
+		beforeID = uint(v)
+	}
+	return beforeID, limit, nil
+}

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"forum-backend/internal/model"
+	"forum-backend/internal/user"
 )
 
 // 本文件集中存放文章模块对外响应的结构体，以及从 model 到响应结构体的转换函数。
@@ -16,32 +17,28 @@ import (
 //   - 详情  articleDetailResp：含正文，另加点赞数
 //   - 发布  articleResp：含正文，作者刚提交完，回显全文是合理的
 
-// userBrief 只暴露作者的两个字段，避免把整个 User 对象（包括密码哈希）带出去。
-// 评论模块也定义了自己的 userBrief：按模块内聚，不为了省几行代码去跨包共享。
-type userBrief struct {
-	ID       uint   `json:"id"`
-	Username string `json:"username"`
-}
-
 // authorBrief 从模型里取作者信息，没 Preload 时返回 nil。
 // 没 Preload 时 a.User 是零值、ID 为 0，这时不给 author 字段，
 // 而不是返回一个 id=0、username="" 的空作者对象让前端显示成空白名字。
-func authorBrief(a *model.Article) *userBrief {
+//
+// 结构体统一用 user.BriefResp：原来本模块自己声明了一份四字段的 userBrief，
+// 评论和私信各有一份完全相同的，三份迟早分叉。
+func authorBrief(a *model.Article) *user.BriefResp {
 	if a.User.ID == 0 {
 		return nil
 	}
-	return &userBrief{ID: a.User.ID, Username: a.User.Username}
+	return user.NewBriefRespPtr(user.NewBrief(&a.User))
 }
 
 // articleResp 是详情与发布接口的正文形状。
 // 列表不用它：列表一页 10 篇，正文单篇上限 50000 字节，
 // 带上全文会让响应体到几百 KB，客户端在列表里也用不到。
 type articleResp struct {
-	ID        uint       `json:"id"`
-	Title     string     `json:"title"`
-	Content   string     `json:"content"`
-	Author    *userBrief `json:"author,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
+	ID        uint            `json:"id"`
+	Title     string          `json:"title"`
+	Content   string          `json:"content"`
+	Author    *user.BriefResp `json:"author,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
 }
 
 // toArticleResp 把数据库模型转成带正文的对外结构体，转换只发生在 handler 层。
@@ -69,11 +66,11 @@ const articleExcerptSourceLimit = 400
 // articleListItem 是文章列表里的一篇，刻意不含 content 全文。
 // Excerpt 是服务端截好的摘要，客户端不需要自己去截正文。
 type articleListItem struct {
-	ID        uint       `json:"id"`
-	Title     string     `json:"title"`
-	Excerpt   string     `json:"excerpt"`
-	Author    *userBrief `json:"author,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
+	ID        uint            `json:"id"`
+	Title     string          `json:"title"`
+	Excerpt   string          `json:"excerpt"`
+	Author    *user.BriefResp `json:"author,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
 }
 
 // toArticleListItem 把数据库模型转成列表项。

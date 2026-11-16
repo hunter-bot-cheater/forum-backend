@@ -3,6 +3,7 @@
 package user
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -11,22 +12,33 @@ import (
 
 	"forum-backend/internal/domain"
 	"forum-backend/internal/httputil"
+	"forum-backend/internal/model"
 	"forum-backend/pkg/jwt"
 	"forum-backend/pkg/response"
 )
+
+// FollowStats 是个人主页要用的关注统计。
+//
+// 接口声明在使用方（这里），实现放在 follow 包：
+// follow 已经依赖 user.Briefs，如果 user 反过来 import follow 就成环了。
+// 方法签名只用基本类型，正是为了让两个包不共享结构体也能对上。
+type FollowStats interface {
+	Stats(ctx context.Context, userID, viewerID uint) (following, followers int64, isFollowing bool, err error)
+}
 
 // UserHandler 是用户模块的 HTTP 入口，只做三件事：
 // 解析请求参数 → 调 service → 把结果或错误翻译成响应。
 // 真正的业务规则（长度、重名、密码比对）都在 UserService 里，这里不重复判断。
 type UserHandler struct {
-	svc *UserService
-	jwt *jwt.Manager
+	svc    *UserService
+	jwt    *jwt.Manager
+	follow FollowStats
 }
 
-// NewUserHandler 注入用户 service 和 JWT 管理器。
-// jwt 只在登录成功后签发 token 时用到，其它接口不需要。
-func NewUserHandler(svc *UserService, jwtManager *jwt.Manager) *UserHandler {
-	return &UserHandler{svc: svc, jwt: jwtManager}
+// NewUserHandler 注入用户 service、JWT 管理器和关注统计。
+// jwt 只在登录成功后签发 token 时用到；follow 只在个人主页组装计数时用到。
+func NewUserHandler(svc *UserService, jwtManager *jwt.Manager, followStats FollowStats) *UserHandler {
+	return &UserHandler{svc: svc, jwt: jwtManager, follow: followStats}
 }
 
 // registerReq 是注册与登录共用的请求体。两个接口要的字段完全一样，就共用一个结构体。
@@ -133,12 +145,12 @@ func (h *UserHandler) Login(c *gin.Context) {
 // @Tags         users
 // @Produce      json
 // @Param        id   path  int  true  "用户 ID"
-// @Success      200  {object}  httputil.SwaggerEnvelope{data=user.userResp}
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=user.profileResp}
 // @Failure      400  {string}  string    "id 格式不正确"
 // @Failure      404  {string}  string    "用户不存在"
 // @Router       /users/{id} [get]
-// Detail 处理 GET /api/users/:id。
-// 关注数、粉丝数、文章数要等关注模块落地后再补，这里先只返回资料本体。
+// Detail 处理 GET /api/users/:id，返回资料本体加关注统计。
+// 带 token 时多算一个 is_following，不带 token 也能看，只是这一项固定 false。
 func (h *UserHandler) Detail(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
@@ -151,18 +163,42 @@ func (h *UserHandler) Detail(c *gin.Context) {
 		httputil.MapServiceError(c, "user detail", err)
 		return
 	}
-	response.OK(c, toUserResp(u))
+
+	// 主页是公开接口，带 token 时把访问者身份传下去，用来算 is_following；
+	// 没带 token 就是 0，统计照常返回，只有这一项是 false。
+	var viewerID uint
+	if current, ok := httputil.CurrentUserID(c); ok {
+		viewerID = current
+	}
+
+	profile, err := h.buildProfile(c, u, viewerID)
+	if err != nil {
+		httputil.MapServiceError(c, "user detail stats", err)
+		return
+	}
+	response.OK(c, profile)
+}
+
+// buildProfile 组装个人主页响应：资料本体加关注统计。
+// 抽成方法是因为公开主页与 /users/me 用的是同一份形状，区别只有 viewerID 是谁。
+func (h *UserHandler) buildProfile(c *gin.Context, u *model.User, viewerID uint) (profileResp, error) {
+	following, followers, isFollowing, err := h.follow.Stats(c.Request.Context(), u.ID, viewerID)
+	if err != nil {
+		return profileResp{}, err
+	}
+	return toProfileResp(u, following, followers, isFollowing), nil
 }
 
 // Me godoc
 // @Summary      当前登录用户资料
 // @Tags         users
 // @Produce      json
-// @Success      200  {object}  httputil.SwaggerEnvelope{data=user.userResp}
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=user.profileResp}
 // @Failure      401  {string}  string    "未登录"
 // @Security     Bearer
 // @Router       /users/me [get]
 // Me 处理 GET /api/users/me，身份只从 token 取，不接受查询参数指定用户。
+// 返回形状与公开主页完全一致，前端个人中心只写一套渲染。
 func (h *UserHandler) Me(c *gin.Context) {
 	userID, ok := httputil.CurrentUserID(c)
 	if !ok {
@@ -175,7 +211,14 @@ func (h *UserHandler) Me(c *gin.Context) {
 		httputil.MapServiceError(c, "current user", err)
 		return
 	}
-	response.OK(c, toUserResp(u))
+
+	// 看自己的主页时 viewer 就是本人，is_following 恒为 false（不能关注自己）。
+	profile, err := h.buildProfile(c, u, userID)
+	if err != nil {
+		httputil.MapServiceError(c, "current user stats", err)
+		return
+	}
+	response.OK(c, profile)
 }
 
 // UpdateMe godoc
@@ -185,7 +228,7 @@ func (h *UserHandler) Me(c *gin.Context) {
 // @Accept       json
 // @Produce      json
 // @Param        body body user.updateProfileReq true "昵称、头像、简介，均可选"
-// @Success      200  {object}  httputil.SwaggerEnvelope{data=user.userResp}
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=user.profileResp}
 // @Failure      400  {string}  string    "字段不合法"
 // @Failure      401  {string}  string    "未登录"
 // @Security     Bearer
@@ -211,5 +254,15 @@ func (h *UserHandler) UpdateMe(c *gin.Context) {
 		httputil.MapServiceError(c, "update profile", err)
 		return
 	}
-	response.OK(c, toUserResp(u))
+
+	// 返回形状必须和 GET /users/me 一模一样。
+	// 只回 toUserResp 的话，前端「保存后用返回值替换本地状态」会把
+	// following_count、follower_count 覆盖成 0，主页上的关注数凭空消失。
+	// 看自己时 viewer 就是本人，is_following 恒为 false。
+	profile, err := h.buildProfile(c, u, userID)
+	if err != nil {
+		httputil.MapServiceError(c, "update profile stats", err)
+		return
+	}
+	response.OK(c, profile)
 }

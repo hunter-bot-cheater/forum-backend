@@ -25,9 +25,11 @@ import (
 	"time"
 
 	"forum-backend/internal/config"
+	"forum-backend/internal/message"
 	"forum-backend/internal/notification"
 	"forum-backend/internal/realtime"
 	"forum-backend/internal/router"
+	"forum-backend/internal/user"
 	"forum-backend/pkg/jwt"
 	"forum-backend/pkg/logging"
 )
@@ -116,13 +118,17 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// relay 负责 outbox -> Redis Stream，notifier 负责 Stream -> 站内通知。
-	// 两者组成事件链路的上下游，必须跟着进程一起起停。
+	// relay 负责 outbox -> Redis Stream，notifier 负责 Stream -> 站内通知，
+	// messagePusher 负责 Stream -> 私信实时推送（独立的消费组，见 message.PushWorker）。
+	// 三者是事件链路的上下游，必须跟着进程一起起停。
 	relay := notification.NewRelay(db, rdb)
 	notifier := notification.NewNotificationWorker(db, rdb, hub)
+	// user service 在这里单独建一份：router 内部那份不对外暴露，
+	// 而推送只需要它「按 id 取展示信息」的能力，本身无状态，共用同一个 db 即可。
+	messagePusher := message.NewPushWorker(db, rdb, hub, user.NewUserService(db))
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() {
 		defer wg.Done()
 		relay.Run(ctx)
@@ -130,6 +136,10 @@ func main() {
 	go func() {
 		defer wg.Done()
 		notifier.Run(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		messagePusher.Run(ctx)
 	}()
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

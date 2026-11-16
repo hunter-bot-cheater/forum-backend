@@ -18,6 +18,13 @@ import (
 // 放在本文件而不是 article.go，因为它只服务评论查询。
 const commentListOrder = "created_at ASC, id ASC"
 
+// preloadAuthor 限定 Preload("User") 只取展示作者需要的列。
+// 不带参数的 Preload 会发 SELECT *，把 bcrypt 密码哈希读进内存；
+// 评论列表一页 20 条，等于白搬 20 个哈希，而且这些字段 DTO 根本用不到。
+func preloadAuthor(db *gorm.DB) *gorm.DB {
+	return db.Select("id", "username", "nickname", "avatar_url")
+}
+
 // CommentService 评论业务逻辑。方法名统一用动词：List / Create / Delete。
 type CommentService struct {
 	db *gorm.DB
@@ -49,8 +56,10 @@ func (s *CommentService) List(ctx context.Context, articleID uint, page, pageSiz
 
 	// 初始化成空切片：页越界时 Find 不填充，JSON 仍是 [] 而不是 null。
 	list := make([]*model.Comment, 0)
+	// Preload("User", preloadAuthor) 只取展示要用的四列。
+	// 不带参数的 Preload 是 SELECT *，会把密码哈希读进内存。
 	err := s.db.WithContext(ctx).
-		Preload("User").
+		Preload("User", preloadAuthor).
 		Where("article_id = ?", articleID).
 		Order(commentListOrder).
 		Offset((page - 1) * pageSize).Limit(pageSize).

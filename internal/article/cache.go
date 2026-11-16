@@ -3,10 +3,10 @@
 package article
 
 import (
-	"math/rand/v2"
 	"strconv"
 	"time"
 
+	"forum-backend/internal/cache"
 	"forum-backend/internal/metrics"
 )
 
@@ -48,10 +48,9 @@ const articleEmptyTTL = 60 * time.Second
 
 // articleDetailTTL 返回本次回填应该用的 TTL。
 // 每次调用都重新取随机数，所以同一批写入的 key 不会撞在同一秒过期。
+// 抖动逻辑在 cache 包，关注数缓存用的是同一个函数，两处不会慢慢分叉。
 func articleDetailTTL() time.Duration {
-	// Int64N 返回 [0, n) 区间里的整数，转成 time.Duration 后加到基础值上。
-	jitter := rand.Int64N(int64(articleDetailTTLJitter))
-	return articleDetailTTLBase + time.Duration(jitter)
+	return cache.JitterTTL(articleDetailTTLBase, articleDetailTTLJitter)
 }
 
 // ===== 空标记 =====

@@ -45,7 +45,10 @@ jobs:
       - run: go vet ./...
       # -race 只在 CI 跑：本地开它慢两三倍，Windows 上还要额外装 gcc。
       # 它要抓的是 Hub、抢楼这些并发代码里的数据竞争，跑一次比读十遍代码有用。
+      # -p 1 串行跑包：所有包共用同一个 forum_test 库，而每个用例开头都会
+      # TRUNCATE 全部表。并行跑的话 A 包刚插的数据会被 B 包的清表抹掉，
+      # 表现是随机几个用例挂掉、重跑又绿——这种红比不跑更浪费时间。
       - name: Test with race detector
-        run: go test -race -count=1 -coverprofile=coverage.out ./...
+        run: go test -p 1 -race -count=1 -coverprofile=coverage.out ./...
       - name: Coverage summary
         run: go tool cover -func=coverage.out | tail -1

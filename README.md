@@ -16,7 +16,23 @@
 - 对外响应结构体集中在 `internal/handler/dto.go`，与 handler 同包。注册与登录不再直接序列化 `model.User`，响应 JSON 形状与改动前一致。取舍依据见 02 章 8.0。
 - `go.mod` 声明 `go 1.26.0`，本机实测 `go1.27.3`。先运行 `go version` 确认本机版本满足要求。旧版 README 写的 1.25.0 已作废。
 - `go build ./...` 与 `go test ./...` 当前可通过，测试文件以工作树里的 `*_test.go` 为准（03a 章有 `internal/service/article_cache_test.go`，04 章 4.10 会新增 `internal/handler/dto_test.go`）。仓库里多处源码尚未 `gofmt`，用 `gofmt -l ./cmd ./internal ./pkg` 查差异，落地后对本次改过的文件跑 `gofmt -w`。
-- 测试地基已落地：`internal/testutil` 提供真实 MySQL（`TEST_MYSQL_DSN` 开关）与 miniredis 两套夹具，`internal/comment` 已作为示范补齐 service 与 handler 测试，包覆盖率从 0% 到 81%（总覆盖率 21.7% → 24.4%）。CI 增加了 MySQL service 与 `-race`。其余依赖数据库的包仍待补，用法见「测试」一节。
+- 测试地基已落地：`internal/testutil` 提供真实 MySQL（`TEST_MYSQL_DSN` 开关）与 miniredis 两套夹具，`internal/comment` 已作为示范补齐 service 与 handler 测试，包覆盖率从 0% 到 81%（总覆盖率 21.7% → 24.4%）。CI 增加了 MySQL service 与 `-race`。用法见「测试」一节。
+- 关注数已进 Redis 缓存：key 是 `user:follow:stats:v1:{user_id}`，TTL 5 分钟（叠加 0~1 分钟随机抖动防雪崩），关注/取关时删掉双方（关注者、被关注者）的 key。未命中时按用户 ID 做 singleflight 合并回源，热点主页同时过期不会把两次 COUNT 打成一片。读不到或 Redis 故障时直接回源 MySQL，接口不报错。公共读写工具在 `internal/cache`，Redis 单次操作限时 100ms。
+- Redis 故障时的延迟预算是分层的，任何一层都不允许退回到客户端的 500ms：连接池 `PoolTimeout` 100ms（拿不到连接就降级）、限流 50ms（它在链路最前面，站住就是整站变慢）、缓存读写 100ms（`cache.WithTimeout`，文章详情和关注数共用）。`MaxRetries` 关闭（-1）：所有 Redis 用途都可降级，重试三次只会把一次故障放大成三倍延迟。实测 `CLIENT PAUSE 3000` 期间，主页 0.62s → 0.25s，文章详情 1.55s → 0.35s，正常路径均为 2~3ms。
+- 私信已落地，一对一会话：`conversations` 用归一化的 `pair_key`（小 id 在前）保证两个人只有一条记录，未读数是会话行上的两列计数，与消息写入同事务。接口全部按「对方 user_id」寻址（`/conversations/with/{user_id}/...`），所以从某人主页点私信可以直接进聊天页，不需要先创建会话；消息列表响应里带 `peer`，首屏一个请求就能画出顶栏和消息。
+- 私信记录是持久化的，两人可以反复、跨设备继续聊：消息落 `messages` 表，会话摘要（最后一条、未读数）落 `conversations` 表，两者在同一个事务里提交。重启服务、关浏览器、换设备都不影响历史，`TestMessagesPersistAfterReconnect` 会用一条全新的数据库连接把同一批消息读回来验证这一点（不是「看起来还在」，是换连接重读）。
+- 消息列表用游标分页而不是页码：`GET /conversations/with/{user_id}/messages?before_id=<上一页的 next_before_id>&limit=20`。聊天记录只会往后追加，页码会随着新消息漂移，往上翻历史时会重复或漏条；`id` 稳定，用「本页最早一条的 id」当锚点不会漂。响应带 `has_more` 和 `next_before_id`，不需要额外的 COUNT。
+- 发送接口支持幂等键：请求体里的可选字段 `client_msg_id`（客户端生成 UUID），同一个 key 重复提交只落一条，返回第一次那条消息，未读数也只加一次。撞唯一索引之后补查必须用 `FOR UPDATE` 当前读（RR 下快照读看不到并发事务刚提交的行），否则并发同键会有一个请求报 500。
+- 私信已接实时推送：`Send` 在消息所在的同一个事务里写一条 `message.created` 事件，relay 搬进 Redis Stream，`message.PushWorker` 消费后推给收件人的在线连接（`/api/ws/notifications`）。推送帧是 `{"type":"message.created","data":{"message":{...},"sender":{...},"unread":3}}`，其中 `message` 与 REST 的 `messageResp` 同形，前端一套渲染逻辑能吃两种来源；`unread` 是服务端算好的该会话未读数，前端直接拿来更新红点，不用自己 +1。
+- 推送的消费组按实例切分（`forum:message:v1:<主机名>`），不是所有实例共用一个组：消费组的语义是「一条消息只投给组内一个消费者」，共用组会让同一条私信只到一台机器，其余机器上在线的收件人永远等不到。组用 `$` 创建，只收新事件，避免每次部署把整个 Stream 重放一遍、把旧消息推给在线用户。代价是实例更替会在 Redis 里留下空组，需要用 `XGROUP DESTROY` 清理；单实例部署不存在这个问题。
+- 私信不生成站内通知：`notification` 里给 `message.created` 注册了一个返回 nil 的 resolver，让它走正常路径直接 ACK。不注册会打一条「no notification resolver」告警（每条私信一行），注册成真通知则会让消息中心多出一份红点。
+- 推送是尽力而为：收件人不在线、连接刚好断开都不影响消息已经落库，他下次打开聊天页会从 MySQL 拉到完整历史。重投可能让前端收到同一帧两次，前端按 `message.id` 去重即可（`client_msg_id` 也能用来对齐乐观渲染的气泡）。
+- 私信前端已落地：`web/src/views/message/index.vue`，两个路由共用一个组件——`/messages` 只看会话列表，`/messages/:userId` 直接进入与某人的聊天页（从没聊过也能进，后端会返回空的 `list` 加对方的 `peer`）。界面不自己搭对话骨架，用开源库 `vue-element-plus-x` 的三个组件：`Conversations`（会话列表，选中态/hover/滚动/空态插槽）、`BubbleList`（气泡流，贴底跟随、上滑加载更早消息、回到最新按钮）、`XSender`（输入框，Enter 发送、字数上限、清空）。视觉按抖音私信调：左栏 320px 白底、灰色圆角搜索条、未读红点压头像右上角内侧、自己蓝色 `#1c7dff` 实心气泡、对方 `#f2f3f5` 灰气泡、圆角 18px、时间分隔整行居中。
+- 上翻历史用 `before_id` 游标，滚动位置由 `BubbleList` 在插入旧消息后自行补正——早期是自己记 `scrollHeight` 差值算的，换成组件后这段逻辑删掉了。行样式走组件暴露的 `itemsStyle` / `itemsHoverStyle` / `itemsActiveStyle`，不 `:deep` 覆盖内部类名（内部结构会随版本变）。气泡配色必须带 `.elx-bubble__content-wrapper` 这一层选择器，组件默认规则挂在它上面，只写 `.elx-bubble__content` 特异性不够、自己的气泡仍是灰的（实测踩过）。
+- 前端发送是乐观渲染：点发送先画一条半透明气泡并生成 `client_msg_id`，服务端确认后替换成真实消息，失败则标红并提供「重发」——重发复用同一个幂等键，即使上一次其实已经落库也只会返回同一条。连按 Enter 不会被拦截，`sending` 是计数而不是布尔。
+- 前端的 WebSocket 是全局单例（`web/src/utils/ws.ts`）：`message.created` 一帧同时喂给聊天页（追加气泡）、会话列表（换摘要、顶到最前）和侧边栏角标（更新未读数），各订阅各的，页面卸载时退订。断线按 1→2→4…30 秒退避重连并叠 0~1 秒随机抖动，避免后端重启后所有客户端在同一秒涌回来；重连成功后自动补拉断线期间漏掉的消息。
+- 前端不再只存 token 和用户名：布局挂载时会调一次 `GET /users/me` 拿昵称头像，刷新页面后顶栏也能正确显示。登出会断开 WebSocket 并清空会话列表，否则下一个登录的人会先看到上一个人的私信。
+- 本地调试 WebSocket 时 `ws.allowed_origins` 要同时写 `127.0.0.1:5173` 和 `localhost:5173`：浏览器把它们当成两个不同的源，后端比对的是 `Origin` 的 `host:port`，漏一个的表现是页面里 WebSocket 握手 403、私信收不到实时消息。
 
 ## 计划实现的功能
 
@@ -34,18 +50,36 @@ Go、Gin、GORM、MySQL、Viper、bcrypt、JWT 属于当前代码或第 1 周练
 ## 目录
 
 ```text
-cmd/server/       程序入口
-config/           YAML 配置
-internal/config/   配置结构和数据库、Redis 初始化
-internal/model/   GORM 数据模型
-internal/handler/ HTTP 请求处理（当前有用户注册与登录）
-internal/service/ 业务逻辑（当前有用户注册登录与文章基础代码，直接使用 GORM）
-internal/repository/ 目标数据访问层（当前 user.go 仅为空壳）
-internal/middleware/ HTTP 中间件（JWT 鉴权）
-internal/router/  路由组装
-pkg/              JWT、统一响应等公共代码
-docs/             分阶段学习文档
-api/swagger/     Swagger 生成物（04b 章，按文档生成）
+cmd/server/        程序入口
+cmd/migrate/       独立迁移命令（生产环境关掉自动迁移时用）
+cmd/reconcile/     缓存与榜单对账
+cmd/loadtest/      压测客户端
+config/            YAML 配置
+internal/config/   配置结构、MySQL/Redis 初始化、迁移、GORM 日志适配
+internal/model/    GORM 数据模型
+internal/user/     用户：注册登录、JWT 签发、资料与主页、Brief 批量取展示信息
+internal/follow/   关注关系：关注/取关（幂等）、关注与粉丝列表、计数缓存
+internal/message/  私信：一对一会话、发送、会话列表、消息分页、已读与未读角标
+internal/article/  文章：发布、分页列表、详情（带缓存）、删除
+internal/comment/  评论：发表、列表、删除
+internal/like/     点赞（Redis SET + 计数）
+internal/hot/      热榜（ZSET 与定时重算）
+internal/floor/    抢楼活动与发号器
+internal/notification/ 站内通知：outbox 消费、落库、WebSocket 推送
+internal/realtime/     WebSocket 连接表 Hub
+internal/ws/           WebSocket 升级入口与心跳
+internal/event/    领域事件类型与 outbox 写入
+internal/cache/    Redis JSON 读写的公共小工具（读/写/删 + 降级约定）
+internal/keys/     跨模块共用的 Redis key
+internal/httputil/ handler 侧的公共逻辑：当前用户、错误映射、分页
+internal/domain/   领域错误哨兵
+internal/middleware/ 中间件（JWT、限流、访问日志、CORS、Recovery）
+internal/metrics/  Prometheus 指标定义与抓取 handler
+internal/router/   路由组装
+internal/testutil/ 测试夹具：真实 MySQL 与 miniredis
+pkg/               JWT、统一响应、结构化日志
+docs/              分阶段学习文档
+api/swagger/       Swagger 生成物（04b 章）
 ```
 
 ## 开始学习
@@ -85,14 +119,16 @@ go run ./cmd/server
 ```bash
 # bash / macOS / CI
 export TEST_MYSQL_DSN="root:你的密码@tcp(127.0.0.1:3306)/forum_test?parseTime=true&loc=Local&charset=utf8mb4"
-go test -count=1 ./...
+go test -p 1 -count=1 ./...
 ```
 
 ```powershell
 # PowerShell
 $env:TEST_MYSQL_DSN="root:你的密码@tcp(127.0.0.1:3306)/forum_test?parseTime=true&loc=Local&charset=utf8mb4"
-go test -count=1 ./...
+go test -p 1 -count=1 ./...
 ```
+
+`-p 1` 是必须的：所有包共用同一个 `forum_test` 库，而每个用例开头都会 TRUNCATE 全部表。并行跑包时 A 包刚插进去的数据会被 B 包的清表抹掉，表现是随机几个用例挂掉、重跑又绿。这种红比不跑更浪费时间，所以 Makefile 和 CI 都加了 `-p 1`。
 
 也可以 `make test-integration`（先 export 上面那个变量）或 `make test-cover`。
 
@@ -191,6 +227,7 @@ Get-Content logs\app.log | Select-String '"level":"ERROR"'
 | | `http_panics_total`、`http_rate_limited_total`、`rate_limit_errors_total` | 三个「非 0 就该看一眼」的计数器 |
 | | `gorm_slow_queries_total`、`gorm_query_errors_total` | SQL 层信号，慢查询阈值来自 `mysql.slow_query_ms` |
 | | `article_cache_events_total{event}` | 缓存事件（hit/miss/load/share/degrade/write），命中率 = hit /(hit+miss) |
+| | `follow_stats_cache_events_total{event}` | 关注数缓存事件（hit/miss/degrade/invalidate/share），`invalidate` 应当与关注/取关次数成正比，`share` 不为零说明 singleflight 正在合并并发回源 |
 | | `ws_online_users`、`ws_online_connections` | 抓取时向 Hub 现读，不在连接建立/断开的热路径上埋点 |
 | 库自带采集器 | `go_*`、`process_*` | goroutine 数、堆内存、GC、CPU、常驻内存、fd 数等，字段名和社区 Grafana 看板一致 |
 

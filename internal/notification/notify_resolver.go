@@ -37,6 +37,17 @@ type resolver func(ctx context.Context, db *gorm.DB, p event.Payload) (*notifySp
 var resolverByType = map[string]resolver{
 	event.TypeLikeCreated:    resolveArticleAction,
 	event.TypeCommentCreated: resolveArticleAction,
+	// 私信明确不产生站内通知：它有自己的未读计数和推送链路
+	// （message.PushWorker 消费同一个 Stream 的另一个消费组）。
+	// 如果这里也建一条通知，用户会在消息中心看到两份「新私信」红点。
+	// 注册成「返回 nil」而不是不注册，是为了让 handle 走正常路径，
+	// 不注册会打出一条 "no notification resolver" 的告警，每来一条私信刷一行。
+	event.TypeMessageCreated: resolveNoNotification,
+}
+
+// resolveNoNotification 表示「这条事件不产生通知」，handle 收到 nil 会直接 ACK。
+func resolveNoNotification(context.Context, *gorm.DB, event.Payload) (*notifySpec, error) {
+	return nil, nil
 }
 
 // resolveArticleAction 处理作用在文章上的动作。

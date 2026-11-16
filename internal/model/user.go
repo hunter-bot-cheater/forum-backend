@@ -9,7 +9,7 @@ import "time"
 //
 // Nickname / AvatarURL / Bio 是展示资料，与登录凭证解耦：
 // 改昵称不影响登录，也不会撞唯一索引。
-// 三列都是 not null + default ''，存量数据迁移时不用回填 NULL；
+// 三列都是 not null + default ”，存量数据迁移时不用回填 NULL；
 // 昵称为空时展示层回退到用户名，不在 SQL 里写 COALESCE。
 type User struct {
 	ID        uint      `gorm:"primaryKey" json:"id"`

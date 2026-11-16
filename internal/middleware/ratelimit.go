@@ -1,10 +1,12 @@
 package middleware
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -74,6 +76,17 @@ redis.call('PEXPIRE', key, ttl_ms)
 return { allowed, retry_ms }
 `
 
+// rateLimitTimeout 是一次限流判定的时间上限。
+//
+// 限流是每个请求都要走的一步，比缓存更靠近入口，所以预算给得比缓存的 100ms 更短。
+// 它的正常耗时是亚毫秒级，50ms 只是故障时的止损线。
+//
+// 为什么必须有这条线：Redis 抖动时如果没有独立预算，就会用客户端的 500ms，
+// 之后还有可能等连接池的 PoolTimeout。一个请求白等 500ms 尚可忍受，
+// 但限流在链路最前面，所有请求都在这里排队，HTTP 连接很快被占满，
+// 变成「Redis 抖一下，整站变慢」。这种雪崩比缓存失效更彻底。
+const rateLimitTimeout = 50 * time.Millisecond
+
 // RateLimit 返回按客户端 IP 分桶的令牌桶中间件。
 // 参数在装配期校验一次，配错直接让服务起不来，而不是等到每个请求都判一遍。
 func RateLimit(rdb *redis.Client, cfg RateLimitConfig) (gin.HandlerFunc, error) {
@@ -90,7 +103,12 @@ func RateLimit(rdb *redis.Client, cfg RateLimitConfig) (gin.HandlerFunc, error) 
 		// ClientIP() 取的是直连 IP，是否解析 X-Forwarded-For 由 router 的 trusted_proxies 决定。
 		key := cfg.KeyPrefix + "ip:" + c.ClientIP()
 
-		res, err := script.Run(c.Request.Context(), rdb, []string{key}, cfg.Capacity, cfg.Rate).Slice()
+		// 给这次判定单独套一个上限，不沿用客户端的 500ms。
+		// 执行完立刻 cancel，不能用 defer：defer 要等整个请求结束才跑，
+		// 定时器会一直挂到 handler 返回，白白多占一个 timer。
+		ctx, cancel := context.WithTimeout(c.Request.Context(), rateLimitTimeout)
+		res, err := script.Run(ctx, rdb, []string{key}, cfg.Capacity, cfg.Rate).Slice()
+		cancel()
 		if err != nil {
 			// Redis 抖动时降级放行，避免一次依赖故障演变成全站 500。
 			// 代价是这段时间限流失效，所以要打日志，别静默降级。

@@ -3,7 +3,7 @@ definitions:
   article.articleDetailResp:
     properties:
       author:
-        $ref: '#/definitions/article.userBrief'
+        $ref: '#/definitions/user.BriefResp'
       content:
         type: string
       created_at:
@@ -18,7 +18,7 @@ definitions:
   article.articleListItem:
     properties:
       author:
-        $ref: '#/definitions/article.userBrief'
+        $ref: '#/definitions/user.BriefResp'
       created_at:
         type: string
       excerpt:
@@ -47,7 +47,7 @@ definitions:
   article.articleResp:
     properties:
       author:
-        $ref: '#/definitions/article.userBrief'
+        $ref: '#/definitions/user.BriefResp'
       content:
         type: string
       created_at:
@@ -62,13 +62,6 @@ definitions:
       content:
         type: string
       title:
-        type: string
-    type: object
-  article.userBrief:
-    properties:
-      id:
-        type: integer
-      username:
         type: string
     type: object
   comment.commentListResp:
@@ -90,7 +83,7 @@ definitions:
         type: integer
       author:
         allOf:
-        - $ref: '#/definitions/comment.userBrief'
+        - $ref: '#/definitions/user.BriefResp'
         description: Author 用指针，omitempty 才生效
       content:
         type: string
@@ -102,13 +95,6 @@ definitions:
   comment.createCommentReq:
     properties:
       content:
-        type: string
-    type: object
-  comment.userBrief:
-    properties:
-      id:
-        type: integer
-      username:
         type: string
     type: object
   floor.createEventReq:
@@ -174,6 +160,43 @@ definitions:
       user_id:
         type: integer
     type: object
+  follow.followItemResp:
+    properties:
+      avatar_url:
+        type: string
+      followed_at:
+        type: string
+      followed_by_me:
+        type: boolean
+      id:
+        type: integer
+      nickname:
+        type: string
+      username:
+        type: string
+    type: object
+  follow.followListResp:
+    properties:
+      list:
+        items:
+          $ref: '#/definitions/follow.followItemResp'
+        type: array
+      page:
+        type: integer
+      page_size:
+        type: integer
+      total:
+        type: integer
+    type: object
+  follow.followStateResp:
+    properties:
+      changed:
+        type: boolean
+      follower_count:
+        type: integer
+      following:
+        type: boolean
+    type: object
   hot.HotArticleResp:
     properties:
       article_id:
@@ -215,6 +238,88 @@ definitions:
       liked:
         type: boolean
     type: object
+  message.conversationListResp:
+    properties:
+      list:
+        items:
+          $ref: '#/definitions/message.conversationResp'
+        type: array
+      page:
+        type: integer
+      page_size:
+        type: integer
+      total:
+        type: integer
+    type: object
+  message.conversationResp:
+    properties:
+      last_message:
+        $ref: '#/definitions/message.messageResp'
+      peer:
+        $ref: '#/definitions/user.BriefResp'
+      unread:
+        type: integer
+      updated_at:
+        type: string
+    type: object
+  message.messageListResp:
+    properties:
+      has_more:
+        type: boolean
+      list:
+        items:
+          $ref: '#/definitions/message.messageResp'
+        type: array
+      next_before_id:
+        type: integer
+      peer:
+        $ref: '#/definitions/user.BriefResp'
+    type: object
+  message.messageResp:
+    properties:
+      client_msg_id:
+        description: |-
+          ClientMsgID 回显客户端传的幂等键，前端用它把「先画出来的灰气泡」
+          换成服务端这条（拿到真实 id 和时间）。没传就不输出这个字段。
+        type: string
+      content:
+        type: string
+      created_at:
+        type: string
+      id:
+        type: integer
+      mine:
+        description: |-
+          Mine 表示这条是不是我发的，前端据此决定气泡靠左还是靠右。
+          让服务端算：前端拿自己的 id 和 SenderID 比也能算，但会话列表里
+          「最后一条是不是我发的」也要用同一个判断，两处写容易不一致。
+        type: boolean
+      read_at:
+        type: string
+      sender_id:
+        type: integer
+    type: object
+  message.readResp:
+    properties:
+      cleared:
+        type: integer
+    type: object
+  message.sendReq:
+    properties:
+      client_msg_id:
+        description: |-
+          ClientMsgID 是客户端生成的幂等键（建议 UUID），可留空。
+          留空表示这条消息不参与去重；填了就保证「同一个 key 只落一条」，
+          弱网重试、用户双击发送都不会产生重复气泡。
+        type: string
+      content:
+        type: string
+    type: object
+  message.unreadResp:
+    properties:
+      unread:
+        type: integer
+    type: object
   notification.notificationListResp:
     properties:
       list:
@@ -251,12 +356,52 @@ definitions:
       type:
         type: string
     type: object
+  user.BriefResp:
+    properties:
+      avatar_url:
+        type: string
+      id:
+        type: integer
+      nickname:
+        type: string
+      username:
+        type: string
+    type: object
   user.loginResp:
     properties:
       token:
         type: string
       user:
         $ref: '#/definitions/user.userResp'
+    type: object
+  user.profileResp:
+    properties:
+      avatar_url:
+        type: string
+      bio:
+        type: string
+      created_at:
+        type: string
+      follower_count:
+        type: integer
+      following_count:
+        type: integer
+      has_custom_nickname:
+        description: |-
+          HasCustomNickname 表示用户在库里真的设过昵称。
+          Nickname 是展示名（空时已回退成 Username），光看它分不清
+          「用户设了昵称且刚好等于用户名」和「用户没设昵称」。
+          个人中心的编辑表单靠这个布尔值决定输入框回填昵称还是回填空串。
+        type: boolean
+      id:
+        type: integer
+      is_following:
+        description: IsFollowing 表示当前登录用户是否关注了这个人，未登录时固定 false。
+        type: boolean
+      nickname:
+        type: string
+      username:
+        type: string
     type: object
   user.registerReq:
     properties:
@@ -285,11 +430,16 @@ definitions:
         type: string
       created_at:
         type: string
+      has_custom_nickname:
+        description: |-
+          HasCustomNickname 表示用户在库里真的设过昵称。
+          Nickname 是展示名（空时已回退成 Username），光看它分不清
+          「用户设了昵称且刚好等于用户名」和「用户没设昵称」。
+          个人中心的编辑表单靠这个布尔值决定输入框回填昵称还是回填空串。
+        type: boolean
       id:
         type: integer
       nickname:
-        type: string
-      updated_at:
         type: string
       username:
         type: string
@@ -611,6 +761,190 @@ paths:
       summary: 删除自己的评论
       tags:
       - comments
+  /conversations:
+    get:
+      description: 按最后消息时间倒序，带对方资料、最后一条消息与未读数。
+      parameters:
+      - description: 页码，默认 1
+        in: query
+        name: page
+        type: integer
+      - description: 每页条数，默认 10，最多 50
+        in: query
+        name: page_size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/message.conversationListResp'
+              type: object
+        "400":
+          description: 分页参数不合法
+          schema:
+            type: string
+        "401":
+          description: 未登录
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 我的会话列表
+      tags:
+      - messages
+  /conversations/unread:
+    get:
+      description: 供顶部角标使用，不区分会话。
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/message.unreadResp'
+              type: object
+        "401":
+          description: 未登录
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 我的未读私信总数
+      tags:
+      - messages
+  /conversations/with/{user_id}/messages:
+    get:
+      description: 游标分页：不传 before_id 取最新一页，往上翻时把上一页的 next_before_id 作为 before_id 传回来；同页内按时间正序。
+      parameters:
+      - description: 对方的用户 ID
+        in: path
+        name: user_id
+        required: true
+        type: integer
+      - description: 游标：只取 id 小于它的消息，缺省 0 表示最新一页
+        in: query
+        name: before_id
+        type: integer
+      - description: 每页条数，默认 20，最多 50
+        in: query
+        name: limit
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/message.messageListResp'
+              type: object
+        "400":
+          description: 分页参数不合法
+          schema:
+            type: string
+        "401":
+          description: 未登录
+          schema:
+            type: string
+        "404":
+          description: 用户不存在
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 与某人的消息列表
+      tags:
+      - messages
+    post:
+      consumes:
+      - application/json
+      description: |-
+        会话不存在时自动创建。收件人来自路径，发件人来自 token。
+        可选 client_msg_id 作幂等键：同一个 key 重复提交只落一条，返回第一次那条。
+      parameters:
+      - description: 收件人 ID
+        in: path
+        name: user_id
+        required: true
+        type: integer
+      - description: 消息正文 1~1000 字符；client_msg_id 可选
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/message.sendReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/message.messageResp'
+              type: object
+        "400":
+          description: 正文为空或超长
+          schema:
+            type: string
+        "401":
+          description: 未登录
+          schema:
+            type: string
+        "404":
+          description: 收件人不存在
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 给某人发私信
+      tags:
+      - messages
+  /conversations/with/{user_id}/read:
+    put:
+      description: 幂等，已读状态下调用返回 cleared=0，不报错。
+      parameters:
+      - description: 对方的用户 ID
+        in: path
+        name: user_id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/message.readResp'
+              type: object
+        "401":
+          description: 未登录
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 把与某人的会话标记为已读
+      tags:
+      - messages
   /floor-events:
     post:
       consumes:
@@ -891,7 +1225,7 @@ paths:
             - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/user.userResp'
+                  $ref: '#/definitions/user.profileResp'
               type: object
         "400":
           description: id 格式不正确
@@ -904,6 +1238,159 @@ paths:
       summary: 用户主页
       tags:
       - users
+  /users/{id}/follow:
+    delete:
+      description: 本来就没关注也返回 200，便于前端无脑重试。
+      parameters:
+      - description: 被取关者 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/follow.followStateResp'
+              type: object
+        "400":
+          description: id 非法
+          schema:
+            type: string
+        "401":
+          description: 未登录
+          schema:
+            type: string
+        "404":
+          description: 用户不存在
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 取消关注
+      tags:
+      - follow
+    put:
+      description: 重复关注也返回 200，changed 表示这次是否真的新增了关系。
+      parameters:
+      - description: 被关注者 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/follow.followStateResp'
+              type: object
+        "400":
+          description: id 非法或试图关注自己
+          schema:
+            type: string
+        "401":
+          description: 未登录
+          schema:
+            type: string
+        "404":
+          description: 用户不存在
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 关注用户
+      tags:
+      - follow
+  /users/{id}/followers:
+    get:
+      parameters:
+      - description: 用户 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 页码，默认 1
+        in: query
+        name: page
+        type: integer
+      - description: 每页条数，默认 10，最大 50
+        in: query
+        name: page_size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/follow.followListResp'
+              type: object
+        "400":
+          description: 分页或 id 非法
+          schema:
+            type: string
+        "404":
+          description: 用户不存在
+          schema:
+            type: string
+      summary: 某人的粉丝列表
+      tags:
+      - follow
+  /users/{id}/following:
+    get:
+      parameters:
+      - description: 用户 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 页码，默认 1
+        in: query
+        name: page
+        type: integer
+      - description: 每页条数，默认 10，最大 50
+        in: query
+        name: page_size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/follow.followListResp'
+              type: object
+        "400":
+          description: 分页或 id 非法
+          schema:
+            type: string
+        "404":
+          description: 用户不存在
+          schema:
+            type: string
+      summary: 某人的关注列表
+      tags:
+      - follow
   /users/me:
     get:
       produces:
@@ -916,7 +1403,7 @@ paths:
             - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/user.userResp'
+                  $ref: '#/definitions/user.profileResp'
               type: object
         "401":
           description: 未登录
@@ -948,7 +1435,7 @@ paths:
             - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/user.userResp'
+                  $ref: '#/definitions/user.profileResp'
               type: object
         "400":
           description: 字段不合法

@@ -144,14 +144,49 @@ groups:
           description: "可能是 TTL 到期后集中失效、Redis 内存被淘汰，或者只是流量太小（分母太小）。先看 article_cache_events_total 里 write 与 degrade 的比例。"
 
       # 降级意味着「Redis 出错，直接回源 MySQL」。哪怕只有零星几次也说明 Redis 不稳。
+      # 这里把两套缓存的事件加在一起：它们共用同一个 Redis 客户端，
+      # 挂了就是一起挂，分成两条规则只会同时响两次。
       - alert: ForumCacheDegraded
-        expr: rate(article_cache_events_total{job="forum-backend",event="degrade"}[5m]) > 0
+        expr: |
+          (
+            rate(article_cache_events_total{job="forum-backend",event="degrade"}[5m])
+            +
+            rate(follow_stats_cache_events_total{job="forum-backend",event="degrade"}[5m])
+          ) > 0
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: "缓存降级在进行（{{ $value | humanize }} 次/秒）"
-          description: "Redis 读写超时或连接池耗尽。接口还能用（降级到 MySQL），但 MySQL 压力会成倍上涨，且响应时间会明显变长。"
+          description: "Redis 读写超时或连接池耗尽。接口还能用（降级到 MySQL），但 MySQL 压力会成倍上涨，且响应时间会明显变长。看日志里「read follow stats cache」「write follow stats cache」哪一条为主。"
+
+      # 关注数缓存的命中率。主页是被人反复刷的页面，同一份计数会被算很多次，
+      # 命中率低等于缓存没起作用，那两次 COUNT 全都打到了 MySQL。
+      # 阈值比文章缓存更宽松（50%）：关注数是 5 分钟 TTL，冷启动阶段本来就低。
+      #
+      # 口径注意：未命中进 singleflight 后会二次读一次缓存，那一次也记 miss，
+      # 所以 miss 事件数略大于「真未命中的请求数」，命中率比真实值偏低一点。
+      # 这是刻意和文章缓存保持一致的写法，看趋势够用，不要拿它当精确值。
+      - alert: ForumFollowStatsCacheHitRateLow
+        expr: |
+          (
+            sum(rate(follow_stats_cache_events_total{job="forum-backend",event="hit"}[10m]))
+            /
+            clamp_min(
+              sum(rate(follow_stats_cache_events_total{job="forum-backend",event=~"hit|miss"}[10m])),
+              0.001
+            )
+          ) < 0.5
+          and on()
+          (
+            sum(rate(follow_stats_cache_events_total{job="forum-backend",event=~"hit|miss"}[10m])) > 0.1
+          )
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "关注数缓存命中率跌破 50%（当前 {{ $value | humanizePercentage }}）"
+          description: "先看 invalidate 的次数：如果它和写请求量同量级，说明有人在频繁关注/取关，缓存被反复删掉；如果 invalidate 很少而 miss 很多，说明 key 根本没写进去（看 degrade）。"
 
   # ===== 容量：慢慢漏的才最容易被忽略 =====
   - name: forum-capacity

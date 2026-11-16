@@ -71,3 +71,27 @@ func TestToArticleListItem(t *testing.T) {
 		t.Fatalf("Author = %+v, want id=3 username=alice", item.Author)
 	}
 }
+
+// TestAuthorBriefCarriesDisplayFields 验证作者信息带上昵称与头像。
+//
+// 用户主页、关注列表显示的都是昵称 + 头像；如果文章和评论只回 username，
+// 前端就得为同一个「作者」写两套渲染，改口径时也容易漏掉其中一处。
+// 昵称为空时这里必须回退成用户名，规则来自 user.Brief.DisplayName。
+func TestAuthorBriefCarriesDisplayFields(t *testing.T) {
+	a := &model.Article{
+		User: model.User{ID: 5, Username: "alice", Nickname: "爱丽丝", AvatarURL: "https://cdn.example.com/a.png"},
+	}
+	brief := authorBrief(a)
+	if brief == nil {
+		t.Fatal("有作者信息时 Author 不应为 nil")
+	}
+	if brief.Nickname != "爱丽丝" || brief.AvatarURL != "https://cdn.example.com/a.png" {
+		t.Errorf("作者 = %+v，期望带上昵称与头像", brief)
+	}
+
+	// 昵称为空：展示名回退成用户名，前端不用判空。
+	a.User.Nickname = ""
+	if got := authorBrief(a); got.Nickname != "alice" {
+		t.Errorf("空昵称时 nickname = %q，期望回退成 alice", got.Nickname)
+	}
+}

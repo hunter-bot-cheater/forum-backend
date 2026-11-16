@@ -45,6 +45,17 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/notification/index.vue'),
         meta: { title: '通知' },
       },
+      {
+        // userId 可选：/messages 只看会话列表，/messages/12 直接进入与 12 的聊天页。
+        // 做成同一个组件的两个路径，是为了让「从别人主页点私信」只需要 push 一个地址，
+        // 不必先创建会话再跳转——没聊过的人也能直接进来。
+        path: 'messages/:userId?',
+        name: 'Messages',
+        component: () => import('@/views/message/index.vue'),
+        // fullBleed：布局层去掉 el-main 的内边距，让聊天窗口铺满可用区域。
+        // 带 20px 内边距的话，顶部标题和左栏会各缩进一块，看起来不像沉浸式私信页。
+        meta: { title: '私信', fullBleed: true },
+      },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: '/articles' },

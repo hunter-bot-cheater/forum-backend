@@ -66,6 +66,17 @@ var (
 		Name: "article_cache_events_total",
 		Help: "文章缓存事件计数，event 取 hit/empty_hit/miss/load/share/degrade/write",
 	}, []string{"event"})
+
+	// FollowStatsCacheEvents 是关注数缓存的同类计数器。
+	//
+	// 单独一个指标而不是和文章缓存合并成 cache_events_total{cache="..."}：
+	// 两者的标签取值集合不一样（文章有 empty_hit、share，关注数没有），
+	// 合并后会出现大量恒为 0 的标签组合，算命中率时还得先过滤。
+	// 等出现第三处缓存、标签集合确实相同时再统一。
+	FollowStatsCacheEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "follow_stats_cache_events_total",
+		Help: "关注数缓存事件计数，event 取 hit/miss/degrade/invalidate",
+	}, []string{"event"})
 )
 
 // init 注册全部内置指标。
@@ -81,5 +92,6 @@ func init() {
 		GormSlowQueries,
 		GormErrors,
 		ArticleCacheEvents,
+		FollowStatsCacheEvents,
 	)
 }

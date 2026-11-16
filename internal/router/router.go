@@ -17,8 +17,10 @@ import (
 	"forum-backend/internal/comment"
 	"forum-backend/internal/config"
 	"forum-backend/internal/floor"
+	"forum-backend/internal/follow"
 	"forum-backend/internal/hot"
 	"forum-backend/internal/like"
+	"forum-backend/internal/message"
 	"forum-backend/internal/metrics"
 	"forum-backend/internal/middleware"
 	"forum-backend/internal/notification"
@@ -128,7 +130,12 @@ func New(deps Deps) (*gin.Engine, error) {
 	// 每个模块的形状都一样：service 持有 data 层依赖 → handler 持有 service。
 	// handler 只做参数解析与响应组装，业务逻辑全在 service 里。
 	userSvc := user.NewUserService(deps.DB)
-	userHandler := user.NewUserHandler(userSvc, deps.JWT)
+	// 关注模块要用 user.Briefs 拿展示信息，所以先建 userSvc 再建它。
+	followSvc := follow.NewService(deps.DB, deps.Redis, userSvc)
+	// 个人主页要显示关注数与「我是否关注了 TA」，把关注模块当接口注进去。
+	// user 包不 import follow，依赖方向是 follow -> user，不会成环。
+	userHandler := user.NewUserHandler(userSvc, deps.JWT, followSvc)
+	followHandler := follow.NewHandler(followSvc)
 
 	articleSvc := article.NewArticleService(deps.DB, deps.Redis)
 	commentSvc := comment.NewCommentService(deps.DB)
@@ -144,6 +151,10 @@ func New(deps Deps) (*gin.Engine, error) {
 	notificationSvc := notification.NewNotificationService(deps.DB)
 	notificationHandler := notification.NewNotificationHandler(notificationSvc)
 	wsHandler := ws.NewWSHandler(deps.Hub, deps.JWT, deps.WSOrigins)
+
+	// 私信的展示信息同样走 user.Briefs，所以只要 userSvc，不需要 follow。
+	messageSvc := message.NewService(deps.DB, userSvc)
+	messageHandler := message.NewHandler(messageSvc)
 
 	// 抢楼活动的发号器（下一个空楼层）就存在 Redis 里，所以要传 redis 客户端。
 	floorSvc := floor.NewService(deps.DB, deps.Redis)
@@ -176,7 +187,12 @@ func New(deps Deps) (*gin.Engine, error) {
 		api.GET("/articles/hot", likeHandler.Hot)
 		// 用户主页公开：看别人的资料不需要登录。
 		// 静态段 me 与通配段 :id 同层，靠 gin 的静态优先规则区分。
-		api.GET("/users/:id", userHandler.Detail)
+		// 单独挂 OptionalJWTAuth 而不是整组挂：这两条要在公开可看的前提下
+		// 多算一个「当前访问者是谁」，带 token 就算 is_following，不带就当游客。
+		optionalAuth := middleware.OptionalJWTAuth(deps.JWT)
+		api.GET("/users/:id", optionalAuth, userHandler.Detail)
+		api.GET("/users/:id/following", optionalAuth, followHandler.Following)
+		api.GET("/users/:id/followers", optionalAuth, followHandler.Followers)
 		// 活动详情公开：中奖名单本来就是要给人看的。
 		api.GET("/floor-events/:id", floorHandler.Detail)
 
@@ -195,6 +211,12 @@ func New(deps Deps) (*gin.Engine, error) {
 			auth.GET("/users/me", userHandler.Me)
 			auth.PUT("/users/me", userHandler.UpdateMe)
 
+			// 关注与取关都挂在登录组里：只有登录用户能建立关系。
+			// 用 PUT + DELETE 而不是 POST：这是一份可以被反复覆盖的「关系状态」，
+			// 重复 PUT 结果一致，符合幂等语义。
+			auth.PUT("/users/:id/follow", followHandler.Follow)
+			auth.DELETE("/users/:id/follow", followHandler.Unfollow)
+
 			auth.POST("/articles", articleHandler.Create)
 			auth.DELETE("/articles/:id", articleHandler.Delete)
 			auth.POST("/articles/:id/comments", commentHandler.Create)
@@ -203,6 +225,17 @@ func New(deps Deps) (*gin.Engine, error) {
 			auth.DELETE("/articles/:id/like", likeHandler.Unlike)
 			auth.GET("/notifications", notificationHandler.List)
 			auth.PUT("/notifications/read-all", notificationHandler.ReadAll)
+
+			// 私信全部需要登录，没有公开可读的部分。
+			// 路径用 with/{user_id} 而不是 {conversation_id}：前端从用户主页点「私信」
+			// 时手里只有对方 id，还没有会话记录。让服务端按 pair_key 找会话，
+			// 前端就不需要先调一次「创建会话」再跳转。
+			auth.GET("/conversations", messageHandler.Conversations)
+			// 静态段 unread 与 with/ 前缀不同层，不会和下面的通配段抢匹配。
+			auth.GET("/conversations/unread", messageHandler.Unread)
+			auth.GET("/conversations/with/:user_id/messages", messageHandler.Messages)
+			auth.POST("/conversations/with/:user_id/messages", messageHandler.Send)
+			auth.PUT("/conversations/with/:user_id/read", messageHandler.MarkRead)
 			auth.POST("/floor-events", floorHandler.Create)
 			auth.POST("/floor-events/:id/grab", floorHandler.Grab)
 			auth.GET("/floor-events/:id/mine", floorHandler.Mine)

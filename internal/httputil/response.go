@@ -23,6 +23,9 @@ import (
 // 落到 default 的才是真正的内部故障，那时才记 error 日志并返回 500。
 func MapServiceError(c *gin.Context, operation string, err error) {
 	switch {
+	// 对自己做只允许对别人做的动作：单独立一条，文案比「参数不符合要求」清楚。
+	case errors.Is(err, domain.ErrSelfAction):
+		response.ErrorWithCode(c, http.StatusBadRequest, response.ErrCodeInvalidInput, "不能对自己执行这个操作")
 	// 参数不合法，通常是 service 校验输入后返回的。
 	case errors.Is(err, domain.ErrInvalidInput):
 		response.ErrorWithCode(c, http.StatusBadRequest, response.ErrCodeInvalidInput, "参数不符合要求")

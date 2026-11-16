@@ -18,4 +18,7 @@ var (
 	ErrFloorNotActive = errors.New("floor event is not active")
 	// ErrFloorTaken 这一楼的名额已经被领走了（条件 UPDATE 的 RowsAffected 为 0）。
 	ErrFloorTaken = errors.New("floor already taken")
+	// ErrSelfAction 对自己做了只允许对别人做的动作，比如关注自己、给自己发私信。
+	// 单独立一个哨兵而不是复用 ErrInvalidInput，是为了能给客户端一句准确文案。
+	ErrSelfAction = errors.New("cannot act on yourself")
 )

@@ -31,12 +31,15 @@ const dsnEnv = "TEST_MYSQL_DSN"
 // 新增模型时必须补进来：漏一张表，脏数据就会串到下一个测试，
 // 典型表现是「单独跑这个测试能过，整个包一起跑就挂」。
 var testTables = []string{
+	"messages",
+	"conversations",
 	"comments",
 	"article_likes",
 	"outbox_events",
 	"notifications",
 	"floor_prizes",
 	"floor_events",
+	"follows",
 	"articles",
 	"users",
 }
@@ -73,6 +76,31 @@ func NewDB(t *testing.T) *gorm.DB {
 	}
 
 	truncateAll(t, db)
+	return db
+}
+
+// ReopenDB 用同一个 DSN 新开一条连接池，不清表、不做迁移。
+//
+// 用途是验证「数据真的落到了 MySQL」：拿着这条新连接配一个新的 service 去读，
+// 读到的内容只可能来自数据库，不会是原 service 或原连接池里的内存状态。
+// 换连接不能证明「进程重启后还在」，但能排掉「其实只在内存里」这种最常见的假持久化。
+func ReopenDB(t *testing.T) *gorm.DB {
+	t.Helper()
+
+	dsn := os.Getenv(dsnEnv)
+	if dsn == "" {
+		t.Skipf("未设置 %s，跳过需要 MySQL 的集成测试", dsnEnv)
+	}
+
+	// 这里不复用 dbCache：要的就是一条全新的连接，复用等于没验证。
+	// 每个用例多一条连接池可以接受，测试结束由进程退出回收。
+	db, err := gorm.Open(gormmysql.Open(dsn), &gorm.Config{
+		Logger:         gormlogger.Default.LogMode(gormlogger.Silent),
+		TranslateError: true,
+	})
+	if err != nil {
+		t.Fatalf("重新连接测试库失败（检查 %s）: %v", dsnEnv, err)
+	}
 	return db
 }
 
@@ -124,8 +152,12 @@ func connectAndMigrate(dsn string) (*gorm.DB, error) {
 
 	// 测试里不需要看 SQL 日志：断言失败时错误信息已经带上了出错的那一步，
 	// 把每句 SQL 都打出来只会淹没真正的失败原因。
+	// TranslateError 必须和 config.Open 保持一致：业务代码判断
+	// errors.Is(err, gorm.ErrDuplicatedKey) 依赖它把驱动错误翻译成哨兵值，
+	// 测试库不翻译的话，生产能跑通的幂等分支在测试里会整条走偏。
 	db, err := gorm.Open(gormmysql.Open(dsn), &gorm.Config{
-		Logger: gormlogger.Default.LogMode(gormlogger.Silent),
+		Logger:         gormlogger.Default.LogMode(gormlogger.Silent),
+		TranslateError: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("打开测试库失败: %w", err)
@@ -142,6 +174,9 @@ func connectAndMigrate(dsn string) (*gorm.DB, error) {
 		&model.Notification{},
 		&model.FloorEvent{},
 		&model.FloorPrize{},
+		&model.Follow{},
+		&model.Conversation{},
+		&model.Message{},
 	); err != nil {
 		return nil, fmt.Errorf("迁移测试库失败: %w", err)
 	}

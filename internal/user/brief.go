@@ -23,10 +23,20 @@ type Brief struct {
 // DisplayName 返回列表上该显示的名字。
 // 昵称为空就回退到用户名，保证前端任何位置都能直接渲染，不用自己判空。
 func (b Brief) DisplayName() string {
-	if b.Nickname != "" {
-		return b.Nickname
+	return displayName(b.Nickname, b.Username)
+}
+
+// displayName 是「昵称为空就用用户名」这条规则唯一的实现。
+//
+// 抽成包级函数是因为它有两个调用方：Brief 列表（关注、私信、通知）和
+// toUserResp（注册、登录、个人主页）。这个规则写在两处，
+// 迟早会出现「改了一处、另一处还是旧逻辑」的分叉，
+// 而表现只是某几个接口的昵称显示不一致，很难排查。
+func displayName(nickname, username string) string {
+	if nickname != "" {
+		return nickname
 	}
-	return b.Username
+	return username
 }
 
 // NewBrief 把数据库模型裁成 Brief。

@@ -19,6 +19,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
+	"forum-backend/internal/cache"
 	"forum-backend/internal/domain"
 	"forum-backend/internal/keys"
 	"forum-backend/internal/metrics"
@@ -120,13 +121,14 @@ func (s *ArticleService) List(ctx context.Context, page, pageSize int) ([]*model
 	}
 
 	articles := make([]*model.Article, 0)
-	// Preload("User") 会额外发一条 SELECT 把作者信息一起查出来，
+	// Preload("User", preloadAuthor) 会额外发一条 SELECT 把作者信息一起查出来，
 	// 否则序列化时 a.User 是空结构体，列表里会看不到作者名字。
+	// 第二个参数限定只取展示用的四列，别把密码哈希读进来（见 preloadAuthor）。
 	// Select 只取列表需要的列，正文只截开头（见 articleListColumns）。
 	// Offset 跳过前面几页，Limit 取当前页大小；排序由常量固定，不接收用户输入。
 	err := s.db.WithContext(ctx).
 		Select(articleListColumns).
-		Preload("User").
+		Preload("User", preloadAuthor).
 		Order(articleListOrder).
 		Offset((page - 1) * pageSize).
 		Limit(pageSize).
@@ -135,6 +137,17 @@ func (s *ArticleService) List(ctx context.Context, page, pageSize int) ([]*model
 		return nil, total, fmt.Errorf("list articles page=%d size=%d: %w", page, pageSize, err)
 	}
 	return articles, total, nil
+}
+
+// preloadAuthor 限定 Preload("User") 只取展示作者需要的列。
+//
+// 不传参数的 Preload 会发 SELECT *，把 bcrypt 密码哈希一起读进内存。
+// DTO 层因为不序列化 Password 挡住了外泄，但详情缓存是
+// json.Marshal(model.Article)，哈希会跟着文章一起写进 Redis。
+// 缓存里的东西一旦被 dump 或有人手工 GET 一下，拿到的就是可离线爆破的哈希，
+// 所以在查询阶段就只取这四列。
+func preloadAuthor(db *gorm.DB) *gorm.DB {
+	return db.Select("id", "username", "nickname", "avatar_url")
 }
 
 // Delete 删除文章，只允许作者本人操作，并连带清掉该文章的评论与点赞关系。
@@ -266,8 +279,14 @@ func (s *ArticleService) Detail(ctx context.Context, id uint) (*model.Article, e
 // handled 为 true 表示「已经有结论」：要么是文章，要么是确定的不存在。
 // Redis 故障、key 不存在、缓存内容损坏都返回 handled=false，让调用方回源；
 // 它们不该让接口直接失败，所以不计入 error。
+//
+// 这里是详情页最热的一步，也是 Redis 卡住时最容易被拖慢的一步，
+// 所以每一步 Redis 操作都套上 cache 包统一的短超时，不沿用客户端的 500ms。
 func (s *ArticleService) readArticleCache(ctx context.Context, key string) (*model.Article, bool, error) {
-	val, err := s.rdb.Get(ctx, key).Result()
+	readCtx, cancel := cache.WithTimeout(ctx)
+	val, err := s.rdb.Get(readCtx, key).Result()
+	cancel()
+
 	if err == redis.Nil {
 		// redis.Nil 是「key 不存在」的正常未命中，不是故障，别当错误往上抛。
 		metrics.ArticleCacheEvents.WithLabelValues(cacheEventMiss).Inc()
@@ -293,7 +312,9 @@ func (s *ArticleService) readArticleCache(ctx context.Context, key string) (*mod
 		// 坏缓存自愈：删掉它，否则每次请求都会重复读到坏值、重复报错。
 		metrics.ArticleCacheEvents.WithLabelValues(cacheEventDegrade).Inc()
 		slog.ErrorContext(ctx, "invalid article cache", "key", key, "error", err)
-		_ = s.rdb.Del(ctx, key).Err()
+		delCtx, delCancel := cache.WithTimeout(ctx)
+		_ = s.rdb.Del(delCtx, key).Err()
+		delCancel()
 		return nil, false, nil
 	}
 
@@ -311,7 +332,10 @@ func (s *ArticleService) writeArticleCache(ctx context.Context, key string, a *m
 		return
 	}
 	// 每次调用 articleDetailTTL() 都会重新取随机数，这是防雪崩的关键。
-	if err := s.rdb.Set(ctx, key, data, articleDetailTTL()).Err(); err != nil {
+	// 回填同样套短超时：写失败只影响下次是否命中，不该拖慢这次响应。
+	writeCtx, cancel := cache.WithTimeout(ctx)
+	defer cancel()
+	if err := s.rdb.Set(writeCtx, key, data, articleDetailTTL()).Err(); err != nil {
 		metrics.ArticleCacheEvents.WithLabelValues(cacheEventDegrade).Inc()
 		slog.ErrorContext(ctx, "write article cache", "key", key, "error", err)
 		return
@@ -323,7 +347,9 @@ func (s *ArticleService) writeArticleCache(ctx context.Context, key string, a *m
 // 调用前必须已经用 errors.Is(err, domain.ErrNotFound) 确认过原因，
 // 否则会把数据库故障误记成「这篇文章不存在」。
 func (s *ArticleService) markArticleAbsent(ctx context.Context, key string) {
-	if err := s.rdb.Set(ctx, key, articleEmptySentinel, articleEmptyTTL).Err(); err != nil {
+	markCtx, cancel := cache.WithTimeout(ctx)
+	defer cancel()
+	if err := s.rdb.Set(markCtx, key, articleEmptySentinel, articleEmptyTTL).Err(); err != nil {
 		metrics.ArticleCacheEvents.WithLabelValues(cacheEventDegrade).Inc()
 		slog.ErrorContext(ctx, "write empty article cache", "key", key, "error", err)
 	}
@@ -334,7 +360,9 @@ func (s *ArticleService) markArticleAbsent(ctx context.Context, key string) {
 // 依赖方向保持 service 往外、handler 只认 domain 错误。
 func (s *ArticleService) queryDetail(ctx context.Context, id uint) (*model.Article, error) {
 	var a model.Article
-	err := s.db.WithContext(ctx).Preload("User").First(&a, id).Error
+	// 这里的查询结果会整体 json.Marshal 进 Redis，所以更要限定作者列：
+	// 不限定的话，密码哈希会跟着缓存值一起落到 Redis 里。
+	err := s.db.WithContext(ctx).Preload("User", preloadAuthor).First(&a, id).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("article %d: %w", id, domain.ErrNotFound)

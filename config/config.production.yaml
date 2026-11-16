@@ -43,6 +43,9 @@ redis:
   addr: 127.0.0.1:6379
   password: ""
   db: 0
+  # 连接池上限。0 表示按 CPU 核数算（10 * GOMAXPROCS）。
+  # 只有 Redis 侧有限连接配额（云托管免费档、共享实例）时才需要显式写死。
+  pool_size: 0
 
 jwt:
   # 留空，由 JWT_SECRET 提供；少于 32 个字符或等于示例占位值会被拒绝启动。
