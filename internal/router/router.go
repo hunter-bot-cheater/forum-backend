@@ -174,6 +174,9 @@ func New(deps Deps) (*gin.Engine, error) {
 		api.GET("/articles/:id/comments", commentHandler.List)
 		// 静态段 hot 与通配段 :id 同层，0.7 节实测静态优先。
 		api.GET("/articles/hot", likeHandler.Hot)
+		// 用户主页公开：看别人的资料不需要登录。
+		// 静态段 me 与通配段 :id 同层，靠 gin 的静态优先规则区分。
+		api.GET("/users/:id", userHandler.Detail)
 		// 活动详情公开：中奖名单本来就是要给人看的。
 		api.GET("/floor-events/:id", floorHandler.Detail)
 
@@ -186,6 +189,12 @@ func New(deps Deps) (*gin.Engine, error) {
 		// 挂在这个组上的接口，handler 里一定能取到 userID；上面公开组的接口则取不到。
 		auth := api.Group("", middleware.JWTAuth(deps.JWT))
 		{
+			// 自己看自己走 me，与看别人走 :id 是两条独立路径：
+			// 以后个人中心要带「我的未读数」「我是否关注了 TA」这类只有登录态才有的字段，
+			// 混用一个接口会让公开路径也得处理登录与否两种分支。
+			auth.GET("/users/me", userHandler.Me)
+			auth.PUT("/users/me", userHandler.UpdateMe)
+
 			auth.POST("/articles", articleHandler.Create)
 			auth.DELETE("/articles/:id", articleHandler.Delete)
 			auth.POST("/articles/:id/comments", commentHandler.Create)

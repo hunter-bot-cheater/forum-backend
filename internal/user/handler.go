@@ -5,6 +5,7 @@ package user
 import (
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -124,4 +125,91 @@ func (h *UserHandler) Login(c *gin.Context) {
 		User:  toUserResp(user),
 	}
 	response.OK(c, resp)
+}
+
+// Detail godoc
+// @Summary      用户主页
+// @Description  公开信息，不需要登录；未设置昵称时 nickname 回退为用户名。
+// @Tags         users
+// @Produce      json
+// @Param        id   path  int  true  "用户 ID"
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=user.userResp}
+// @Failure      400  {string}  string    "id 格式不正确"
+// @Failure      404  {string}  string    "用户不存在"
+// @Router       /users/{id} [get]
+// Detail 处理 GET /api/users/:id。
+// 关注数、粉丝数、文章数要等关注模块落地后再补，这里先只返回资料本体。
+func (h *UserHandler) Detail(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Error(c, http.StatusBadRequest, "id 格式不正确")
+		return
+	}
+
+	u, err := h.svc.GetByID(c.Request.Context(), uint(id))
+	if err != nil {
+		httputil.MapServiceError(c, "user detail", err)
+		return
+	}
+	response.OK(c, toUserResp(u))
+}
+
+// Me godoc
+// @Summary      当前登录用户资料
+// @Tags         users
+// @Produce      json
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=user.userResp}
+// @Failure      401  {string}  string    "未登录"
+// @Security     Bearer
+// @Router       /users/me [get]
+// Me 处理 GET /api/users/me，身份只从 token 取，不接受查询参数指定用户。
+func (h *UserHandler) Me(c *gin.Context) {
+	userID, ok := httputil.CurrentUserID(c)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "未登录")
+		return
+	}
+
+	u, err := h.svc.GetByID(c.Request.Context(), userID)
+	if err != nil {
+		httputil.MapServiceError(c, "current user", err)
+		return
+	}
+	response.OK(c, toUserResp(u))
+}
+
+// UpdateMe godoc
+// @Summary      修改当前用户资料
+// @Description  局部更新：没传的字段保持不变，传空字符串表示清空。
+// @Tags         users
+// @Accept       json
+// @Produce      json
+// @Param        body body user.updateProfileReq true "昵称、头像、简介，均可选"
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=user.userResp}
+// @Failure      400  {string}  string    "字段不合法"
+// @Failure      401  {string}  string    "未登录"
+// @Security     Bearer
+// @Router       /users/me [put]
+// UpdateMe 处理 PUT /api/users/me，返回更新后的完整资料。
+func (h *UserHandler) UpdateMe(c *gin.Context) {
+	userID, ok := httputil.CurrentUserID(c)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "未登录")
+		return
+	}
+
+	// 绑定失败通常是字段类型不对（比如 nickname 传了数字），
+	// 统一回固定文案，具体的 JSON 解析错误只进服务端日志。
+	var req updateProfileReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorWithCode(c, http.StatusBadRequest, response.ErrCodeBadRequest, "请求体格式不正确")
+		return
+	}
+
+	u, err := h.svc.UpdateProfile(c.Request.Context(), userID, toProfilePatch(req))
+	if err != nil {
+		httputil.MapServiceError(c, "update profile", err)
+		return
+	}
+	response.OK(c, toUserResp(u))
 }

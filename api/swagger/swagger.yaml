@@ -268,12 +268,27 @@ definitions:
     - password
     - username
     type: object
+  user.updateProfileReq:
+    properties:
+      avatar_url:
+        type: string
+      bio:
+        type: string
+      nickname:
+        type: string
+    type: object
   user.userResp:
     properties:
+      avatar_url:
+        type: string
+      bio:
+        type: string
       created_at:
         type: string
       id:
         type: integer
+      nickname:
+        type: string
       updated_at:
         type: string
       username:
@@ -855,6 +870,97 @@ paths:
           schema:
             type: string
       summary: 用户注册
+      tags:
+      - users
+  /users/{id}:
+    get:
+      description: 公开信息，不需要登录；未设置昵称时 nickname 回退为用户名。
+      parameters:
+      - description: 用户 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/user.userResp'
+              type: object
+        "400":
+          description: id 格式不正确
+          schema:
+            type: string
+        "404":
+          description: 用户不存在
+          schema:
+            type: string
+      summary: 用户主页
+      tags:
+      - users
+  /users/me:
+    get:
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/user.userResp'
+              type: object
+        "401":
+          description: 未登录
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 当前登录用户资料
+      tags:
+      - users
+    put:
+      consumes:
+      - application/json
+      description: 局部更新：没传的字段保持不变，传空字符串表示清空。
+      parameters:
+      - description: 昵称、头像、简介，均可选
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/user.updateProfileReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/user.userResp'
+              type: object
+        "400":
+          description: 字段不合法
+          schema:
+            type: string
+        "401":
+          description: 未登录
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 修改当前用户资料
       tags:
       - users
   /ws/stats:

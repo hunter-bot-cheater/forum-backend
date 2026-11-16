@@ -39,6 +39,8 @@ func TestSwaggerContractCoversCorePaths(t *testing.T) {
 		"/comments/{id}",
 		"/notifications",
 		"/notifications/read-all",
+		"/users/{id}",
+		"/users/me",
 	}
 	for _, path := range want {
 		if _, ok := doc.Paths[path]; !ok {
