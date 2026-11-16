@@ -1,4 +1,4 @@
-// Command server 启动 HTTP 服务、WebSocket 推送和两个后台 worker。
+// Command server 启动 HTTP 服务、WebSocket 推送和四个后台 worker。
 //
 // @title           Forum Backend API
 // @version         1.0
@@ -24,7 +24,9 @@ import (
 	"syscall"
 	"time"
 
+	"forum-backend/internal/article"
 	"forum-backend/internal/config"
+	"forum-backend/internal/llm"
 	"forum-backend/internal/message"
 	"forum-backend/internal/notification"
 	"forum-backend/internal/realtime"
@@ -88,7 +90,11 @@ func main() {
 	}
 	defer rdb.Close()
 
-	jwtManager, err := jwt.NewManager(cfg.JWT.Secret, cfg.JWT.Expire)
+	jwtManager, err := jwt.NewManager(
+		cfg.JWT.Secret,
+		time.Duration(cfg.JWT.AccessExpireMinutes)*time.Minute,
+		time.Duration(cfg.JWT.RefreshExpireHours)*time.Hour,
+	)
 	if err != nil {
 		exitOnError("JWT 配置错误", err)
 	}
@@ -129,6 +135,20 @@ func main() {
 	// 而推送只需要它「按 id 取展示信息」的能力，本身无状态，共用同一个 db 即可。
 	messagePusher := message.NewPushWorker(db, rdb, hub, user.NewUserService(db))
 
+	// 自动补标签的 worker 只在配了大模型时才起：
+	// 没配时发布接口根本不会投递任务，起了也只是空转一个消费组。
+	// article service 在这里同样单独建一份，理由与上面的 user service 一样。
+	var tagWorker *article.TagWorker
+	if cfg.LLM.Enabled && cfg.LLM.APIKey != "" {
+		tagger := llm.NewClient(llm.Options{
+			BaseURL: cfg.LLM.BaseURL,
+			APIKey:  cfg.LLM.APIKey,
+			Model:   cfg.LLM.Model,
+			Timeout: time.Duration(cfg.LLM.TimeoutSeconds) * time.Second,
+		})
+		tagWorker = article.NewTagWorker(article.NewArticleService(db, rdb, tagger), rdb)
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() {
@@ -143,6 +163,13 @@ func main() {
 		defer wg.Done()
 		messagePusher.Run(ctx)
 	}()
+	if tagWorker != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tagWorker.Run(ctx)
+		}()
+	}
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	srv := &http.Server{Addr: addr, Handler: r}
@@ -169,7 +196,7 @@ func main() {
 		exitOnError("启动服务失败", err)
 	}
 
-	// 等两个 worker 收完手，再让 main 返回、defer 关连接池。
+	// 等所有 worker 收完手，再让 main 返回、defer 关连接池。
 	wg.Wait()
 }
 

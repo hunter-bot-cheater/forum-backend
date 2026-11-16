@@ -72,7 +72,7 @@ func (h *WSHandler) Notifications(c *gin.Context) {
 		response.Error(c, http.StatusUnauthorized, "未登录")
 		return
 	}
-	userID, err := h.jwt.Parse(token)
+	userID, err := h.jwt.ParseAccess(token)
 	if err != nil {
 		// 必须在 Upgrade 之前把鉴权做完：
 		// 升级之后响应头已经发出去了，再想返回 401 已经来不及。

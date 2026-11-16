@@ -60,6 +60,10 @@ Desktop.ini
 *.log
 logs/
 
+# ============ 备份产物 ============
+# 数据库 dump 里有全站用户与文章，绝不入库。
+backups/
+
 # ============ 测试产物 ============
 # go test -coverprofile 的输出，只在本地临时看覆盖率，不该进仓库。
 coverage.out

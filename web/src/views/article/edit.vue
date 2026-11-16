@@ -69,9 +69,16 @@
         </div>
         <span class="composer__tags-hint">{{ tags.length }}/{{ tagLimit }}</span>
       </div>
-      <!-- 提示只在「还没填」时出现，填了第一枚就撤掉，不占着位置。 -->
-      <p v-if="tags.length === 0 && !isEdit" class="composer__tags-tip">
-        不填也没关系，发布时会自动生成一个标签
+      <!-- 提示只在「还没填」时出现，填了第一枚就撤掉，不占着位置。
+           有模型建议时让位给建议行，两行小字叠在一起会互相抵消。 -->
+      <p v-if="tags.length === 0 && !isEdit && !suggestion" class="composer__tags-tip">
+        不填也没关系，发布后会自动补一个标签
+      </p>
+      <!-- 模型建议。写够一段才出现，采用或忽略都不影响发布。 -->
+      <p v-if="suggestion" class="composer__suggest">
+        要不要加「{{ suggestion }}」？
+        <button type="button" class="composer__suggest-btn" @click="applySuggestion">采用</button>
+        <button type="button" class="composer__suggest-btn" @click="suggestion = ''">不用</button>
       </p>
 
       <div class="composer__foot">
@@ -104,10 +111,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type InputInstance } from 'element-plus'
-import { createArticle, getArticle, updateArticle } from '@/api/article'
+import { createArticle, getArticle, suggestTag, updateArticle } from '@/api/article'
 import { useArticleStore } from '@/store/modules/article'
 import { useUserStore } from '@/store/modules/user'
 
@@ -152,6 +159,11 @@ const content = ref('')
 // 两者分开：输入框清空不代表标签已加，回车（或失焦）才算，用户还有反悔的余地。
 const tags = ref<string[]>([])
 const tagDraft = ref('')
+// suggestion 是模型给的候选标签，用户点「采用」才会进 tags。
+// 单独一份而不是直接塞进输入框：建议出现在这里时用户可能还在打字，
+// 往输入框里插字会打断他。suggestAsked 保证每次进页面只问一次模型。
+const suggestion = ref('')
+const suggestAsked = ref(false)
 const submitting = ref(false)
 // submitted 用来区分「发布成功后跳转」和「用户主动离开」：
 // 前者不能再弹「内容还没发布」，否则每次发布成功都会被自己的确认框拦住。
@@ -313,7 +325,55 @@ function removeTag(index: number) {
   tags.value.splice(index, 1)
 }
 
+// 标签预热：写到标题加一小段正文，就问一次模型要个建议。
+//
+// 目的有两个。一是把模型的冷启动挪出发布链路，发布时要么已经采用建议、
+// 要么交给后台补，作者都不用等；二是建议摆在眼前，作者能改能拒，
+// 比发布后偷偷补一个更透明。
+//
+// 只问一次：每问一次都消耗额度，而同一篇内容问第二遍答案也差不多。
+// 填了标签就不再问，用户已经做过决定。编辑态不问，标签是原文带来的。
+let suggestTimer = 0
+watch([title, content], () => {
+  if (suggestAsked.value || isEdit.value || tags.value.length > 0) {
+    return
+  }
+  if (title.value.trim() === '' || content.value.trim().length < 20) {
+    return
+  }
+  // 打字期间不停重排，停手 1.2 秒才真的发请求，否则每敲一个字都是一次模型调用。
+  window.clearTimeout(suggestTimer)
+  suggestTimer = window.setTimeout(() => {
+    void fetchSuggestion()
+  }, 1200)
+})
+
+// fetchSuggestion 直接调接口，失败一律静默。
+// 建议是附加值，模型超时、配额用完都不该在写作页弹一个红条打断思路。
+async function fetchSuggestion() {
+  suggestAsked.value = true
+  try {
+    const resp = await suggestTag(title.value.trim(), content.value)
+    // 等待期间用户可能已经自己填了标签，这时建议没有意义，直接丢弃。
+    if (resp.tag !== '' && tags.value.length === 0) {
+      suggestion.value = resp.tag
+    }
+  } catch {
+    // 拦截器已经处理过提示，这里只需要让流程继续。
+  }
+}
+
+// applySuggestion 把建议变成一枚正式标签。
+// 转交给 confirmTag：去重、数量上限、清空输入框这些规则与手输共用一份，
+// 否则「采用建议」和「手打标签」迟早会走出两种结果。
+function applySuggestion() {
+  tagDraft.value = suggestion.value
+  suggestion.value = ''
+  confirmTag()
+}
+
 onUnmounted(() => {
+  window.clearTimeout(suggestTimer)
   window.removeEventListener('keydown', onKeydown)
 })
 
@@ -569,6 +629,32 @@ function leave() {
   margin-top: 6px;
   font-size: 12px;
   color: var(--fs-text-3);
+}
+
+/* 模型建议行。与上面那句提示同字号同颜色，靠左侧排列，
+   两个小胶囊只是「一句话里的两个动作」，不做成主按钮。 */
+.composer__suggest {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--fs-text-3);
+}
+
+.composer__suggest-btn {
+  padding: 2px 10px;
+  border: 1px solid var(--fs-line);
+  border-radius: 999px;
+  background: none;
+  color: var(--fs-primary);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.composer__suggest-btn:hover {
+  background: var(--fs-primary-weak);
 }
 
 /* 操作栏与正文之间用一条浅线分隔，不描整圈边框。

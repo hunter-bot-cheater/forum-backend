@@ -161,6 +161,19 @@ export function updateArticle(id: number, title: string, content: string, tags: 
   })
 }
 
+// suggestTag 让服务端为还没发布的内容起一个标签，供写作页参考。
+//
+// 只返回建议、不落库：是否采用由作者决定，采用后随 createArticle 的 tags 一起提交。
+// tag 为空串是正常结果（模型不可用、返回内容不可用），不当作错误处理。
+// 单用户每小时有次数上限，超了会拿到 429，由拦截器统一提示。
+export function suggestTag(title: string, content: string) {
+  return request<{ tag: string }>({
+    url: '/articles/tag-suggest',
+    method: 'post',
+    data: { title, content },
+  })
+}
+
 // deleteArticle 删除文章，仅作者本人可删。
 //
 // 「是不是作者」由后端在 WHERE 里判断，前端拿不到也不该拿这个决定权：

@@ -34,7 +34,7 @@ func JWTAuth(jwtManager *jwt.Manager) gin.HandlerFunc {
 		}
 
 		// 验签和过期检查都在 Parse 里完成，失败只可能是签名不对或已过期。
-		userID, err := jwtManager.Parse(tokenString)
+		userID, err := jwtManager.ParseAccess(tokenString)
 		if err != nil {
 			// 同样属于预期的 401，不要把 token 内容写进日志。
 			response.ErrorWithCode(c, http.StatusUnauthorized, response.ErrCodeTokenInvalid, "登录已过期，请重新登录")
@@ -65,7 +65,7 @@ func OptionalJWTAuth(jwtManager *jwt.Manager) gin.HandlerFunc {
 
 		// 解析失败直接当游客处理。这里不打日志：
 		// 公开接口被爬虫或旧标签页带着过期 token 轮询是常态，记下来只会刷屏。
-		userID, err := jwtManager.Parse(tokenString)
+		userID, err := jwtManager.ParseAccess(tokenString)
 		if err != nil {
 			c.Next()
 			return

@@ -1,0 +1,76 @@
+# 容器部署用的配置模板（会被提交，不要在这里写任何真实密钥）。
+#
+# 与 config.example.yaml 的差别只有「地址指向 compose 里的服务名」和
+# 「建表交给独立的 migrate 容器」两件事，其余键保持一致，
+# 免得同一份配置在容器和裸机上表现不同。
+#
+# 敏感项一律用环境变量覆盖（点号换下划线）：
+#   MYSQL_PASSWORD、REDIS_PASSWORD、JWT_SECRET、LLM_API_KEY
+# 这些值由 docker-compose.yml 从 .env 文件读入，镜像里不留密钥。
+
+server:
+  port: 8080
+  # 请求从 web 容器里的 nginx 转发进来，不信任这一段的话
+  # 所有外部用户会被算成同一个 IP，按 IP 限流就变成一个全局桶。
+  # 网段与 docker-compose.yml 里定义的子网一致，不是 0.0.0.0/0。
+  trusted_proxies:
+    - "172.28.0.0/16"
+
+mysql:
+  host: mysql
+  port: 3306
+  user: forum
+  password: ""
+  dbname: forum
+  # 建表由 compose 的 migrate 一次性任务完成：
+  # 多副本同时启动时并发 AutoMigrate 会互相锁表，生产必须关掉。
+  auto_migrate: false
+  slow_query_ms: 200
+
+redis:
+  addr: redis:6379
+  password: ""
+  db: 0
+
+jwt:
+  secret: ""
+  access_expire_minutes: 15
+  refresh_expire_hours: 168
+
+rate_limit:
+  capacity: 10
+  rate: 2
+  key_prefix: "forum:prod:rate:"
+
+# 前后端同源（都从 8088 端口出去），不需要 CORS。
+cors:
+  allowed_origins: []
+
+ws:
+  allowed_origins:
+    - "127.0.0.1:8088"
+    - "localhost:8088"
+
+log:
+  level: info
+  format: json
+  console: true
+  file:
+    path: ""
+    max_size_mb: 50
+    max_backups: 7
+    max_age_days: 30
+
+metrics:
+  enabled: true
+  token: ""
+
+admin:
+  user_ids: []
+
+llm:
+  enabled: false
+  base_url: "https://open.bigmodel.cn/api/paas/v4"
+  model: "glm-4-flash"
+  api_key: ""
+  timeout_seconds: 8

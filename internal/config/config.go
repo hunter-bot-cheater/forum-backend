@@ -75,7 +75,14 @@ type RedisConfig struct {
 
 type JWTConfig struct {
 	Secret string `mapstructure:"secret"`
-	Expire int    `mapstructure:"expire"` // 单位：小时
+	// AccessExpireMinutes 是 access token 的有效期（分钟）。
+	// 短是刻意的：access 每次请求都在网络上走，泄露窗口就等于它的寿命。
+	// 15 分钟意味着最坏情况下被别人用掉一刻钟，之后必须拿 refresh 才能续。
+	AccessExpireMinutes int `mapstructure:"access_expire_minutes"`
+	// RefreshExpireHours 是 refresh token 的有效期（小时），默认 7 天。
+	// 它只在刷新接口出现，而且用一次就作废，所以可以长一些；
+	// 太短会让「一周没来」的用户每次都要重登。
+	RefreshExpireHours int `mapstructure:"refresh_expire_hours"`
 }
 
 type WSConfig struct {
@@ -178,7 +185,8 @@ func Load() (*Config, error) {
 	// 默认开自动迁移：本机开发改完模型重启就生效，不用多敲一条命令。
 	// 生产配置里显式写 mysql.auto_migrate: false，改表交给 migrate 命令。
 	v.SetDefault("mysql.auto_migrate", true)
-	v.SetDefault("jwt.expire", 24)
+	v.SetDefault("jwt.access_expire_minutes", 15)
+	v.SetDefault("jwt.refresh_expire_hours", 168)
 	v.SetDefault("rate_limit.capacity", 10)
 	v.SetDefault("rate_limit.rate", 2)
 	v.SetDefault("rate_limit.key_prefix", "forum:dev:rate:")

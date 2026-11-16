@@ -53,7 +53,7 @@ func newUserRouter(svc *UserService, loginAs uint) *gin.Engine {
 
 // newUserRouterWithStats 与 newUserRouter 相同，但允许指定关注统计的返回值。
 func newUserRouterWithStats(svc *UserService, loginAs uint, stats FollowStats) *gin.Engine {
-	h := NewUserHandler(svc, nil, stats)
+	h := NewUserHandler(svc, nil, nil, stats)
 	r := gin.New()
 	r.GET("/api/users/:id", h.Detail)
 	r.GET("/api/users/me", asUser(loginAs), h.Me)

@@ -28,6 +28,7 @@ import (
 	"forum-backend/internal/middleware"
 	"forum-backend/internal/notification"
 	"forum-backend/internal/realtime"
+	"forum-backend/internal/session"
 	"forum-backend/internal/user"
 	"forum-backend/internal/ws"
 	"forum-backend/pkg/jwt"
@@ -145,11 +146,17 @@ func New(deps Deps) (*gin.Engine, error) {
 	// 每个模块的形状都一样：service 持有 data 层依赖 → handler 持有 service。
 	// handler 只做参数解析与响应组装，业务逻辑全在 service 里。
 	userSvc := user.NewUserService(deps.DB)
+	// refresh token 的登记表在 Redis 里，签发、刷新、登出三个入口共用这一个 service。
+	// 放在 userSvc 旁边是因为它只服务登录态，别的模块不需要。
+	sessionSvc := session.NewService(deps.JWT, deps.Redis)
 	// 关注模块要用 user.Briefs 拿展示信息，所以先建 userSvc 再建它。
 	followSvc := follow.NewService(deps.DB, deps.Redis, userSvc)
 	// 个人主页要显示关注数与「我是否关注了 TA」，把关注模块当接口注进去。
 	// user 包不 import follow，依赖方向是 follow -> user，不会成环。
-	userHandler := user.NewUserHandler(userSvc, deps.JWT, followSvc)
+	// 登录失败锁定按用户名计数，与按 IP 的限流互补：
+	// 限流挡的是「一台机器狂打」，换 IP 就绕过；锁定挡的是「盯着一个账号猜」。
+	loginGuard := user.NewLoginGuard(deps.Redis)
+	userHandler := user.NewUserHandler(userSvc, sessionSvc, loginGuard, followSvc)
 	followHandler := follow.NewHandler(followSvc)
 
 	// 自动标签是可选的：开关打开且填了密钥才注入，否则传 nil，
@@ -204,14 +211,32 @@ func New(deps Deps) (*gin.Engine, error) {
 		return nil, err
 	}
 
+	// 登录与注册用一个更严的桶：它们的正常用户一辈子只调几次，
+	// 而撞库脚本一秒能打几十次。跟全局桶叠着用（先全局、再这个），
+	// 前缀拼在环境前缀后面，多环境共用一个 Redis 时额度不会互相占用。
+	// 容量 5、每秒补 0.25 个：突发 5 次，之后每 4 秒才多一次机会。
+	credentialLimit, err := middleware.RateLimit(deps.Redis, middleware.RateLimitConfig{
+		Capacity:  5,
+		Rate:      0.25,
+		KeyPrefix: deps.RateLimit.KeyPrefix + "credential:",
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	// /api 组上挂两个所有接口都要过的中间件：
 	// limitBody 限制请求体大小（防止超大 body 打爆内存），rateLimit 按 IP 限流。
 	api := r.Group("/api")
 	api.Use(limitBody(1 << 20))
 	api.Use(rateLimit)
 	{
-		api.POST("/register", userHandler.Register)
-		api.POST("/login", userHandler.Login)
+		api.POST("/register", credentialLimit, userHandler.Register)
+		api.POST("/login", credentialLimit, userHandler.Login)
+		// 刷新与登出都不挂 JWTAuth：前者进来时 access 通常已经过期，
+		// 后者的 access 也可能刚好过期，卡住会让用户退不出去。
+		// 两者的身份完全由 body 里的 refresh 证明。
+		api.POST("/auth/refresh", userHandler.Refresh)
+		api.POST("/auth/logout", userHandler.Logout)
 
 		// 读接口公开，不挂 JWTAuth。
 		// 文章详情挂 optionalAuth：公开可看，但登录用户要多算一个「我点过赞没」，
@@ -260,6 +285,9 @@ func New(deps Deps) (*gin.Engine, error) {
 			auth.DELETE("/users/:id/follow", followHandler.Unfollow)
 
 			auth.POST("/articles", articleHandler.Create)
+			// 标签建议放在发布之前调：写作页边写边问，把模型冷启动挪出发布链路。
+			// 路径是静态段，与下面的 /articles/:id 不冲突（gin 静态优先）。
+			auth.POST("/articles/tag-suggest", articleHandler.SuggestTag)
 			// 编辑用 PUT 而不是 PATCH：标题与正文都是必填的全量字段，
 			// 没有「只改一项」的语义，完整的资源替换更好理解。
 			auth.PUT("/articles/:id", articleHandler.Update)

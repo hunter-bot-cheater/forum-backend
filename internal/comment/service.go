@@ -82,6 +82,20 @@ func (s *CommentService) List(ctx context.Context, articleID uint, page, pageSiz
 		return nil, 0, err
 	}
 
+	// 先确认文章还在。评论行本身不会跟着文章一起被标记，
+	// 不校验的话 /articles/9/comments 仍会把已删文章的评论全部列出来，
+	// 作者以为删干净了，实际任何人都还能读。
+	// 用 Count 而不是 First：这里只要「在不在」，不必把 50KB 的正文取回内存。
+	// Model(&model.Article{}) 让 GORM 自动带上 deleted_at IS NULL。
+	var articleExists int64
+	if err := s.db.WithContext(ctx).Model(&model.Article{}).
+		Where("id = ?", articleID).Count(&articleExists).Error; err != nil {
+		return nil, 0, fmt.Errorf("check article %d: %w", articleID, err)
+	}
+	if articleExists == 0 {
+		return nil, 0, fmt.Errorf("article %d: %w", articleID, domain.ErrNotFound)
+	}
+
 	// Count 与 Find 各自开一条新链，不复用带 Where 的中间变量，避免条件叠加。
 	// 只数根评论：列表按根评论分页，总数也必须按根评论算，否则页数对不上。
 	var total int64

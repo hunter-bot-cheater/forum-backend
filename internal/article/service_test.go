@@ -417,12 +417,14 @@ func TestTopTagsOrdersByCount(t *testing.T) {
 	}
 }
 
-// TestDeleteWithTagsRemovesLinks 验证删文章能删掉带标签的文章。
+// TestDeleteIsSoftAndKeepsChildren 验证删除是「打标记」：数据还在，但查不到了。
 //
-// article_tags 对 articles 是 RESTRICT 外键：删除事务里漏掉清关联这一步，
-// MySQL 会直接拒绝删除，作者看到的是「删除失败」却完全猜不到原因。
-// 同时断言 tags 表里的标签还在——标签是多篇文章共用的，删文章不该把它一起带走。
-func TestDeleteWithTagsRemovesLinks(t *testing.T) {
+// 这条用例同时守着四件事：
+//  1. 库里那一行仍然存在且 deleted_at 有值（说明没有真删，还能恢复）；
+//  2. 详情与列表都查不到它（说明 GORM 的默认作用域生效，接口层不需要手写过滤）；
+//  3. 标签关联还在（软删的意义就是子数据完整，恢复后标签不会丢）；
+//  4. 再删一次命中 0 行，返回 404 而不是第二次成功。
+func TestDeleteIsSoftAndKeepsChildren(t *testing.T) {
 	db := testutil.NewDB(t)
 	svc := NewArticleService(db, testutil.NewRedis(t), nil)
 	ctx := context.Background()
@@ -432,15 +434,67 @@ func TestDeleteWithTagsRemovesLinks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("创建失败: %v", err)
 	}
-
 	if err := svc.Delete(ctx, created.ID, author.ID); err != nil {
-		t.Fatalf("删带标签的文章应当成功，实际报错: %v", err)
+		t.Fatalf("作者删自己的文章应当成功，实际报错: %v", err)
 	}
-	if got := testutil.CountRows(t, db, "article_tags"); got != 0 {
-		t.Errorf("删除后 article_tags 还剩 %d 行，期望 0", got)
+
+	// 1. 行还在，只是被标记。
+	var row model.Article
+	if err := db.Unscoped().First(&row, created.ID).Error; err != nil {
+		t.Fatalf("软删后应当还能在库里查到这一行: %v", err)
+	}
+	if !row.DeletedAt.Valid {
+		t.Fatal("deleted_at 没有写入，说明走的是硬删除")
+	}
+
+	// 2. 业务查询必须看不见它。
+	if _, err := svc.Detail(ctx, created.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("软删后详情 error = %v, want ErrNotFound", err)
+	}
+	_, total, err := svc.List(ctx, 0, "", "", 1, 10)
+	if err != nil {
+		t.Fatalf("列表查询失败: %v", err)
+	}
+	if total != 0 {
+		t.Errorf("列表里还有 %d 篇，期望 0", total)
+	}
+
+	// 3. 标签关联保留下来，恢复文章时标签不会丢。
+	if got := testutil.CountRows(t, db, "article_tags"); got != 1 {
+		t.Errorf("软删后 article_tags 剩 %d 行，期望 1（子数据要保留）", got)
 	}
 	if got := testutil.CountRows(t, db, "tags"); got != 1 {
-		t.Errorf("删除后 tags 剩 %d 行，期望 1（标签是多篇共用的，不该跟着删）", got)
+		t.Errorf("软删后 tags 剩 %d 行，期望 1", got)
+	}
+
+	// 4. 重复删除得到 404，而不是「又删了一次」。
+	if err := svc.Delete(ctx, created.ID, author.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("重复删除 error = %v, want ErrNotFound", err)
+	}
+}
+
+// TestDeleteByOtherUserFails 验证别人删不掉，且同样回 404（不泄露归属）。
+func TestDeleteByOtherUserFails(t *testing.T) {
+	db := testutil.NewDB(t)
+	svc := NewArticleService(db, testutil.NewRedis(t), nil)
+	ctx := context.Background()
+	author := testutil.SeedUser(t, db, "owner")
+	other := testutil.SeedUser(t, db, "intruder")
+
+	created, err := svc.Create(ctx, author.ID, "我的文章", "正文", nil)
+	if err != nil {
+		t.Fatalf("创建失败: %v", err)
+	}
+	if err := svc.Delete(ctx, created.ID, other.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("别人删除 error = %v, want ErrNotFound", err)
+	}
+	// 文章必须还在，且没有被标记删除。
+	var row model.Article
+	if err := db.First(&row, created.ID).Error; err != nil {
+		t.Fatalf("文章被别人删掉了: %v", err)
+	}
+	if row.DeletedAt.Valid {
+		t.Fatal("deleted_at 被写入了，说明越权删除生效了")
 	}
 }
 

@@ -362,6 +362,45 @@ GIN_MODE=release ./forum-server-linux    # 生产模式：关闭 Swagger，跳�
 
 同域部署时 `VITE_API_BASE_URL` 保持默认 `/api`，后端的 `cors.allowed_origins` 留空即可。前后端拆到不同域名时，才需要放行完整 Origin 并把 `VITE_API_BASE_URL` 改成完整地址。样例只覆盖 Nginx 这一层，进程守护、证书申请与数据库备份仍需另外补；告警规则见上一节的 `deploy/alerts.yml`。
 
+## 容器化部署（可选）
+
+不想在服务器上装 Go、Node、MySQL、Redis 时，用 `docker-compose.yml` 一次起齐五个部分：`mysql`、`redis`、`migrate`（一次性建表）、`api`、`web`（nginx 托管静态文件并反代 `/api`）。
+
+```bash
+cp .env.example .env                  # 填数据库密码、Redis 密码、JWT_SECRET
+docker compose build
+docker compose run --rm migrate       # 首次部署建表，之后改表结构再跑一次
+docker compose up -d                  # 打开 http://127.0.0.1:8088
+```
+
+几个刻意的选择：
+
+- **迁移是独立的一次性任务**，不写进 api 的启动脚本。多副本同时启动各跑一遍 `AutoMigrate` 会互相等锁，表可能建到一半失败。`api` 依赖 `migrate` 的 `service_completed_successfully`，顺序由 compose 保证。
+- **api 不映射宿主机端口**，只有 `web` 容器能通过内部网络访问 8080。少一个能被公网扫到的入口。
+- **子网写死成 `172.28.0.0/16`**，与 `config/config.docker.yaml` 的 `server.trusted_proxies` 对应。让 docker 随机选网段的话，后端只能看到 nginx 一个 IP，按 IP 限流会退化成全局桶。
+- **镜像里不放密钥**。`config/config.docker.yaml` 的 `password`、`jwt.secret` 全留空，由 compose 从 `.env` 注入环境变量覆盖（viper 的 `MYSQL_PASSWORD` / `REDIS_PASSWORD` / `JWT_SECRET`）。
+- **Redis 开了 `appendonly`**。refresh token 的登记表在 Redis 里，进程重启丢持久化会让所有人被迫重新登录；缓存丢了无所谓，登录态丢了很刺眼。
+
+镜像在本机没有验证过（这台机器没装 Docker），首次在服务器上跑请留意构建日志。
+
+## 备份与恢复
+
+```bash
+make backup                  # 等价于 bash scripts/backup.sh，产物在 backups/
+KEEP_DAYS=30 make backup     # 改保留天数
+BACKUP_MODE=docker make backup   # 从 compose 的 mysql 容器里导
+```
+
+脚本用 `mysqldump --single-transaction` 开一致性快照，不锁表，备份期间用户发布文章不会被挡住。落盘后做两道校验：gzip 能解开且文件不小于 1KB，解压后能搜到 `CREATE TABLE`。第二道是为了抓「连上了但连错库」这类问题，那种 dump 只有头部注释，`gzip -t` 照样通过。只有备份成功后才会清理过期文件，避免备份天天失败还把旧档删光。
+
+恢复：
+
+```bash
+gunzip -c backups/forum-20261117-001045.sql.gz | mysql -uroot -p forum
+```
+
+Redis 不在备份范围内。除了 refresh token 登记表，里面全是可重建的缓存、计数与限流桶；丢登记表的代价是所有人重新登录一次，比丢文章轻。要连 Redis 一起备，把 `redis-data` 卷定期打包即可。
+
 ## 注册和登录接口（当前可用）
 
 请求前先按「本机运行」配置并启动服务。注册密码至少 8 字节，示例使用 `12345678`：

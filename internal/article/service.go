@@ -85,8 +85,10 @@ func NewArticleService(db *gorm.DB, rdb *redis.Client, tagger TagSuggester) *Art
 
 // Create 发布一篇文章。作者身份由中间件确认后传入，客户端无法指定。
 // tagNames 是客户端给的标签名，清洗与数量校验都在 normalizeTags 里；
-// 一个都没填时会尝试让大模型补一个（suggestTag），补不出来就发一篇没有标签的文章。
-// 返回的错误只有两种：domain.ErrInvalidInput（标题、正文或标签不合法）、以及包装过的数据库错误。
+// 一个都没填时只往 Stream 投一条补标签任务就返回，模型由后台 worker 慢慢调，
+// 不压发布这条链路的延迟。
+// 返回的错误只有三种：domain.ErrInvalidInput（标题、正文或标签不合法）、
+// domain.ErrDuplicateContent（十分钟内发过一模一样的内容）、以及包装过的数据库错误。
 func (s *ArticleService) Create(ctx context.Context, userID uint, title, content string, tagNames []string) (*model.Article, error) {
 	// 先去掉首尾空白，否则一串空格也能通过「非空」校验。
 	title = strings.TrimSpace(title)
@@ -99,11 +101,17 @@ func (s *ArticleService) Create(ctx context.Context, userID uint, title, content
 	if err != nil {
 		return nil, err
 	}
-	// 只有「一个标签都没填」才自动生成。
-	// 编辑接口（Update）不做这件事：编辑时把标签全删掉是用户的明确意图，
-	// 再自动补一个会让「删标签」这个操作永远不生效。
-	if len(tags) == 0 {
-		tags = s.suggestTag(ctx, title, content)
+
+	// 先用内容摘要占位，再写库。顺序不能反：
+	// 如果先写库再占位，两个并发请求会双双通过判重，库里就多出一篇一模一样的文章。
+	// 占位失败要区分错误类型——Redis 故障时放行（判重是防御性检查，不是业务前提），
+	// 只有「key 已存在」才是真的重复。
+	dupKey := keys.ArticleDupKey(userID, contentDigest(title, content))
+	reserved, dupErr := s.rdb.SetNX(ctx, dupKey, "1", articleDupWindow).Result()
+	if dupErr != nil {
+		slog.WarnContext(ctx, "reserve duplicate-check key", "user_id", userID, "error", dupErr)
+	} else if !reserved {
+		return nil, fmt.Errorf("create article for user %d: %w", userID, domain.ErrDuplicateContent)
 	}
 
 	a := &model.Article{
@@ -122,11 +130,27 @@ func (s *ArticleService) Create(ctx context.Context, userID uint, title, content
 		return replaceArticleTags(tx, a.ID, tags)
 	})
 	if err != nil {
+		// 写库失败就把占位还回去。不还的话，用户修好问题再发一次，
+		// 会被自己刚才那次失败拦住整整 10 分钟，而且提示是「刚发过一样的内容」，
+		// 完全对不上他实际遇到的情况。
+		if dupErr == nil {
+			if delErr := s.rdb.Del(ctx, dupKey).Err(); delErr != nil {
+				slog.WarnContext(ctx, "release duplicate-check key", "user_id", userID, "error", delErr)
+			}
+		}
 		return nil, err
 	}
 
 	// 回填给调用方：发布接口会把这篇的完整形状回给前端，带上标签可以直接渲染。
 	a.Tags = tags
+
+	// 一个标签都没填就丢一条任务给后台 worker，由它慢慢调模型补上。
+	// 这里不等待：模型最慢要 8 秒，而作者正盯着「发布」按钮；
+	// 标签晚几秒出现没人受损，发布多等一秒都可能让他重复提交。
+	// 编辑接口（Update）永远不补：把标签删光是明确意图，补回来等于删不掉。
+	if len(tags) == 0 && s.tagger != nil {
+		s.enqueueTagJob(ctx, a.ID)
+	}
 
 	// id 是写库后由 MySQL 自增生成的，理论上这个 id 不会有旧缓存。
 	// 仍然删一次，是因为 MySQL 重启后自增计数按表内最大 id 重建，
@@ -325,47 +349,30 @@ func preloadAuthor(db *gorm.DB) *gorm.DB {
 	return db.Select("id", "username", "nickname", "avatar_url")
 }
 
-// Delete 删除文章，只允许作者本人操作，并连带清掉该文章的评论与点赞关系。
+// Delete 删除一篇文章。只允许作者本人，删的是「标记」不是数据。
 //
-// 三件事必须一起成功：清评论、清点赞关系、删文章本身。
-// 所以整体放在一个事务里，任何一步失败都回滚，不会留下「文章没了但评论还在」的半成品。
+// 软删除之后这里不再有事务，也不再清理 comments / article_likes / article_tags：
+// 外键的 RESTRICT 只在真正 DELETE 一行时才会触发，而 GORM 现在生成的是
+// UPDATE articles SET deleted_at = ?，子表根本不受影响。子表数据原样留着，
+// 以后要「恢复误删」时评论和标签都还在，这正是不做硬删的收益。
+//
+// 仍然要清三类东西：详情缓存（否则还能读到已删内容）、点赞集合（避免幽灵计数）、
+// 热榜成员（否则榜单里会出现点进去 404 的条目）。
 func (s *ArticleService) Delete(ctx context.Context, id, userID uint) error {
-	// Transaction 的回调里必须用参数 tx 发 SQL，不能再用 s.db：
-	// 用 s.db 就跑到事务外面去了，回滚时那部分不会撤销。
-	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 先清子表。comments.article_id 上是 RESTRICT 外键，还有子记录时删文章会被数据库直接拒绝。
-		if err := tx.Where("article_id = ?", id).Delete(&model.Comment{}).Error; err != nil {
-			return err
-		}
-		// 点赞关系同样是 RESTRICT 外键，顺序不能反。
-		if err := tx.Where("article_id = ?", id).Delete(&model.ArticleLike{}).Error; err != nil {
-			return err
-		}
-		// 标签关联也是 RESTRICT：漏了这一句，删带标签的文章会直接报外键错误，
-		// 而作者看到的是「删除失败」，完全猜不到是标签拦住了。
-		if err := tx.Where("article_id = ?", id).Delete(&model.ArticleTag{}).Error; err != nil {
-			return err
-		}
-
-		// 把所有权也放进 WHERE，让数据库一次判断「是不是作者」并删除，
-		// 避免「先查是不是作者、再删」这两步之间文章被别人改动的竞态。
-		res := tx.Where("id = ? AND user_id = ?", id, userID).Delete(&model.Article{})
-		if res.Error != nil {
-			return res.Error
-		}
-		// 影响行数为 0 有两种可能：文章不存在，或者存在但不是这个人的。
-		// 对外合并成同一个 404，避免泄露「这篇文章属于谁」。
-		// 此刻评论和点赞已经被删了，返回错误会让整个事务回滚，不会留下脏数据。
-		if res.RowsAffected == 0 {
-			return domain.ErrNotFound
-		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("delete article %d: %w", id, err)
+	// 把所有权也放进 WHERE，让数据库一次判断「是不是作者」并删除，
+	// 避免「先查是不是作者、再删」这两步之间文章被别人改动的竞态。
+	// GORM 的软删除会自动追加 deleted_at IS NULL，所以重复删同一篇会命中 0 行。
+	res := s.db.WithContext(ctx).Where("id = ? AND user_id = ?", id, userID).Delete(&model.Article{})
+	if res.Error != nil {
+		return fmt.Errorf("delete article %d: %w", id, res.Error)
+	}
+	// 影响行数为 0 有三种可能：文章不存在、已经被删过、或者不是这个人的。
+	// 对外统一 404，既不泄露归属，也让重复删除得到确定的结果。
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("article %d: %w", id, domain.ErrNotFound)
 	}
 
-	// 缓存必须在事务提交成功之后再删。写在事务里的话，一旦回滚，
+	// 缓存必须在写库成功之后再删。写在前面的话，一旦更新失败，
 	// 数据库里文章还在，缓存却被删了（虽然只是多一次回源，但逻辑上是错的）。
 	s.InvalidateDetailCache(ctx, id)
 

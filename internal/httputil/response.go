@@ -42,6 +42,12 @@ func MapServiceError(c *gin.Context, operation string, err error) {
 		response.ErrorWithCode(c, http.StatusConflict, response.ErrCodeFloorNotActive, "活动未开始或已结束")
 	case errors.Is(err, domain.ErrFloorTaken):
 		response.ErrorWithCode(c, http.StatusConflict, response.ErrCodeFloorTaken, "这一楼已经被抢走了")
+	// 重复提交与「资源已存在」不同：这里没有具体的唯一键冲突，
+	// 是同一份内容在短时间内又发了一次，文案要让用户知道改一下再发就行。
+	case errors.Is(err, domain.ErrDuplicateContent):
+		response.ErrorWithCode(c, http.StatusConflict, response.ErrCodeAlreadyExists, "刚刚发过一模一样的内容，改一下再发吧")
+	case errors.Is(err, domain.ErrRateLimited):
+		response.ErrorWithCode(c, http.StatusTooManyRequests, response.ErrCodeRateLimited, "操作太频繁，请稍后再试")
 	case errors.Is(err, gorm.ErrDuplicatedKey):
 		response.ErrorWithCode(c, http.StatusConflict, response.ErrCodeAlreadyExists, "资源已存在")
 	default:

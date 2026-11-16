@@ -21,4 +21,11 @@ var (
 	// ErrSelfAction 对自己做了只允许对别人做的动作，比如关注自己、给自己发私信。
 	// 单独立一个哨兵而不是复用 ErrInvalidInput，是为了能给客户端一句准确文案。
 	ErrSelfAction = errors.New("cannot act on yourself")
+	// ErrDuplicateContent 短时间内提交了与上一篇完全相同的内容。
+	// 与 ErrInvalidInput 分开：内容本身完全合法，只是重复提交，
+	// 文案要说「刚发过一样的内容」而不是「参数不符合要求」。
+	ErrDuplicateContent = errors.New("duplicate content submitted recently")
+	// ErrRateLimited 表示某个操作的配额用完了。与中间件的按 IP 限流不是一回事：
+	// 这里限制的是「同一个人对同一个昂贵操作的次数」，比如调大模型建议标签。
+	ErrRateLimited = errors.New("rate limited")
 )

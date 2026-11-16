@@ -1,5 +1,10 @@
-// token 持久化到 localStorage，刷新页面不丢登录态。
+// 两个 token 都持久化到 localStorage，刷新页面不丢登录态。
+//
+// 为什么分两个键而不是塞一个 JSON：
+// 拦截器每次请求都读 access，读一个纯字符串比 parse 一遍 JSON 便宜，
+// 也不会因为以后往 JSON 里加字段而让旧数据解析失败。
 const TOKEN_KEY = 'forum_token'
+const REFRESH_KEY = 'forum_refresh_token'
 
 export function getToken(): string {
   return localStorage.getItem(TOKEN_KEY) || ''
@@ -11,6 +16,29 @@ export function setToken(token: string): void {
 
 export function removeToken(): void {
   localStorage.removeItem(TOKEN_KEY)
+}
+
+// getRefreshToken 读长期凭证。拦截器要用它换新的 access。
+export function getRefreshToken(): string {
+  return localStorage.getItem(REFRESH_KEY) || ''
+}
+
+// setRefreshToken 存刷新后拿到的新 refresh。
+// 旋转是「用一次就换一个」，漏存会导致下一次刷新用的是已经作废的旧票，
+// 服务端会按泄露处理并把整条刷新链撤掉，用户被迫重新登录。
+export function setRefreshToken(token: string): void {
+  localStorage.setItem(REFRESH_KEY, token)
+}
+
+export function removeRefreshToken(): void {
+  localStorage.removeItem(REFRESH_KEY)
+}
+
+// clearTokens 一次清干净。登出、刷新失败都用它，
+// 只清一个会留下半条登录态：access 没了但 refresh 还在，下次打开页面又想刷新。
+export function clearTokens(): void {
+  removeToken()
+  removeRefreshToken()
 }
 
 // 登出时要一起清理的回调，由各个 store 在创建时注册自己。

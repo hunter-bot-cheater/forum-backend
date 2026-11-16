@@ -53,13 +53,26 @@ type TagSuggester interface {
 	SuggestTag(ctx context.Context, title, content string) (string, error)
 }
 
-// suggestTag 在客户端没填标签时，让大模型起一个，返回清洗后的标签名（最多一个）。
+// suggestTag 让大模型给一篇文章起一个标签，返回清洗后的标签名（最多一个）。
+//
+// 三个调用方共用这一份实现：后台补标签的 worker、写作页的草稿建议，
+// 以及以前同步补标签的发布链路。清洗规则只写一处，
+// 才不会出现「手填能过、模型给的不行」这种两套标准。
 //
 // 任何失败都返回 nil 而不是 error：标签是附加信息，模型超时、密钥过期、
 // 返回了一句废话，都不该让用户发不出文章。这里只记一条 warn，
 // 运维能从日志里发现「最近标签全是空的原来是密钥过期了」。
 func (s *ArticleService) suggestTag(ctx context.Context, title, content string) []string {
 	if s.tagger == nil {
+		return nil
+	}
+
+	// 正文只送开头一段。模型判断主题看几百字就够，
+	// 整篇发过去除了按 token 计费之外没有任何提升。
+	title = strings.TrimSpace(title)
+	content = textutil.TruncateRunes(strings.TrimSpace(content), tagSuggestContentRunes)
+	// 标题和正文都空的时候没必要问模型：它只会随便编一个。
+	if title == "" && content == "" {
 		return nil
 	}
 

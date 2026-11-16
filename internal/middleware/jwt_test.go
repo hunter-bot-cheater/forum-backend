@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -21,7 +22,7 @@ func TestMain(m *testing.M) {
 func newJWTManager(t *testing.T) *jwt.Manager {
 	t.Helper()
 
-	m, err := jwt.NewManager("test-secret-at-least-32-characters-long", 1)
+	m, err := jwt.NewManager("test-secret-at-least-32-characters-long", 15*time.Minute, 7*24*time.Hour)
 	if err != nil {
 		t.Fatalf("创建 JWT 管理器失败: %v", err)
 	}
@@ -55,7 +56,7 @@ func TestOptionalJWTAuthWithoutToken(t *testing.T) {
 // TestOptionalJWTAuthWithValidToken 验证有效 token 被解析并写入 userID。
 func TestOptionalJWTAuthWithValidToken(t *testing.T) {
 	m := newJWTManager(t)
-	token, err := m.Sign(42)
+	token, err := m.SignAccess(42)
 	if err != nil {
 		t.Fatalf("签发 token 失败: %v", err)
 	}

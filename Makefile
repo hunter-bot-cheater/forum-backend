@@ -1,5 +1,5 @@
 # 常用开发命令
-.PHONY: run run-release build build-release migrate test test-integration test-cover lint tidy swagger web-dev web-build web-preview
+.PHONY: run run-release build build-release migrate test test-integration test-cover lint tidy swagger web-dev web-build web-preview backup up down
 
 run:   ## 启动服务
 	go run ./cmd/server
@@ -51,3 +51,12 @@ web-build: ## 构建前端静态产物到 web/dist
 
 web-preview: ## 构建并预览前端产物，端口由 vite.config.ts 固定为 5173
 	cd web && npm run build && npm run preview
+
+backup: ## 备份数据库到 backups/，保留 7 天（KEEP_DAYS 可改）
+	bash scripts/backup.sh
+
+up: ## 容器方式启动整套服务（首次需先 docker compose run --rm migrate）
+	docker compose up -d
+
+down: ## 停掉容器，保留数据卷
+	docker compose down

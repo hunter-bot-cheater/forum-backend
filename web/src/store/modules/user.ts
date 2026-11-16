@@ -2,12 +2,20 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import {
   login as loginApi,
+  logout as logoutApi,
   register as registerApi,
   getMe,
   type LoginResp,
   type UserProfile,
 } from '@/api/user'
-import { getToken, setToken, removeToken, runLogoutHooks } from '@/utils/auth'
+import {
+  getToken,
+  setToken,
+  getRefreshToken,
+  setRefreshToken,
+  clearTokens,
+  runLogoutHooks,
+} from '@/utils/auth'
 import { connectWS, disconnectWS } from '@/utils/ws'
 
 // 登录态与「当前用户是谁」。
@@ -42,8 +50,11 @@ export const useUserStore = defineStore('user', () => {
   })
 
   function applyLogin(resp: LoginResp) {
-    token.value = resp.token
-    setToken(resp.token)
+    token.value = resp.access_token
+    setToken(resp.access_token)
+    // refresh 也要落盘：不存的话刷新页面后只剩一个 15 分钟的 access，
+    // 过期就直接被踢回登录页，双 token 的意义没了。
+    setRefreshToken(resp.refresh_token)
     // 登录响应是 userResp，比 profileResp 少了两个关注计数，
     // 但 id/昵称/头像都有，先填进去让顶栏立刻有内容，
     // 计数字段补 0，随后 fetchMe 会整体覆盖成真实值。
@@ -55,7 +66,7 @@ export const useUserStore = defineStore('user', () => {
     }
     // 登录成功后立刻建连：用户接下来多半要聊天或看通知，
     // 等到进入私信页才连会错过这段时间的推送。
-    connectWS(resp.token)
+    connectWS(resp.access_token)
   }
 
   // fetchMe 拉当前用户资料。失败不抛给调用方：
@@ -92,8 +103,12 @@ export const useUserStore = defineStore('user', () => {
     return login(data)
   }
 
+  // resetToken 只做本地清理，不发任何请求。
+  //
+  // 拦截器在刷新失败时会调它：那一刻 access 已经不可用，再发请求只会再 401 一次。
+  // 需要「真正退出」的场景用下面的 logout。
   function resetToken() {
-    removeToken()
+    clearTokens()
     token.value = ''
     profile.value = null
     // 登出必须断开 WebSocket：留着的话服务端会继续往这条连接推进来消息，
@@ -104,5 +119,22 @@ export const useUserStore = defineStore('user', () => {
     runLogoutHooks()
   }
 
-  return { token, profile, username, displayName, userId, login, register, fetchMe, applyProfile, resetToken }
+  // logout 是用户点「退出登录」走的路：先让服务端撤销 refresh，再清本地。
+  //
+  // 顺序不能反。先清本地就拿不到 refresh 了，服务端那条链会一直有效到过期，
+  // 相当于「退出了但票还在别人兜里」。
+  // 请求失败也照样清本地：用户的意图是退出，不该被网络问题拦住。
+  async function logout() {
+    const refreshToken = getRefreshToken()
+    if (refreshToken) {
+      try {
+        await logoutApi(refreshToken)
+      } catch {
+        // 拦截器可能已经弹过提示，这里不再重复；本地清理在下面照常执行。
+      }
+    }
+    resetToken()
+  }
+
+  return { token, profile, username, displayName, userId, login, register, fetchMe, applyProfile, resetToken, logout }
 })

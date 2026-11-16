@@ -51,7 +51,10 @@ jwt:
   # 留空，由 JWT_SECRET 提供；少于 32 个字符或等于示例占位值会被拒绝启动。
   # 换密钥等于让所有已签发的 token 立刻失效，改之前想清楚。
   secret: ""
-  expire: 24 # 小时
+  # access 15 分钟，refresh 7 天。两个值都比本机更需要慎重：
+  # access 调大等于给被盗 token 更长的可用期，refresh 调小会让老用户频繁重登。
+  access_expire_minutes: 15
+  refresh_expire_hours: 168
 
 # 生产限流比本机宽：本机 10/2 是给单人调试用的，
 # 上线后多人共用一个出口 IP 时会被误伤。按实际并发再调。

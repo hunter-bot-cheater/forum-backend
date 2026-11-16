@@ -1,4 +1,5 @@
 import { reactive } from 'vue'
+import { getToken } from '@/utils/auth'
 
 // 全局唯一的 WebSocket 连接。
 //
@@ -84,12 +85,17 @@ export function connectWS(token: string) {
 
 // open 真正发起一次握手。
 function open() {
-  if (!currentToken) {
+  // 每次握手都从本地存储取一次 access，而不是沿用建连时那个：
+  // access 只有 15 分钟，断线重连往往发生在很久以后，
+  // 拿旧 token 握手会被后端拒掉，然后退避重试，永远连不上。
+  const token = getToken() || currentToken
+  if (!token) {
     return
   }
+  currentToken = token
   let ws: WebSocket
   try {
-    ws = new WebSocket(buildURL(currentToken))
+    ws = new WebSocket(buildURL(token))
   } catch {
     // 构造失败通常是把 URL 拼错了（比如 baseURL 写成了非法值），
     // 这种情况重连也没用，但保持退避重试的成本很低，交给 scheduleRetry。

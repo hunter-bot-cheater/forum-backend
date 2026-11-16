@@ -1,0 +1,113 @@
+# 一键起整套服务：MySQL + Redis + 迁移 + 后端 + 前端。
+#
+# 使用方式：
+#   1. cp .env.example .env，把里面的密码和 JWT_SECRET 换成自己的值
+#   2. docker compose build
+#   3. docker compose run --rm migrate     # 首次部署建表，之后改表结构再跑一次
+#   4. docker compose up -d
+#   5. 浏览器打开 http://127.0.0.1:8088
+#
+# 子网写死成 172.28.0.0/16 是为了与 config/config.docker.yaml 的
+# server.trusted_proxies 对上：后端靠它从 X-Forwarded-For 里取真实客户端 IP。
+# 让 docker 随机选网段的话，按 IP 限流会把所有人都算成 nginx 那一个 IP。
+
+services:
+  mysql:
+    image: mysql:8.0
+    # 容器挂掉自动重启；mysql 第一次初始化较慢，healthcheck 给了 20 秒宽限。
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: forum
+      MYSQL_USER: forum
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    command:
+      # 排序规则与业务里按中文标签分组、不区分大小写比较有关，
+      # 用 8.0 默认的 utf8mb4_0900_ai_ci 即可，这里显式写出来避免机器差异。
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 备份脚本从宿主机执行 mysqldump 也可以，但落在容器卷里更省事：
+      # scripts/backup.sh 默认把 dump 写到 ./backups。
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # appendonly yes：refresh token 的登记表在 Redis 里，进程重启后
+    # 没有持久化会让所有用户被迫重新登录。缓存丢了无所谓，登录态丢了很刺眼。
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # 一次性任务：建表 / 补列。跑完就退出，不常驻。
+  # 不把它塞进 api 的启动脚本，是因为多副本同时起来会并发建表、互相锁表。
+  migrate:
+    build: .
+    command: ["/app/forum-migrate"]
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+    restart: "no"
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      # 没配模型 key 时自动标签整条链路关闭，发布接口不会发外部请求。
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_ENABLED: ${LLM_ENABLED:-false}
+    # 不映射端口：只让 web 容器通过内部网络访问 8080，
+    # 宿主机和公网都碰不到后端，少一个被扫的入口。
+    expose:
+      - "8080"
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web.Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "8088:80"
+
+volumes:
+  mysql-data:
+  redis-data:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"forum-backend/internal/model"
+	"forum-backend/internal/session"
 )
 
 // 本文件集中存放用户模块对外响应的结构体，以及从 model 到响应结构体的转换函数。
@@ -56,15 +57,29 @@ func toProfilePatch(req updateProfileReq) ProfilePatch {
 	return ProfilePatch(req)
 }
 
-// loginResp 是登录成功后 data 的形状。
-// Token 与 User 平级，客户端解析一次就能拿到两份数据。
+// loginResp 是登录成功后 data 的形状：一对 token 加用户资料。
+//
+// 双 token 的形状与刷新接口一致（session.Tokens 内嵌），前端两个入口用同一段解析代码。
 // User 用值类型，登录成功时一定有用户，不需要指针和 omitempty。
 //
 // 这里给的是 userResp 而不是 profileResp：登录只负责发身份，
 // 前端进个人中心时调 /users/me 拿带计数的版本，不需要在登录流程里多查两次 COUNT。
 type loginResp struct {
-	Token string   `json:"token"`
-	User  userResp `json:"user"`
+	session.Tokens
+	User userResp `json:"user"`
+}
+
+// refreshReq 是 POST /auth/refresh 与 POST /auth/logout 的请求体。
+// refresh 放在 body 而不是 Authorization 头：它是「换票用的票」，
+// 和 access 混在同一个头里最容易在中间件里被误当成 access 解析。
+type refreshReq struct {
+	RefreshToken string `json:"refresh_token" binding:"required"`
+}
+
+// logoutResp 是登出的响应体。只回一句话就够了，
+// 前端拿到 2xx 就会清空本地状态，不需要更多数据。
+type logoutResp struct {
+	Message string `json:"message"`
 }
 
 // profileResp 是个人主页的 data：资料本体 + 关注统计。

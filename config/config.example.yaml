@@ -40,7 +40,10 @@ redis:
 jwt:
   # 留空会让启动直接报错，用 JWT_SECRET 或本地填一个随机长串。
   secret: ""
-  expire: 24 # 小时
+  # access 有效期的分钟数。调大省刷新次数，代价是 token 泄露后可用更久。
+  access_expire_minutes: 15
+  # refresh 有效期的分钟数×60，默认 7 天。必须不短于 access。
+  refresh_expire_hours: 168
 
 # 令牌桶：capacity 是瞬时突发量，rate 是每秒补充的令牌数。
 # 穿透或压测时调大，避免多人共用出口 IP 时互相挤掉；生产按容量评估后再定。

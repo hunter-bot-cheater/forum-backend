@@ -1,0 +1,15 @@
+# 构建上下文里不要的东西。
+#
+# node_modules 有几百 MB，而且 web 镜像里会用 npm ci 重装一份；
+# 不排掉的话每次 docker build 都要往 daemon 传一遍，光传输就要几十秒。
+web/node_modules
+web/dist
+bin
+backups
+logs
+tmp
+.git
+.idea
+.vscode
+*.log
+*.exe

@@ -191,6 +191,58 @@ const docTemplate = `{
                 }
             }
         },
+        "/articles/tag-suggest": {
+            "post": {
+                "description": "用户在写作页边写边调，提前拿到一个建议标签；只返回结果，不落库",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "articles"
+                ],
+                "summary": "写作页标签建议",
+                "parameters": [
+                    {
+                        "description": "标题与正文，至少有一项",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/article.tagSuggestReq"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/article.tagSuggestResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "429": {
+                        "description": "本小时的建议次数已用完",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/articles/{id}": {
             "get": {
                 "produces": [
@@ -547,6 +599,98 @@ const docTemplate = `{
                     },
                     "401": {
                         "description": "未登录",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/auth/logout": {
+            "post": {
+                "description": "撤销当前 refresh；access 会自然过期，不单独维护黑名单",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "退出登录",
+                "parameters": [
+                    {
+                        "description": "refresh_token",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/user.refreshReq"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "已退出",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/auth/refresh": {
+            "post": {
+                "description": "旧的 refresh 用一次即作废；检测到重放会撤销整条刷新链，需要重新登录",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "users"
+                ],
+                "summary": "用 refresh token 换一对新 token",
+                "parameters": [
+                    {
+                        "description": "refresh_token",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/user.refreshReq"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/session.Tokens"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "refresh 无效、已用过或已过期",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "503": {
+                        "description": "登记表不可用，暂时无法刷新",
                         "schema": {
                             "type": "string"
                         }
@@ -2170,6 +2314,25 @@ const docTemplate = `{
                 }
             }
         },
+        "article.tagSuggestReq": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string"
+                },
+                "title": {
+                    "type": "string"
+                }
+            }
+        },
+        "article.tagSuggestResp": {
+            "type": "object",
+            "properties": {
+                "tag": {
+                    "type": "string"
+                }
+            }
+        },
         "comment.commentAnchorResp": {
             "type": "object",
             "properties": {
@@ -2687,6 +2850,21 @@ const docTemplate = `{
                 }
             }
         },
+        "session.Tokens": {
+            "type": "object",
+            "properties": {
+                "access_token": {
+                    "type": "string"
+                },
+                "expires_in": {
+                    "description": "ExpiresIn 是 access token 剩余秒数，前端据此提前刷新，\n而不是等请求 401 了才去刷（那样每次刷新都要多花一个往返）。",
+                    "type": "integer"
+                },
+                "refresh_token": {
+                    "type": "string"
+                }
+            }
+        },
         "user.BriefResp": {
             "type": "object",
             "properties": {
@@ -2707,7 +2885,14 @@ const docTemplate = `{
         "user.loginResp": {
             "type": "object",
             "properties": {
-                "token": {
+                "access_token": {
+                    "type": "string"
+                },
+                "expires_in": {
+                    "description": "ExpiresIn 是 access token 剩余秒数，前端据此提前刷新，\n而不是等请求 401 了才去刷（那样每次刷新都要多花一个往返）。",
+                    "type": "integer"
+                },
+                "refresh_token": {
                     "type": "string"
                 },
                 "user": {
@@ -2748,6 +2933,17 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "username": {
+                    "type": "string"
+                }
+            }
+        },
+        "user.refreshReq": {
+            "type": "object",
+            "required": [
+                "refresh_token"
+            ],
+            "properties": {
+                "refresh_token": {
                     "type": "string"
                 }
             }

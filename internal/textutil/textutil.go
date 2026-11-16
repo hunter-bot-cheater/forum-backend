@@ -33,3 +33,18 @@ func TooLongRunes(s string, max int) bool {
 func TooLongBytes(s string, max int) bool {
 	return len(s) > max
 }
+
+// TruncateRunes 把字符串截到最多 max 个字符，超出部分丢掉，不补省略号。
+//
+// 按 rune 而不是字节：中文按字节截会切出半个字，发出去是乱码。
+// 调用方是「发给大模型前压一下长度」——模型只看开头就能判断主题，
+// 把几万字正文原样发过去既慢又费额度。
+func TruncateRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if RuneLen(s) <= max {
+		return s
+	}
+	return string([]rune(s)[:max])
+}

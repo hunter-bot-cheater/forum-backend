@@ -295,11 +295,21 @@ func TestDeleteOnlyByOwner(t *testing.T) {
 	if err := f.svc.Delete(ctx, created.ID, f.commenter.ID); err != nil {
 		t.Fatalf("作者删除失败: %v", err)
 	}
-	if got := testutil.CountRows(t, f.db, "comments"); got != 0 {
-		t.Fatalf("删除后 comments 应当为 0 行，实际 %d 行", got)
+	// 软删：原始行还在（可恢复），但业务查询看不见了。
+	// 分两个断言写，是为了把「数据保留」和「对外不可见」这两件事都钉住：
+	// 只看 CountRows 会以为没删掉，只看默认作用域会以为数据真没了。
+	if got := testutil.CountRows(t, f.db, "comments"); got != 1 {
+		t.Fatalf("软删后原始行应当保留，实际剩 %d 行", got)
+	}
+	var visible int64
+	if err := f.db.Model(&model.Comment{}).Count(&visible).Error; err != nil {
+		t.Fatalf("统计可见评论失败: %v", err)
+	}
+	if visible != 0 {
+		t.Fatalf("删除后业务查询应当为 0 行，实际 %d 行", visible)
 	}
 
-	// 再删一次：行已经不在了，同样合并成 ErrNotFound。
+	// 再删一次：默认作用域已经查不到这一行，同样合并成 ErrNotFound。
 	if err := f.svc.Delete(ctx, created.ID, f.commenter.ID); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("重复删除的错误 = %v，期望 ErrNotFound", err)
 	}
@@ -615,5 +625,32 @@ func TestLocateComment(t *testing.T) {
 	// 否则前端会安静地拉第一页然后什么都不高亮。
 	if _, err := f.svc.Locate(ctx, 9999999); !errors.Is(err, domain.ErrNotFound) {
 		t.Errorf("定位不存在的评论应返回 ErrNotFound，实际 %v", err)
+	}
+}
+
+// TestListRejectsDeletedArticle 验证文章软删之后，评论列表整体 404。
+//
+// 评论行不会跟着文章一起被标记：软删文章只是一条 UPDATE articles。
+// 如果 List 不先确认文章还在，删掉的文章仍能通过 /articles/:id/comments
+// 把全部评论读出来，作者以为删干净了，实际谁都还能看。
+func TestListRejectsDeletedArticle(t *testing.T) {
+	f := newCommentFixture(t)
+	ctx := context.Background()
+
+	if _, err := f.svc.Create(ctx, f.article.ID, f.commenter.ID, 0, "文章删了之后不该还能看到这条"); err != nil {
+		t.Fatalf("创建评论失败: %v", err)
+	}
+
+	// 软删文章（GORM 的 Delete 在模型带 DeletedAt 时就是 UPDATE）。
+	if err := f.db.WithContext(ctx).Delete(&model.Article{}, f.article.ID).Error; err != nil {
+		t.Fatalf("软删文章失败: %v", err)
+	}
+
+	if _, _, err := f.svc.List(ctx, f.article.ID, 1, 10); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("已删文章的评论列表 error = %v, want ErrNotFound", err)
+	}
+	// 再确认评论本身没被删：软删不该连带清理，恢复文章时它们要还在。
+	if got := testutil.CountRows(t, f.db, "comments"); got != 1 {
+		t.Errorf("comments 剩 %d 行，期望 1（软删不该清子表）", got)
 	}
 }

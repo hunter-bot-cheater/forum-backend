@@ -211,6 +211,51 @@ func (h *ArticleHandler) Detail(c *gin.Context) {
 	response.OK(c, resp)
 }
 
+// SuggestTag godoc
+// @Summary      写作页标签建议
+// @Description  用户在写作页边写边调，提前拿到一个建议标签；只返回结果，不落库
+// @Tags         articles
+// @Accept       json
+// @Produce      json
+// @Param        body body tagSuggestReq true "标题与正文，至少有一项"
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=tagSuggestResp}
+// @Failure      429  {string}  string    "本小时的建议次数已用完"
+// @Router       /articles/tag-suggest [post]
+// SuggestTag 处理 POST /api/articles/tag-suggest。
+//
+// 放在发布之前调用是为了把「模型冷启动」挪出发布链路：
+// 用户在写的时候先问一次，点发布时要么已经采用建议（同步带上），
+// 要么由后台 worker 补，两条路都不让作者等模型。
+func (h *ArticleHandler) SuggestTag(c *gin.Context) {
+	userID, ok := httputil.CurrentUserID(c)
+	if !ok {
+		// 理论上挂了这个路由就一定有登录态；写出来是为了不出现 0 号用户去刷配额。
+		response.ErrorWithCode(c, http.StatusUnauthorized, response.ErrCodeUnauthorized, "未登录")
+		return
+	}
+
+	var req tagSuggestReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.ErrorWithCode(c, http.StatusBadRequest, response.ErrCodeBadRequest, "请求体格式不正确")
+		return
+	}
+
+	// 标题在这里兜一下长度：正文由 service 截断，而标题会直接进 prompt，
+	// 放任几十 KB 的标题等于让客户端决定我们要发多大的请求给模型。
+	if textutil.TooLongRunes(req.Title, maxKeywordRunes) {
+		response.Error(c, http.StatusBadRequest, "标题过长")
+		return
+	}
+
+	tag, err := h.svc.SuggestTagForDraft(c.Request.Context(), userID, req.Title, req.Content)
+	if err != nil {
+		// 只有配额用完与 Redis 故障会走到这里，映射成 429 / 500。
+		httputil.MapServiceError(c, "suggest tag", err)
+		return
+	}
+	response.OK(c, tagSuggestResp{Tag: tag})
+}
+
 // Create godoc
 // @Summary      发布文章
 // @Description  tags 留空时，若服务端开启了 llm.enabled，会自动生成一个标签；生成失败不影响发布

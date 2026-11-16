@@ -8,7 +8,7 @@ on:
 #   lint     代码风格与静态检查，几十秒出结果，最先拦住低级问题
 #   swagger  接口文档与注解是否同步，忘了重新生成时会红
 #   test     单元 + 集成测试（真实 MySQL），带竞争检测与覆盖率门槛
-#   web      前端类型检查与构建
+#   web      前端 lint、单元测试、类型检查与构建
 #
 # 拆开的好处：改了前端就不会等后端跑完 MySQL 测试才知道结果，
 # 失败时也能一眼看出是哪一类问题。
@@ -140,6 +140,16 @@ jobs:
       # 避免 CI 装出与本地不同的依赖版本。
       - name: Install dependencies
         run: npm ci
+
+      # 规则见 web/eslint.config.js。放在类型检查前面：
+      # 未使用变量、拼错导入这类问题它更快也更准，先拦掉能少看一轮类型报错。
+      - name: Lint
+        run: npm run lint
+
+      # 单元测试只覆盖纯函数（时间格式化、计数压缩这类），
+      # 不连后端也不起浏览器，几秒就能跑完。
+      - name: Unit test
+        run: npm run test
 
       - name: Type check
         run: npm run type-check

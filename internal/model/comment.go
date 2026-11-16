@@ -1,7 +1,11 @@
 // Package model 定义 GORM 数据模型。
 package model
 
-import "time"
+import (
+	"time"
+
+	"gorm.io/gorm"
+)
 
 // Comment 评论表。
 //
@@ -27,4 +31,12 @@ type Comment struct {
 	ParentID  uint      `gorm:"not null;default:0;index:idx_comment_root,priority:2" json:"parent_id"`
 	RootID    uint      `gorm:"not null;default:0;index:idx_comment_root,priority:1" json:"root_id"`
 	CreatedAt time.Time `json:"created_at"`
+
+	// DeletedAt 与文章同理：删评论只是打标记。
+	//
+	// 评论是「说出去的话」，硬删之后作者自己也无法复原；
+	// 而删除根评论要连带删它下面的回复（见 CommentService.Delete），
+	// 一次手误可能带走几十条别人的内容，更需要留一层可恢复的余地。
+	// 查询侧不用改：GORM 的默认作用域会自动排除已删行。
+	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 }

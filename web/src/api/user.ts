@@ -22,13 +22,33 @@ export interface UserProfile extends UserResp {
   is_following: boolean
 }
 
+// LoginResp 是登录与刷新共用的 token 形状。
+//
+// 双 token：access 15 分钟，随每个请求发送；refresh 7 天，只在刷新接口用。
+// expires_in 是 access 的剩余秒数，后端算好给前端，避免两边各自维护一份有效期常量。
+// 刷新接口不返回 user（身份没变，前端也不需要重填资料）。
 export interface LoginResp {
-  token: string
+  access_token: string
+  refresh_token: string
+  expires_in: number
   user: UserResp
 }
 
 export function login(data: { username: string; password: string }) {
   return request<LoginResp>({ url: '/login', method: 'post', data })
+}
+
+// logout 让服务端撤销这条 refresh 链。
+//
+// 必须调：只清本地存储是「假装退出」，token 还在有效期内，捡到它的人照样能用。
+// 这个接口不挂鉴权，access 过期了也能调，所以不需要等待刷新。
+// 失败由调用方吞掉：退出动作在本地已经完成，不该因为网络问题卡住用户。
+export function logout(refreshToken: string) {
+  return request<{ message: string }>({
+    url: '/auth/logout',
+    method: 'post',
+    data: { refresh_token: refreshToken },
+  })
 }
 
 // getMe 取当前登录用户的资料 + 关注统计。

@@ -155,12 +155,13 @@ function goWrite() {
   void router.push('/write')
 }
 
-function logout() {
+async function logout() {
+  // 先让服务端撤销 refresh（store.logout 内部完成），再跳登录页。
   // 私信、通知、文章列表这些账号级 store 由 utils/auth 的回调表统一清理，
-  // 这里只调 resetToken，不再逐个 store 手动 reset：
-  // 漏掉一个的表现是「下一个人登录看到上一个人的数据」。
-  userStore.resetToken()
-  router.replace('/login')
+  // 这里不再逐个 store 手动 reset：漏掉一个的表现是「下一个人登录看到上一个人的数据」。
+  // 接口失败也照样退出，所以不用 try/catch 拦住跳转。
+  await userStore.logout()
+  void router.replace('/login')
 }
 </script>
 

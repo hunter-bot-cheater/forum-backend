@@ -179,3 +179,19 @@ func toArticleDetailResp(a *model.Article) articleDetailResp {
 		ViewCount:   a.ViewCount,
 	}
 }
+
+// tagSuggestReq 是写作页请求标签建议的请求体。
+// 没有 userID：作者身份从 token 取，客户端传也不认。
+// 两个字段都不带 binding:"required"：用户可能只写了标题就来要建议，
+// 服务端在标题正文都为空的时才返回空，而不是让绑定先报 400。
+type tagSuggestReq struct {
+	Title   string `json:"title"`
+	Content string `json:"content"`
+}
+
+// tagSuggestResp 只回一个标签名。
+// 空串表示「这次没建议」（模型不可用、返回内容不可用），不是错误：
+// 前端据此不显示建议行即可，不该弹提示。
+type tagSuggestResp struct {
+	Tag string `json:"tag"`
+}
