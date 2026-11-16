@@ -305,7 +305,7 @@ const docTemplate = `{
                         "required": true
                     },
                     {
-                        "description": "评论内容",
+                        "description": "评论内容与可选的 parent_id",
                         "name": "body",
                         "in": "body",
                         "required": true,
@@ -346,7 +346,7 @@ const docTemplate = `{
                         }
                     },
                     "404": {
-                        "description": "文章不存在",
+                        "description": "文章或父评论不存在",
                         "schema": {
                             "type": "string"
                         }
@@ -516,6 +516,59 @@ const docTemplate = `{
                     },
                     "403": {
                         "description": "只能删除自己的评论",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "评论不存在",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/comments/{id}/locate": {
+            "get": {
+                "description": "通知点进来时用：返回所属根评论与它的序号，前端据此算出该拉第几页。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "comments"
+                ],
+                "summary": "定位评论在文章评论列表中的位置",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "评论 ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/comment.commentAnchorResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "id 格式不正确",
                         "schema": {
                             "type": "string"
                         }
@@ -895,6 +948,12 @@ const docTemplate = `{
                         "schema": {
                             "type": "string"
                         }
+                    },
+                    "403": {
+                        "description": "不是配置里的管理员",
+                        "schema": {
+                            "type": "string"
+                        }
                     }
                 }
             }
@@ -1163,6 +1222,12 @@ const docTemplate = `{
                         "description": "每页条数，默认 10，最大 50",
                         "name": "page_size",
                         "in": "query"
+                    },
+                    {
+                        "type": "string",
+                        "description": "分类：like / comment / follow，留空为全部",
+                        "name": "kind",
+                        "in": "query"
                     }
                 ],
                 "responses": {
@@ -1182,6 +1247,12 @@ const docTemplate = `{
                                     }
                                 }
                             ]
+                        }
+                    },
+                    "400": {
+                        "description": "分类或分页参数非法",
+                        "schema": {
+                            "type": "string"
                         }
                     },
                     "401": {
@@ -1216,6 +1287,99 @@ const docTemplate = `{
                     },
                     "401": {
                         "description": "未登录",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/notifications/summary": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "notifications"
+                ],
+                "summary": "各分类未读数",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/notification.unreadSummaryResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/notifications/{id}/read": {
+            "put": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "notifications"
+                ],
+                "summary": "标记单条通知已读",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "通知 ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                        }
+                    },
+                    "400": {
+                        "description": "id 格式不正确",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "通知不存在或不属于当前用户",
                         "schema": {
                             "type": "string"
                         }
@@ -1741,6 +1905,10 @@ const docTemplate = `{
                 "like_count": {
                     "type": "integer"
                 },
+                "liked": {
+                    "description": "Liked 是「当前访问者点过没」，决定详情页的点赞按钮要不要点亮。\n\n它只取决于发请求的人，所以不跟着文章进缓存——缓存键里没有用户维度，\n存进去就会让 A 点过赞之后 B 也看到高亮的按钮。\n游客（没登录或 token 过期）恒为 false：没有身份就无从判断。",
+                    "type": "boolean"
+                },
                 "title": {
                     "type": "string"
                 }
@@ -1818,6 +1986,25 @@ const docTemplate = `{
                 }
             }
         },
+        "comment.commentAnchorResp": {
+            "type": "object",
+            "properties": {
+                "article_id": {
+                    "type": "integer"
+                },
+                "comment_id": {
+                    "type": "integer"
+                },
+                "index": {
+                    "description": "Index 是所属根评论在文章里的序号，从 1 开始。",
+                    "type": "integer"
+                },
+                "root_id": {
+                    "description": "RootID 是所属根评论的 id，定位到回复时前端靠它先找到外层容器。",
+                    "type": "integer"
+                }
+            }
+        },
         "comment.commentListResp": {
             "type": "object",
             "properties": {
@@ -1860,6 +2047,31 @@ const docTemplate = `{
                 },
                 "id": {
                     "type": "integer"
+                },
+                "parent_id": {
+                    "description": "ParentID / RootID 让前端知道这条是回复谁、属于哪棵树。\n顶级评论两者都是 0。",
+                    "type": "integer"
+                },
+                "replies": {
+                    "description": "Replies 只出现在根评论上，装这一页展示的回复。\nReplyCount 是真实总数，可能大于 len(Replies)（被 maxRepliesPerRoot 截断）。\n\n没有回复时这个字段会被省略，而不是输出 []：\nencoding/json 的 omitempty 对空切片同样生效（长度 0 就省略），\n想输出 [] 就必须去掉 omitempty，但那样每条回复也会多一个 \"replies\": null。\n折中是保持省略，前端按「没有回复」处理时用 ` + "`" + `item.replies ?? []` + "`" + `。",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/comment.commentResp"
+                    }
+                },
+                "reply_count": {
+                    "type": "integer"
+                },
+                "reply_to": {
+                    "description": "ReplyTo 是被回复者的展示信息，前端显示成「回复 @张三」。\n只在回复里有值；被回复者账号注销时省略整个字段。",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/user.BriefResp"
+                        }
+                    ]
+                },
+                "root_id": {
+                    "type": "integer"
                 }
             }
         },
@@ -1868,6 +2080,10 @@ const docTemplate = `{
             "properties": {
                 "content": {
                     "type": "string"
+                },
+                "parent_id": {
+                    "description": "ParentID 大于 0 表示这是一条回复，指向被回复的评论。\n不填就是顶级评论，行为与加回复功能之前完全一致。",
+                    "type": "integer"
                 }
             }
         },
@@ -2204,6 +2420,10 @@ const docTemplate = `{
         "notification.notificationListResp": {
             "type": "object",
             "properties": {
+                "kind": {
+                    "description": "Kind 回显本次查询的分类（空串表示全部）。\n前端连续切 tab 时可能有多个请求在飞，靠回显判断「这一页属于哪个 tab」，\n否则慢的那次会把当前 tab 的列表覆盖成上一个 tab 的内容。",
+                    "type": "string"
+                },
                 "list": {
                     "type": "array",
                     "items": {
@@ -2227,11 +2447,23 @@ const docTemplate = `{
         "notification.notificationResp": {
             "type": "object",
             "properties": {
+                "actor": {
+                    "description": "Actor 是触发者的昵称头像，前端靠它显示「谁赞了你」。\n用指针加 omitempty：账号注销后查不到资料，此时整个字段省掉，\n前端拿 actor_id 也画不出有效内容，直接按「有人」兜底。\nactor_id 仍然保留：它是稳定标识，点击跳主页时用得上。",
+                    "allOf": [
+                        {
+                            "$ref": "#/definitions/user.BriefResp"
+                        }
+                    ]
+                },
                 "actor_id": {
                     "type": "integer"
                 },
                 "article_id": {
                     "type": "integer"
+                },
+                "article_title": {
+                    "description": "ArticleTitle 是互动发生在哪篇文章的标题，让用户不必点进去才知道是哪篇。\n文章已删（或非文章域事件 article_id=0）时为空，omitempty 让字段整个不出现，\n前端据此决定要不要渲染标题行。",
+                    "type": "string"
                 },
                 "created_at": {
                     "type": "string"
@@ -2253,6 +2485,21 @@ const docTemplate = `{
                 },
                 "type": {
                     "type": "string"
+                }
+            }
+        },
+        "notification.unreadSummaryResp": {
+            "type": "object",
+            "properties": {
+                "by_kind": {
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "integer",
+                        "format": "int64"
+                    }
+                },
+                "total": {
+                    "type": "integer"
                 }
             }
         },

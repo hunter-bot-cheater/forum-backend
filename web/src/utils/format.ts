@@ -64,6 +64,46 @@ export function formatListTime(input: string): string {
   return String(d.getFullYear()) + '/' + String(d.getMonth() + 1) + '/' + String(d.getDate())
 }
 
+// formatRelativeTime 是文章列表与详情里的时间。
+//
+// 论坛里读者关心的是「多久以前」而不是精确到分秒的时刻：
+// 「3 小时前」比「2026-11-16 13:20」更容易判断新旧。
+// 超过一天就退回日历日期：「49 天前」反而要心算。
+//
+// 和 formatListTime 的区别：那个是会话列表右侧的窄列，只用「昨天」「9/1」这种最短形式；
+// 这里挂在文章标题下面，空间够，所以给「几分钟前 / 几小时前」这类更有信息量的说法。
+export function formatRelativeTime(input: string): string {
+  const d = new Date(input)
+  if (Number.isNaN(d.getTime())) {
+    return ''
+  }
+  const now = new Date()
+  const diffMs = now.getTime() - d.getTime()
+
+  // 服务端时钟可能比客户端快几秒，未来时间按「刚刚」处理，
+  // 否则会显示成「-1 分钟前」。
+  if (diffMs < 60 * 1000) {
+    return '刚刚'
+  }
+  if (diffMs < 60 * 60 * 1000) {
+    return String(Math.floor(diffMs / (60 * 1000))) + ' 分钟前'
+  }
+  // 小时数只在「同一个日历天」内使用。
+  // 凌晨 1 点看昨晚 11 点的文章，按时间差是 2 小时，但这里会显示「昨天」：
+  // 跨天之后读者想确认的是「哪天的」，不是「差几个钟头」。
+  if (isSameDay(d, now)) {
+    return String(Math.floor(diffMs / (60 * 60 * 1000))) + ' 小时前'
+  }
+  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+  if (isSameDay(d, yesterday)) {
+    return '昨天'
+  }
+  if (d.getFullYear() === now.getFullYear()) {
+    return String(d.getMonth() + 1) + '月' + String(d.getDate()) + '日'
+  }
+  return String(d.getFullYear()) + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate())
+}
+
 // newClientMsgId 生成发送幂等键。
 //
 // 优先用 crypto.randomUUID：浏览器原生、碰撞概率可以忽略。

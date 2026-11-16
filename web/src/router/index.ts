@@ -34,6 +34,14 @@ const routes: RouteRecordRaw[] = [
         props: true,
       },
       {
+        // 写作页单独占一个一级路径，不塞进 /articles/:id 下面：
+        // 静态段虽然优先级更高，但 /articles/new 这种地址会让人误以为是一篇 id 叫 new 的文章。
+        path: 'write',
+        name: 'ArticleWrite',
+        component: () => import('@/views/article/edit.vue'),
+        meta: { title: '写文章' },
+      },
+      {
         path: 'hot',
         name: 'Hot',
         component: () => import('@/views/hot/index.vue'),

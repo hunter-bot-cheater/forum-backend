@@ -95,3 +95,8 @@ log:
 metrics:
   enabled: true
   token: ""
+
+# 管理类接口的白名单（POST /api/floor-events 等）。
+# 填 users 表的自增 id，留空表示没人能调。
+admin:
+  user_ids: []

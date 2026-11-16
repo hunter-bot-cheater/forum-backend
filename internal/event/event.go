@@ -18,7 +18,17 @@ const (
 	TypeLikeCreated    = "like.created"
 	TypeCommentCreated = "comment.created"
 	TypeMessageCreated = "message.created"
-	StreamKey          = "forum:events:v1"
+
+	// TypeFollowCreated 是「关注通知」的事件名。
+	//
+	// 通知侧已经完全就绪：notificationHandlers 里注册了 resolveFollowCreated，
+	// 分类映射也有 follow 一项，落库与推送走的是和点赞、评论同一套代码。
+	// 还差最后一环：follow.Service 关注成功后只更新关系与计数，没有写 outbox 事件，
+	// 所以现在不会有任何关注通知产生，消息中心的 follow tab 恒为 0。
+	// 接入时只需在关注的业务事务里调一次 EmitCreated，其余不用改。
+	TypeFollowCreated = "follow.created"
+
+	StreamKey = "forum:events:v1"
 
 	// NotifyGroup 是站内通知的消费组，组内多个实例分摊事件（一条事件只被一个实例处理）。
 	NotifyGroup = "forum:notify:v1"

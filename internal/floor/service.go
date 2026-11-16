@@ -19,6 +19,7 @@ import (
 	"forum-backend/internal/domain"
 	"forum-backend/internal/keys"
 	"forum-backend/internal/model"
+	"forum-backend/internal/textutil"
 )
 
 const (
@@ -26,8 +27,10 @@ const (
 	maxLuckyFloor = 1000000
 	// 一场活动最多设 20 个中奖楼层，避免解析与展示被超长配置拖慢。
 	maxLuckyCount = 20
-	// 抢楼时带的一句话比评论短，够用就行。
-	maxGrabContent = 500
+	// 抢楼时带的一句话比评论短，够用就行。单位是字符，与中文用户的实际观感一致。
+	maxGrabContentRunes = 500
+	// maxTitleRunes 与 floor_events.title 的 varchar(128) 对齐，按字符计。
+	maxTitleRunes = 128
 )
 
 // ---------- 纯函数：不碰数据库和 Redis，可以单独单测 ----------
@@ -170,7 +173,9 @@ func (s *Service) Create(ctx context.Context, req createEventReq) (*model.FloorE
 		return nil, fmt.Errorf("%w: article_id is required", domain.ErrInvalidInput)
 	}
 	title := strings.TrimSpace(req.Title)
-	if title == "" || len(title) > 128 {
+	// 标题按字符判：floor_events.title 是 varchar(128)，MySQL 按字符计。
+	// 早先用 len(title) 判，43 个汉字就会被误拒，纯英文标题却可以写到 128 个。
+	if title == "" || textutil.TooLongRunes(title, maxTitleRunes) {
 		return nil, fmt.Errorf("%w: title length invalid", domain.ErrInvalidInput)
 	}
 	if req.StartsAt.IsZero() || req.EndsAt.IsZero() {
@@ -296,7 +301,10 @@ func (s *Service) Grab(ctx context.Context, eventID, userID uint, content string
 	if content == "" {
 		return nil, fmt.Errorf("%w: content is required", domain.ErrInvalidInput)
 	}
-	if len(content) > maxGrabContent {
+	// 抢楼内容是给中奖楼看的一句话，500 字符（不是字节）足够表达。
+	// 按字符判是为了让中文用户和英文用户拿到同一个额度：
+	// 按字节判时，英文能写 500 个字母，中文只能写 166 个汉字。
+	if textutil.TooLongRunes(content, maxGrabContentRunes) {
 		return nil, fmt.Errorf("%w: content too long", domain.ErrInvalidInput)
 	}
 

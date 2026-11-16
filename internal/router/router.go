@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -47,6 +48,8 @@ type Deps struct {
 	TrustedProxies []string
 	CORSOrigins    []string
 	Metrics        config.MetricsConfig
+	// Admin 是管理类接口的白名单，为空表示没人能调（安全默认）。
+	Admin config.AdminConfig
 }
 
 // New 组装出完整的 HTTP 服务：创建 gin 引擎 → 装全局中间件 → 建各业务对象 → 注册路由。
@@ -65,6 +68,13 @@ func New(deps Deps) (*gin.Engine, error) {
 	}
 	if deps.Hub == nil {
 		return nil, errors.New("router: realtime hub is required")
+	}
+
+	// 管理员白名单为空时，创建活动接口对所有人都是 403。
+	// 装配期提示一次，比等运营点了「创建」才看见 403 好排查：
+	// 那时第一反应通常是怀疑登录态或前端，而不是配置里漏了一行。
+	if len(deps.Admin.UserIDs) == 0 {
+		slog.Warn("router: admin.user_ids is empty, POST /api/floor-events is disabled for everyone")
 	}
 
 	// gin.Default 自带的 404/405/panic 处理都返回纯文本，前端统一拆包会失败。
@@ -138,17 +148,23 @@ func New(deps Deps) (*gin.Engine, error) {
 	followHandler := follow.NewHandler(followSvc)
 
 	articleSvc := article.NewArticleService(deps.DB, deps.Redis)
-	commentSvc := comment.NewCommentService(deps.DB)
-	articleHandler := article.NewArticleHandler(articleSvc)
-	commentHandler := comment.NewCommentHandler(commentSvc)
 
-	// 点赞会触发文章缓存失效并写热榜，所以 like 要拿到 articleSvc 和 hotSvc。
-	// 所有模块共用一个 redis.Client，它内部自带连接池，new 多个反而浪费。
+	// 点赞会触发文章缓存失效并写热榜，所以 like 要拿到 articleSvc。
+	// 反过来 article 的详情要显示「我点过没」，需要 likeSvc.HasLiked；
+	// 但 article 不能直接 import like（like 已经 import article，反过来就成环），
+	// 所以这里以 LikedChecker 接口的形式注入，article 包只认那个接口。
 	likeSvc := like.NewLikeService(deps.DB, deps.Redis, articleSvc)
 	hotSvc := hot.NewHotService(deps.DB, deps.Redis)
+
+	articleHandler := article.NewArticleHandler(articleSvc, likeSvc)
+	commentSvc := comment.NewCommentService(deps.DB)
+	commentHandler := comment.NewCommentHandler(commentSvc)
+
+	// 所有模块共用一个 redis.Client，它内部自带连接池，new 多个反而浪费。
 	likeHandler := like.NewLikeHandler(likeSvc, hotSvc)
 
-	notificationSvc := notification.NewNotificationService(deps.DB)
+	// 通知列表要显示「谁赞了你」，actor 资料同样走 user.Briefs。
+	notificationSvc := notification.NewNotificationService(deps.DB, userSvc)
 	notificationHandler := notification.NewNotificationHandler(notificationSvc)
 	wsHandler := ws.NewWSHandler(deps.Hub, deps.JWT, deps.WSOrigins)
 
@@ -180,16 +196,21 @@ func New(deps Deps) (*gin.Engine, error) {
 		api.POST("/login", userHandler.Login)
 
 		// 读接口公开，不挂 JWTAuth。
+		// 文章详情挂 optionalAuth：公开可看，但登录用户要多算一个「我点过赞没」，
+		// 详情接口据此回填 liked。没带 token 或 token 过期时降级成游客，照常能看。
+		optionalAuth := middleware.OptionalJWTAuth(deps.JWT)
 		api.GET("/articles", articleHandler.List)
-		api.GET("/articles/:id", articleHandler.Detail)
+		api.GET("/articles/:id", optionalAuth, articleHandler.Detail)
 		api.GET("/articles/:id/comments", commentHandler.List)
+		// 评论定位同样公开：通知点进来时游客也可能落在详情页（比如链接被分享），
+		// 定位失败最多是没滚动到那一条，不该让整页报错。
+		api.GET("/comments/:id/locate", commentHandler.Locate)
 		// 静态段 hot 与通配段 :id 同层，0.7 节实测静态优先。
 		api.GET("/articles/hot", likeHandler.Hot)
 		// 用户主页公开：看别人的资料不需要登录。
 		// 静态段 me 与通配段 :id 同层，靠 gin 的静态优先规则区分。
-		// 单独挂 OptionalJWTAuth 而不是整组挂：这两条要在公开可看的前提下
-		// 多算一个「当前访问者是谁」，带 token 就算 is_following，不带就当游客。
-		optionalAuth := middleware.OptionalJWTAuth(deps.JWT)
+		// 同样挂 OptionalJWTAuth：要在公开可看的前提下多算一个「当前访问者是谁」，
+		// 带 token 就算 is_following，不带就当游客。
 		api.GET("/users/:id", optionalAuth, userHandler.Detail)
 		api.GET("/users/:id/following", optionalAuth, followHandler.Following)
 		api.GET("/users/:id/followers", optionalAuth, followHandler.Followers)
@@ -224,7 +245,10 @@ func New(deps Deps) (*gin.Engine, error) {
 			auth.PUT("/articles/:id/like", likeHandler.Like)
 			auth.DELETE("/articles/:id/like", likeHandler.Unlike)
 			auth.GET("/notifications", notificationHandler.List)
+			auth.GET("/notifications/summary", notificationHandler.Summary)
 			auth.PUT("/notifications/read-all", notificationHandler.ReadAll)
+			// 单条已读：路径比 read-all 多一段，静态段与通配段同层由 gin 的静态优先规则区分。
+			auth.PUT("/notifications/:id/read", notificationHandler.MarkRead)
 
 			// 私信全部需要登录，没有公开可读的部分。
 			// 路径用 with/{user_id} 而不是 {conversation_id}：前端从用户主页点「私信」
@@ -236,7 +260,10 @@ func New(deps Deps) (*gin.Engine, error) {
 			auth.GET("/conversations/with/:user_id/messages", messageHandler.Messages)
 			auth.POST("/conversations/with/:user_id/messages", messageHandler.Send)
 			auth.PUT("/conversations/with/:user_id/read", messageHandler.MarkRead)
-			auth.POST("/floor-events", floorHandler.Create)
+			// 创建活动是运营动作，不是普通用户能做的事：一个假活动会让抢楼模块
+			// 白白占住 Redis 发号器和一批奖品名额，还会把首页塞满无效入口。
+			// 白名单为空时这条路由对所有人都是 403，装配期会打一条 warn 提示。
+			auth.POST("/floor-events", middleware.RequireAdmin(deps.Admin.UserIDs), floorHandler.Create)
 			auth.POST("/floor-events/:id/grab", floorHandler.Grab)
 			auth.GET("/floor-events/:id/mine", floorHandler.Mine)
 		}

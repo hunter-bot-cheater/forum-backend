@@ -2,9 +2,11 @@ package hot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -21,6 +23,13 @@ import (
 // 只看 ZSET 分不清「榜单真空」和「投影丢失」。
 // 这个独立的 String key 由 rebuild 写入，写入侧的 syncHotScore 不碰它，
 // 空榜时也照样存在，下一次读就不会再回源。
+//
+// 值里存的是重建时写进 ZSET 的条数，不只是 "1"。
+// 存条数是为了自愈：Redis 做内存淘汰时，ZSET 这种大 key 比这个单值 key
+// 先被淘汰的概率高得多，结果就是「ready 还在、榜单空了」。
+// 读到空榜时拿这里的条数一比就知道是真空榜（存的是 0）还是投影丢了（存的是 N），
+// 前者直接返回空，后者重建一次。值为 0 的老版本（只写 "1"）也能工作：
+// "1" 解析出 1 > 0，会走一次重建，重建后值就变成真实条数了。
 //
 // 它必须带 TTL。永不过期意味着这个榜单会一直停留在第一次重建的那一刻，
 // 之后新出现的爆款文章永远进不来，榜单变成「历史榜」。
@@ -55,6 +64,18 @@ const hotCooldownKey = "hot:articles:v1:cooldown"
 // 足够把突发的重建尝试压下去，又不至于让临时的网络抖动挡住太久。
 const hotCooldownTTL = 30 * time.Second
 
+// fallbackTop 是降级路径一次取多少条，同时也是降级缓存的容量。
+// 对外接口最多要 100 条，所以固定取 100 就能覆盖所有合法请求：
+// 缓存一份、所有 n 都从里面切，不必按 n 分别缓存。
+const fallbackTop = 100
+
+// fallbackTTL 是降级结果在进程内保留多久。
+//
+// 降级发生在 Redis 不可用或投影重建失败时，这期间每个请求都去跑一次
+// GROUP BY 会把 MySQL 的 CPU 打满——本来就降级了，再被自己压垮就彻底没救。
+// 5 秒足够让一次故障期间只打几次库，又短到热榜数据不会明显过期。
+const fallbackTTL = 5 * time.Second
+
 // HotArticle 是热榜里的一条，service 查好标题后返回给 handler。
 // Score 与 LikeCount 现在存的是同一个数（点赞数），分开是给以后换热度算法留位置：
 // 那时 Score 会是加权结果，LikeCount 仍是原始点赞数。
@@ -79,6 +100,21 @@ type HotService struct {
 	// group 把同一时刻发现「投影丢失」的请求合并成一次重建。
 	// singleflight.Group 零值可用，不需要初始化。
 	group singleflight.Group
+
+	// fallback 缓存降级路径的结果，只在进程内，不落 Redis。
+	// 降级本来就是因为 Redis 不可用或投影不可信，这时再指望 Redis 存缓存是矛盾的。
+	fallback fallbackCache
+}
+
+// fallbackCache 是降级结果的内存缓存。
+//
+// 用互斥锁而不是 singleflight：这里要的不只是「合并并发查询」，
+// 还要「拿到锁的那个查完，后面排队的人直接用结果」。
+// 查库期间持锁会让并发请求排队，这正好起到给 MySQL 限流的作用。
+type fallbackCache struct {
+	mu        sync.Mutex
+	rows      []hotRow
+	expiresAt time.Time
 }
 
 // NewHotService 由 router 在装配期调用一次。
@@ -96,34 +132,44 @@ func checkTopN(n int) error {
 	return nil
 }
 
+// readyState 是 hotReadyKey 里记的内容。
+// initialized 为 false 表示 key 不存在（从没建过，或 TTL 到期）。
+// rows 是上次重建写进 ZSET 的条数，用来区分「真空榜」和「投影被淘汰」。
+type readyState struct {
+	initialized bool
+	rows        int64
+}
+
 // Top 返回热榜前 n 名，优先读 ZSET。
 //
 // 三条路径，按成本从低到高：
-//  1. ready 在：一次 EXISTS + 一次 ZREVRANGE 就返回，线上绝大多数请求走这里
+//  1. ready 在：一次 GET + 一次 ZREVRANGE 就返回，线上绝大多数请求走这里
 //  2. ready 不在：进 ensureHotZSet 重建一次，重建好再读
 //  3. Redis 出错或重建失败：降级到 GROUP BY 直接查 MySQL，接口仍可用，只是慢
+//
+// 另有一条自愈路径：ready 在、ZSET 却空了，说明投影被内存淘汰掉了
+// （大 key 比单值 key 更容易先被淘汰）。这时按 ready 里记的条数判断：
+// 记着 0 就是真没人点赞，直接返回空；记着 N 说明丢过数据，重建一次。
 func (s *HotService) Top(ctx context.Context, n int) ([]HotArticle, error) {
 	if err := checkTopN(n); err != nil {
 		return nil, err
 	}
 
 	// ready 存在说明榜单已经按 MySQL 建过一次（哪怕建出来是 0 条）。
-	// 有它就能确定「榜是空的」是真实情况，而不是投影丢了。
-	ready, err := s.rdb.Exists(ctx, hotReadyKey).Result()
+	ready, err := s.readyState(ctx)
 	if err != nil {
 		// Redis 报错（断连、超时）直接降级，不让缓存故障变成接口故障。
 		slog.WarnContext(ctx, "check hot ready key", "error", err)
 		return s.TopFromMySQL(ctx, n)
 	}
 
-	if ready == 0 {
+	if !ready.initialized {
 		// 刚启动、Redis 被清空、或者 ready 的 TTL 到期，都需要重建。
 		// 冷却期内不再试，直接降级，避免一次失败的重建被反复触发。
-		cool, err := s.rdb.Exists(ctx, hotCooldownKey).Result()
-		if err == nil && cool > 0 {
+		if s.inCooldown(ctx) {
 			return s.TopFromMySQL(ctx, n)
 		}
-		if err := s.ensureHotZSet(ctx); err != nil {
+		if err := s.ensureHotZSet(ctx, false); err != nil {
 			slog.WarnContext(ctx, "rebuild hot zset", "error", err)
 			s.markCooldown(ctx)
 			return s.TopFromMySQL(ctx, n)
@@ -132,14 +178,66 @@ func (s *HotService) Top(ctx context.Context, n int) ([]HotArticle, error) {
 
 	// ZREVRANGE 按分数从大到小取前 n 个，WITHSCORES 把分数一起带回来，
 	// 省掉为每条再查一次 ZSCORE。
-	pairs, err := s.rdb.ZRevRangeWithScores(ctx, keys.HotArticlesKey, 0, int64(n-1)).Result()
+	rows, err := s.topFromZSet(ctx, n)
 	if err != nil {
 		slog.WarnContext(ctx, "read hot zset", "error", err)
 		return s.TopFromMySQL(ctx, n)
 	}
 
+	// 读到空榜且 ready 记着非 0 条，说明 ZSET 丢了而不是没人点赞。
+	// 这一步放在读到空之后才做，正常命中路径不会为它多付一次判断。
+	if len(rows) == 0 && ready.rows > 0 {
+		slog.WarnContext(ctx, "hot zset is empty but ready says otherwise", "expected", ready.rows)
+		if err := s.ensureHotZSet(ctx, true); err != nil {
+			slog.WarnContext(ctx, "self-heal hot zset", "error", err)
+			return s.TopFromMySQL(ctx, n)
+		}
+		rows, err = s.topFromZSet(ctx, n)
+		if err != nil {
+			slog.WarnContext(ctx, "read hot zset after self-heal", "error", err)
+			return s.TopFromMySQL(ctx, n)
+		}
+	}
+	return s.loadByIDs(ctx, rows)
+}
+
+// readyState 读 hotReadyKey 的值并解析成 readyState。
+// key 不存在返回零值（initialized=false），不算错误。
+func (s *HotService) readyState(ctx context.Context) (readyState, error) {
+	raw, err := s.rdb.Get(ctx, hotReadyKey).Result()
+	if errors.Is(err, redis.Nil) {
+		return readyState{}, nil
+	}
+	if err != nil {
+		return readyState{}, err
+	}
+
+	rows, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		// 值不是数字（手工写进去的、或更早的版本只写 "1"）：
+		// 当成「建过且可能有数据」，让空榜检查走一次重建把值修正成真实条数。
+		return readyState{initialized: true, rows: 1}, nil
+	}
+	return readyState{initialized: true, rows: rows}, nil
+}
+
+// inCooldown 判断是否处于「重建失败后的退避期」。
+// 读失败时不进冷却判断，直接返回 false 让调用方去试——反正试也会失败，
+// 但至少不会因为一个读不到的状态把一个本该可用的重建挡掉。
+func (s *HotService) inCooldown(ctx context.Context) bool {
+	cool, err := s.rdb.Exists(ctx, hotCooldownKey).Result()
+	return err == nil && cool > 0
+}
+
+// topFromZSet 读 ZSET 前 n 名，转成只带 id 与分数的行。
+func (s *HotService) topFromZSet(ctx context.Context, n int) ([]hotRow, error) {
 	// ZSET 的成员是字符串形式的文章 id，这里转回数字，
 	// 顺便决定后面查文章标题时 IN 列表里放什么。
+	pairs, err := s.rdb.ZRevRangeWithScores(ctx, keys.HotArticlesKey, 0, int64(n-1)).Result()
+	if err != nil {
+		return nil, err
+	}
+
 	rows := make([]hotRow, 0, len(pairs))
 	for _, p := range pairs {
 		id, err := strconv.ParseUint(p.Member.(string), 10, 64)
@@ -148,12 +246,16 @@ func (s *HotService) Top(ctx context.Context, n int) ([]HotArticle, error) {
 		}
 		rows = append(rows, hotRow{ArticleID: uint(id), Score: int64(p.Score)})
 	}
-	return s.loadByIDs(ctx, rows)
+	return rows, nil
 }
 
 // ensureHotZSet 把同一时刻发现「投影丢失」的请求合并成一次重建。
 // 没有它，FLUSHDB 之后 100 个并发请求会各查一次 MySQL。
-func (s *HotService) ensureHotZSet(ctx context.Context) error {
+//
+// force 为 true 时跳过「ready 已经存在」的双重检查。
+// 自愈场景必须传 true：那时 ready 恰恰是存在的（丢的是 ZSET），
+// 双重检查会把等待者直接放行，谁都不会去重建，空榜单就一直空着。
+func (s *HotService) ensureHotZSet(ctx context.Context, force bool) error {
 	_, err, _ := s.group.Do("hot:rebuild", func() (interface{}, error) {
 		// 闭包用的是第一个请求的 ctx。它被取消会连累所有等待者，
 		// 所以这里去掉取消信号，另给 3 秒超时防止无限期跑下去。
@@ -161,12 +263,14 @@ func (s *HotService) ensureHotZSet(ctx context.Context) error {
 		defer cancel()
 
 		// 双重检查：等待者醒来时，第一个请求可能已经把投影建好了。
-		ready, err := s.rdb.Exists(loadCtx, hotReadyKey).Result()
-		if err != nil {
-			return nil, err
-		}
-		if ready > 0 {
-			return nil, nil
+		if !force {
+			ready, err := s.rdb.Exists(loadCtx, hotReadyKey).Result()
+			if err != nil {
+				return nil, err
+			}
+			if ready > 0 {
+				return nil, nil
+			}
 		}
 		return nil, s.rebuild(loadCtx)
 	})
@@ -175,12 +279,47 @@ func (s *HotService) ensureHotZSet(ctx context.Context) error {
 
 // TopFromMySQL 是降级路径：绕开 Redis，直接 GROUP BY 点赞表算前 n 名。
 // 比走缓存慢，但 Redis 挂了接口也不该挂。
+//
+// 结果在进程内缓存 fallbackTTL：降级期间每个请求都跑一次聚合，
+// 等于用故障把数据库压垮，而这时候最需要的是让数据库活着。
 func (s *HotService) TopFromMySQL(ctx context.Context, n int) ([]HotArticle, error) {
-	rows, err := s.groupTop(ctx, n)
+	rows, err := s.fallbackRows(ctx)
 	if err != nil {
 		return nil, err
 	}
+
+	// 缓存的是前 fallbackTop 名，这里按请求条数截取。
+	// n 的上限由 checkTopN 保证不超过 100，所以不需要再判越界。
+	if n < len(rows) {
+		rows = rows[:n]
+	}
 	return s.loadByIDs(ctx, rows)
+}
+
+// fallbackRows 返回降级用的聚合结果，优先用未过期的进程内缓存。
+//
+// 持锁期间查库：并发请求会在锁上排队，而不是一起涌向 MySQL。
+// 这是有意的——降级场景下「慢一点但活着」远好过「全都一起查库」。
+func (s *HotService) fallbackRows(ctx context.Context) ([]hotRow, error) {
+	s.fallback.mu.Lock()
+	defer s.fallback.mu.Unlock()
+
+	now := time.Now()
+	if now.Before(s.fallback.expiresAt) {
+		return s.fallback.rows, nil
+	}
+
+	rows, err := s.groupTop(ctx, fallbackTop)
+	if err != nil {
+		return nil, err
+	}
+	// 存空切片而不是 nil：调用方 len() 结果一样，但序列化时 nil 会变成 null。
+	if rows == nil {
+		rows = []hotRow{}
+	}
+	s.fallback.rows = rows
+	s.fallback.expiresAt = now.Add(fallbackTTL)
+	return rows, nil
 }
 
 // markCooldown 在一次重建失败后打上退避标记。
@@ -236,8 +375,10 @@ func (s *HotService) rebuild(ctx context.Context) error {
 
 	// rows 为空也要写标记。否则 ZSET 依然不存在，
 	// 空榜的每个请求都会重新走到这里。
+	// 值写真实条数而不是 "1"：读侧靠它区分「真空榜」和「ZSET 被内存淘汰」，
+	// 写死 "1" 的话这两种情况看起来一模一样，投影丢了也自愈不了。
 	// TTL 让榜单每小时自然失效一次，避免变成历史快照。
-	pipe.Set(ctx, hotReadyKey, "1", hotReadyTTL)
+	pipe.Set(ctx, hotReadyKey, strconv.Itoa(len(rows)), hotReadyTTL)
 
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("rebuild hot zset: %w", err)
@@ -246,7 +387,8 @@ func (s *HotService) rebuild(ctx context.Context) error {
 }
 
 // groupTop 直接按点赞表统计前 n 名，是 Top 的降级实现。
-// 与 rebuild 的区别只有 LIMIT 取 n 而不是 hotRebuildTop。
+// 与 rebuild 的区别只有 LIMIT 取调用方指定的条数（降级缓存固定取 fallbackTop），
+// 以及不写任何 Redis key。
 func (s *HotService) groupTop(ctx context.Context, n int) ([]hotRow, error) {
 	var rows []hotRow
 	err := s.db.WithContext(ctx).Model(&model.ArticleLike{}).

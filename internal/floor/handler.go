@@ -39,9 +39,11 @@ func parseEventID(c *gin.Context) (uint, bool) {
 // @Success      200  {object}  httputil.SwaggerEnvelope{data=floor.eventResp}
 // @Failure      400  {string}  string  "配置不合法"
 // @Failure      401  {string}  string  "未登录"
+// @Failure      403  {string}  string  "不是配置里的管理员"
 // @Security     Bearer
 // @Router       /floor-events [post]
 // Create 处理 POST /api/floor-events。
+// 创建活动是运营动作，路由上挂了 RequireAdmin，白名单来自 config.yaml 的 admin.user_ids。
 // 中奖楼层在创建时固定，之后不提供修改接口，理由写在 service.Create 上。
 func (h *Handler) Create(c *gin.Context) {
 	var req createEventReq

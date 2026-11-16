@@ -7,52 +7,56 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"forum-backend/internal/domain"
+	"forum-backend/internal/paging"
 )
 
 // MaxPageSize 每页最多返回多少条。
-// 不设上限的话，有人传 page_size=1000000 就能把整张表拉进内存。
-const MaxPageSize = 50
+// 数值与 paging.MaxPageSize 是同一个来源，这里保留别名是为了不破坏已有的引用点。
+const MaxPageSize = paging.MaxPageSize
+
+// DefaultCursorLimit 是游标分页不给 limit 时的条数。
+const DefaultCursorLimit = paging.DefaultCursorLimit
 
 // ParsePage 从查询串里解析 page 与 page_size，缺省为第 1 页、每页 10 条。
 // 返回错误时一定是 domain.ErrInvalidInput，调用方交给 MapServiceError 转成 400。
 //
-// service 层用这两个值算 Offset：offset = (page - 1) * pageSize。
+// 本函数只负责「把字符串取下来」，缺省值、上下界、溢出检查全部交给 paging.New：
+// handler 与 service 走同一份规则，不会出现两边上界不一致的情况。
+//
+// service 层用这两个值算 Offset：offset = (page - 1) * pageSize，
+// 更推荐直接调 paging.New 拿 Query，再调它的 Offset()。
 func ParsePage(c *gin.Context) (int, int, error) {
 	page := 1
-	pageSize := 10
+	pageSize := paging.DefaultPageSize
 
-	// page：页码，从 1 开始。传 0 或负数、传字母都算参数错误。
+	// page：页码，从 1 开始。传字母算参数错误。
 	rawPage := c.Query("page")
 	if rawPage != "" {
 		// Atoi 把字符串转成 int，转换失败会返回 error 而不是 0。
 		v, err := strconv.Atoi(rawPage)
-		if err != nil || v < 1 {
+		if err != nil {
 			return 0, 0, fmt.Errorf("%w: page must be a positive integer", domain.ErrInvalidInput)
 		}
 		page = v
 	}
 
-	// page_size：每页条数，限制在 1 到 MaxPageSize 之间。
+	// page_size：每页条数，范围由 paging.New 统一判定。
 	rawSize := c.Query("page_size")
 	if rawSize != "" {
 		v, err := strconv.Atoi(rawSize)
-		if err != nil || v < 1 || v > MaxPageSize {
-			return 0, 0, fmt.Errorf("%w: page_size must be between 1 and 50", domain.ErrInvalidInput)
+		if err != nil {
+			return 0, 0, fmt.Errorf("%w: page_size must be between 1 and %d", domain.ErrInvalidInput, paging.MaxPageSize)
 		}
 		pageSize = v
 	}
 
-	// 极大 page 会让 (page-1)*pageSize 溢出 int，变成负数 Offset 查出错乱的数据。
-	// 乘之前先判上界：用 int 最大值除以每页条数，超过就拒绝。
-	if page > (1<<31-1)/pageSize {
-		return 0, 0, fmt.Errorf("%w: page is too large", domain.ErrInvalidInput)
+	// 真正判上下界与溢出的是这一句，负数、0、超大值都在这里被挡住。
+	q, err := paging.New(page, pageSize)
+	if err != nil {
+		return 0, 0, err
 	}
-	return page, pageSize, nil
+	return q.Page, q.PageSize, nil
 }
-
-// DefaultCursorLimit 是游标分页不给 limit 时的条数。
-// 20 条大约是一屏半，够填满首屏又不会一次拉太多。
-const DefaultCursorLimit = 20
 
 // ParseCursor 从查询串里解析游标分页参数：before_id 与 limit。
 //
@@ -61,12 +65,12 @@ const DefaultCursorLimit = 20
 //
 // 为什么消息列表不用 page：记录一直在往后追加，页码会漂。详见 message.MessageQuery。
 func ParseCursor(c *gin.Context) (uint, int, error) {
-	limit := DefaultCursorLimit
+	limit := paging.DefaultCursorLimit
 	rawLimit := c.Query("limit")
 	if rawLimit != "" {
 		v, err := strconv.Atoi(rawLimit)
-		if err != nil || v < 1 || v > MaxPageSize {
-			return 0, 0, fmt.Errorf("%w: limit must be between 1 and %d", domain.ErrInvalidInput, MaxPageSize)
+		if err != nil || v < 1 || v > paging.MaxPageSize {
+			return 0, 0, fmt.Errorf("%w: limit must be between 1 and %d", domain.ErrInvalidInput, paging.MaxPageSize)
 		}
 		limit = v
 	}

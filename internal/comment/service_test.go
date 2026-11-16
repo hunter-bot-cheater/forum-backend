@@ -45,7 +45,7 @@ func newCommentFixture(t *testing.T) *commentFixture {
 func TestCreateWritesCommentAndEvent(t *testing.T) {
 	f := newCommentFixture(t)
 
-	created, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, "写得不错")
+	created, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, 0, "写得不错")
 	if err != nil {
 		t.Fatalf("创建评论失败: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestCreateWritesCommentAndEvent(t *testing.T) {
 func TestCreateTrimsContent(t *testing.T) {
 	f := newCommentFixture(t)
 
-	created, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, "  前后都有空格  ")
+	created, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, 0, "  前后都有空格  ")
 	if err != nil {
 		t.Fatalf("创建评论失败: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestCreateRejectsInvalidContent(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, tc.content)
+			_, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, 0, tc.content)
 			if !errors.Is(err, domain.ErrInvalidInput) {
 				t.Fatalf("错误 = %v，期望 ErrInvalidInput", err)
 			}
@@ -143,7 +143,7 @@ func TestCreateRejectsInvalidContent(t *testing.T) {
 func TestCreateMissingArticle(t *testing.T) {
 	f := newCommentFixture(t)
 
-	_, err := f.svc.Create(context.Background(), 999999, f.commenter.ID, "评论一篇不存在的文章")
+	_, err := f.svc.Create(context.Background(), 999999, f.commenter.ID, 0, "评论一篇不存在的文章")
 	if !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("错误 = %v，期望 ErrNotFound", err)
 	}
@@ -168,7 +168,7 @@ func TestCreateRollsBackWhenEventFails(t *testing.T) {
 		}
 	})
 
-	_, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, "事件写不进去")
+	_, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, 0, "事件写不进去")
 	if err == nil {
 		t.Fatal("事件写不进去时 Create 必须返回错误")
 	}
@@ -186,7 +186,7 @@ func TestListPaginatesAndOrders(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 1; i <= 3; i++ {
-		if _, err := f.svc.Create(ctx, f.article.ID, f.commenter.ID, fmt.Sprintf("第 %d 条", i)); err != nil {
+		if _, err := f.svc.Create(ctx, f.article.ID, f.commenter.ID, 0, fmt.Sprintf("第 %d 条", i)); err != nil {
 			t.Fatalf("准备第 %d 条评论失败: %v", i, err)
 		}
 	}
@@ -202,12 +202,12 @@ func TestListPaginatesAndOrders(t *testing.T) {
 	if len(page1) != 2 {
 		t.Fatalf("第一页应当有 2 条，实际 %d 条", len(page1))
 	}
-	if page1[0].Content != "第 1 条" || page1[1].Content != "第 2 条" {
-		t.Errorf("第一页顺序不对: %q, %q", page1[0].Content, page1[1].Content)
+	if page1[0].Comment.Content != "第 1 条" || page1[1].Comment.Content != "第 2 条" {
+		t.Errorf("第一页顺序不对: %q, %q", page1[0].Comment.Content, page1[1].Comment.Content)
 	}
 	// Preload("User") 必须把作者带出来，否则前端只能显示空白昵称。
-	if page1[0].User.Username != "commenter" {
-		t.Errorf("评论作者 = %q，期望 commenter", page1[0].User.Username)
+	if page1[0].Comment.User.Username != "commenter" {
+		t.Errorf("评论作者 = %q，期望 commenter", page1[0].Comment.User.Username)
 	}
 
 	// 第二页只剩一条。
@@ -215,7 +215,7 @@ func TestListPaginatesAndOrders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("查询第二页失败: %v", err)
 	}
-	if len(page2) != 1 || page2[0].Content != "第 3 条" {
+	if len(page2) != 1 || page2[0].Comment.Content != "第 3 条" {
 		t.Fatalf("第二页内容不对: %+v", page2)
 	}
 
@@ -278,7 +278,7 @@ func TestDeleteOnlyByOwner(t *testing.T) {
 	f := newCommentFixture(t)
 	ctx := context.Background()
 
-	created, err := f.svc.Create(ctx, f.article.ID, f.commenter.ID, "这条会被删")
+	created, err := f.svc.Create(ctx, f.article.ID, f.commenter.ID, 0, "这条会被删")
 	if err != nil {
 		t.Fatalf("准备评论失败: %v", err)
 	}
@@ -302,5 +302,318 @@ func TestDeleteOnlyByOwner(t *testing.T) {
 	// 再删一次：行已经不在了，同样合并成 ErrNotFound。
 	if err := f.svc.Delete(ctx, created.ID, f.commenter.ID); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("重复删除的错误 = %v，期望 ErrNotFound", err)
+	}
+}
+
+// TestReplyBuildsTwoLevelTree 验证回复挂在根评论下，而不是自己变成一条根评论。
+//
+// 关键字段是 RootID：回复的回复也必须指回根评论，
+// 这样一次 WHERE root_id IN (...) 就能取回整棵树。
+func TestReplyBuildsTwoLevelTree(t *testing.T) {
+	f := newCommentFixture(t)
+	ctx := context.Background()
+
+	root, err := f.svc.Create(ctx, f.article.ID, f.commenter.ID, 0, "根评论")
+	if err != nil {
+		t.Fatalf("创建根评论失败: %v", err)
+	}
+
+	reply, err := f.svc.Create(ctx, f.article.ID, f.author.ID, root.ID, "回复根评论")
+	if err != nil {
+		t.Fatalf("创建回复失败: %v", err)
+	}
+	if reply.ParentID != root.ID || reply.RootID != root.ID {
+		t.Fatalf("一级回复 parent/root 期望 %d/%d，实际 %d/%d", root.ID, root.ID, reply.ParentID, reply.RootID)
+	}
+
+	// 对回复再回复：parent 指向那条回复，root 仍然是最初的根评论。
+	nested, err := f.svc.Create(ctx, f.article.ID, f.commenter.ID, reply.ID, "回复那条回复")
+	if err != nil {
+		t.Fatalf("创建二级回复失败: %v", err)
+	}
+	if nested.ParentID != reply.ID {
+		t.Fatalf("二级回复 parent 期望 %d，实际 %d", reply.ID, nested.ParentID)
+	}
+	if nested.RootID != root.ID {
+		t.Fatalf("二级回复 root 期望回到根评论 %d，实际 %d", root.ID, nested.RootID)
+	}
+}
+
+// TestReplyRejectsForeignParent 验证不能把回复挂到别的文章的评论上。
+func TestReplyRejectsForeignParent(t *testing.T) {
+	f := newCommentFixture(t)
+	ctx := context.Background()
+
+	other := testutil.SeedArticle(t, f.db, f.author.ID, "另一篇文章")
+	foreign, err := f.svc.Create(ctx, other.ID, f.commenter.ID, 0, "别的文章的评论")
+	if err != nil {
+		t.Fatalf("准备外部评论失败: %v", err)
+	}
+
+	_, err = f.svc.Create(ctx, f.article.ID, f.author.ID, foreign.ID, "跨文章回复")
+	if !errors.Is(err, domain.ErrInvalidInput) {
+		t.Fatalf("跨文章回复期望 ErrInvalidInput，实际 %v", err)
+	}
+}
+
+// TestReplyRejectsMissingParent 验证父评论不存在时返回 404 语义，而不是插一条孤儿回复。
+func TestReplyRejectsMissingParent(t *testing.T) {
+	f := newCommentFixture(t)
+
+	_, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, 999999, "回复不存在的评论")
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("父评论不存在期望 ErrNotFound，实际 %v", err)
+	}
+}
+
+// TestReplyEventTargetsParentComment 验证事件的 Target 是被回复的评论。
+// 通知消费端靠这个字段判断收件人是「评论作者」还是「文章作者」。
+func TestReplyEventTargetsParentComment(t *testing.T) {
+	f := newCommentFixture(t)
+	ctx := context.Background()
+
+	root, err := f.svc.Create(ctx, f.article.ID, f.commenter.ID, 0, "根评论")
+	if err != nil {
+		t.Fatalf("创建根评论失败: %v", err)
+	}
+	if _, err := f.svc.Create(ctx, f.article.ID, f.author.ID, root.ID, "回复"); err != nil {
+		t.Fatalf("创建回复失败: %v", err)
+	}
+
+	// 两条事件：根评论那条指向文章，回复那条指向根评论。
+	var rows []model.OutboxEvent
+	if err := f.db.Order("id ASC").Find(&rows).Error; err != nil {
+		t.Fatalf("查询 outbox 失败: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("outbox 期望 2 行，实际 %d 行", len(rows))
+	}
+	if rows[0].AggregateType != event.TargetArticle || rows[0].AggregateID != f.article.ID {
+		t.Fatalf("根评论事件聚合期望 article/%d，实际 %s/%d", f.article.ID, rows[0].AggregateType, rows[0].AggregateID)
+	}
+	if rows[1].AggregateType != event.TargetComment || rows[1].AggregateID != root.ID {
+		t.Fatalf("回复事件聚合期望 comment/%d，实际 %s/%d", root.ID, rows[1].AggregateType, rows[1].AggregateID)
+	}
+}
+
+// TestListGroupsRepliesUnderRoot 验证列表把回复归到对应根评论下，并带上被回复者。
+func TestListGroupsRepliesUnderRoot(t *testing.T) {
+	f := newCommentFixture(t)
+	ctx := context.Background()
+
+	// 给回复者设置昵称，用来断言 reply_to 取的是展示名而不是 id。
+	if err := f.db.Model(f.commenter).Update("nickname", "评论者").Error; err != nil {
+		t.Fatalf("更新昵称失败: %v", err)
+	}
+
+	root, err := f.svc.Create(ctx, f.article.ID, f.commenter.ID, 0, "根评论")
+	if err != nil {
+		t.Fatalf("创建根评论失败: %v", err)
+	}
+	first, err := f.svc.Create(ctx, f.article.ID, f.author.ID, root.ID, "第一条回复")
+	if err != nil {
+		t.Fatalf("创建第一条回复失败: %v", err)
+	}
+	if _, err := f.svc.Create(ctx, f.article.ID, f.author.ID, root.ID, "第二条回复"); err != nil {
+		t.Fatalf("创建第二条回复失败: %v", err)
+	}
+
+	threads, total, err := f.svc.List(ctx, f.article.ID, 1, 10)
+	if err != nil {
+		t.Fatalf("查询列表失败: %v", err)
+	}
+	// 分页只数根评论：两条回复不该让 total 变成 3。
+	if total != 1 {
+		t.Fatalf("total 期望 1（只数根评论），实际 %d", total)
+	}
+	if len(threads) != 1 {
+		t.Fatalf("threads 期望 1，实际 %d", len(threads))
+	}
+	thread := threads[0]
+	if thread.Comment.ID != root.ID {
+		t.Fatalf("根评论 id 期望 %d，实际 %d", root.ID, thread.Comment.ID)
+	}
+	if thread.ReplyTotal != 2 || len(thread.Replies) != 2 {
+		t.Fatalf("回复期望 2 条，实际 total %d / 本页 %d", thread.ReplyTotal, len(thread.Replies))
+	}
+	if thread.Replies[0].Comment.ID != first.ID {
+		t.Fatalf("回复应按 id 升序，首条期望 %d，实际 %d", first.ID, thread.Replies[0].Comment.ID)
+	}
+	// 被回复者是根评论的作者，昵称已设置，reply_to 必须是回退后的展示名。
+	if thread.Replies[0].ReplyTo.DisplayName() != "评论者" {
+		t.Fatalf("reply_to 期望 评论者，实际 %q", thread.Replies[0].ReplyTo.DisplayName())
+	}
+}
+
+// TestDeleteRootRemovesReplies 验证删根评论会连回复一起删，不留孤儿。
+func TestDeleteRootRemovesReplies(t *testing.T) {
+	f := newCommentFixture(t)
+	ctx := context.Background()
+
+	root, err := f.svc.Create(ctx, f.article.ID, f.commenter.ID, 0, "根评论")
+	if err != nil {
+		t.Fatalf("创建根评论失败: %v", err)
+	}
+	if _, err := f.svc.Create(ctx, f.article.ID, f.author.ID, root.ID, "回复"); err != nil {
+		t.Fatalf("创建回复失败: %v", err)
+	}
+
+	if err := f.svc.Delete(ctx, root.ID, f.commenter.ID); err != nil {
+		t.Fatalf("删除根评论失败: %v", err)
+	}
+
+	var left int64
+	if err := f.db.Model(&model.Comment{}).Count(&left).Error; err != nil {
+		t.Fatalf("统计剩余评论失败: %v", err)
+	}
+	if left != 0 {
+		t.Fatalf("删根评论后应连回复一起删，实际还剩 %d 条", left)
+	}
+}
+
+// TestRepliesCappedPerRoot 验证回复上限是「每条根评论各自 200 条」。
+//
+// 早先的实现是整页共用一个 Limit(len(roots) * maxRepliesPerRoot)：
+// 一条热帖的 400 多条回复会把整页配额吃光，排在它后面的根评论一条回复都带不回来，
+// 而 reply_count 仍然显示 1，前端点开「查看全部」看到的是空列表。
+//
+// 直接批量插回复而不走 svc.Create：400 多次发评论会各写一条 outbox，
+// 这个用例要验的是列表查询，不是写入链路。
+func TestRepliesCappedPerRoot(t *testing.T) {
+	f := newCommentFixture(t)
+	ctx := context.Background()
+
+	hot, err := f.svc.Create(ctx, f.article.ID, f.commenter.ID, 0, "热帖")
+	if err != nil {
+		t.Fatalf("创建热帖失败: %v", err)
+	}
+	quiet, err := f.svc.Create(ctx, f.article.ID, f.commenter.ID, 0, "冷清的那条")
+	if err != nil {
+		t.Fatalf("创建第二条根评论失败: %v", err)
+	}
+
+	replies := make([]*model.Comment, 0, 401)
+	for i := 0; i < 401; i++ {
+		replies = append(replies, &model.Comment{
+			ArticleID: f.article.ID,
+			UserID:    f.author.ID,
+			Content:   "热帖下的回复",
+			ParentID:  hot.ID,
+			RootID:    hot.ID,
+		})
+	}
+	if err := f.db.CreateInBatches(replies, 200).Error; err != nil {
+		t.Fatalf("批量插入回复失败: %v", err)
+	}
+
+	// 这条回复的 id 排在第 402 位：用全局配额时它一定被挤掉。
+	if _, err := f.svc.Create(ctx, f.article.ID, f.author.ID, quiet.ID, "唯一一条回复"); err != nil {
+		t.Fatalf("给第二条根评论写回复失败: %v", err)
+	}
+
+	threads, total, err := f.svc.List(ctx, f.article.ID, 1, 10)
+	if err != nil {
+		t.Fatalf("查询列表失败: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("根评论总数期望 2，实际 %d", total)
+	}
+
+	var hotThread, quietThread *Thread
+	for i := range threads {
+		thread := &threads[i]
+		if thread.Comment.ID == hot.ID {
+			hotThread = thread
+		}
+		if thread.Comment.ID == quiet.ID {
+			quietThread = thread
+		}
+	}
+	if hotThread == nil || quietThread == nil {
+		t.Fatalf("两条根评论都该在结果里，实际拿到 %d 条", len(threads))
+	}
+
+	// 热帖：本页最多 200 条，但总数必须是真实的 401。
+	if len(hotThread.Replies) != maxRepliesPerRoot {
+		t.Fatalf("热帖本页回复期望 %d 条，实际 %d", maxRepliesPerRoot, len(hotThread.Replies))
+	}
+	if hotThread.ReplyTotal != 401 {
+		t.Fatalf("热帖回复总数期望 401，实际 %d", hotThread.ReplyTotal)
+	}
+
+	// 冷清那条：配额被热帖吃光时这里会是 0，正是这个用例要守的回归点。
+	if len(quietThread.Replies) != 1 {
+		t.Fatalf("第二条根评论应带回 1 条回复，实际 %d 条（配额被别的根评论吃光了）", len(quietThread.Replies))
+	}
+	if quietThread.ReplyTotal != 1 {
+		t.Fatalf("第二条根评论回复总数期望 1，实际 %d", quietThread.ReplyTotal)
+	}
+}
+
+// TestLocateComment 验证「从通知点进来落到那条评论」的定位结果。
+//
+// 这个接口的产物是序号而不是内容，序号错一位前端就翻错页、落到空的评论区，
+// 所以三种情况都要钉住：根评论定位到自己、回复定位到所属根评论、序号按文章各算各的。
+func TestLocateComment(t *testing.T) {
+	f := newCommentFixture(t)
+	ctx := context.Background()
+
+	// 第一条根评论下面挂一条回复：它的序号必须是所在根的序号，不是它自己的出现顺序。
+	first, err := f.svc.Create(ctx, f.article.ID, f.commenter.ID, 0, "第一条")
+	if err != nil {
+		t.Fatalf("创建第一条根评论失败: %v", err)
+	}
+	reply, err := f.svc.Create(ctx, f.article.ID, f.author.ID, first.ID, "回复第一条")
+	if err != nil {
+		t.Fatalf("创建回复失败: %v", err)
+	}
+	second, err := f.svc.Create(ctx, f.article.ID, f.commenter.ID, 0, "第二条")
+	if err != nil {
+		t.Fatalf("创建第二条根评论失败: %v", err)
+	}
+
+	// 另一篇文章里的评论有它自己的序号：漏了 article_id 过滤就会把别处的根评论算进来。
+	other := testutil.SeedArticle(t, f.db, f.author.ID, "另一篇文章")
+	otherComment, err := f.svc.Create(ctx, other.ID, f.commenter.ID, 0, "别处的评论")
+	if err != nil {
+		t.Fatalf("创建另一篇文章的评论失败: %v", err)
+	}
+
+	cases := []struct {
+		name      string
+		id        uint
+		articleID uint
+		wantRoot  uint
+		wantIndex int64
+	}{
+		{"根评论定位到自己", second.ID, f.article.ID, second.ID, 2},
+		{"回复定位到所属根评论", reply.ID, f.article.ID, first.ID, 1},
+		{"另一篇文章的评论单独计数", otherComment.ID, other.ID, otherComment.ID, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			anchor, err := f.svc.Locate(ctx, c.id)
+			if err != nil {
+				t.Fatalf("定位评论 %d 失败: %v", c.id, err)
+			}
+			if anchor.CommentID != c.id {
+				t.Errorf("CommentID = %d，期望 %d", anchor.CommentID, c.id)
+			}
+			if anchor.ArticleID != c.articleID {
+				t.Errorf("ArticleID = %d，期望 %d", anchor.ArticleID, c.articleID)
+			}
+			if anchor.RootID != c.wantRoot {
+				t.Errorf("RootID = %d，期望 %d", anchor.RootID, c.wantRoot)
+			}
+			if anchor.Index != c.wantIndex {
+				t.Errorf("Index = %d，期望 %d", anchor.Index, c.wantIndex)
+			}
+		})
+	}
+
+	// 评论被删（或从未存在）时要能翻成 404，而不是回一个 Index=0 的假位置，
+	// 否则前端会安静地拉第一页然后什么都不高亮。
+	if _, err := f.svc.Locate(ctx, 9999999); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("定位不存在的评论应返回 ErrNotFound，实际 %v", err)
 	}
 }

@@ -108,6 +108,7 @@ func main() {
 		TrustedProxies: cfg.Server.TrustedProxies,
 		CORSOrigins:    cfg.CORS.AllowedOrigins,
 		Metrics:        cfg.Metrics,
+		Admin:          cfg.Admin,
 	})
 	if err != nil {
 		exitOnError("注册路由失败", err)

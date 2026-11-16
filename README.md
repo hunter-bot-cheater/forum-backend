@@ -30,9 +30,20 @@
 - 私信前端已落地：`web/src/views/message/index.vue`，两个路由共用一个组件——`/messages` 只看会话列表，`/messages/:userId` 直接进入与某人的聊天页（从没聊过也能进，后端会返回空的 `list` 加对方的 `peer`）。界面不自己搭对话骨架，用开源库 `vue-element-plus-x` 的三个组件：`Conversations`（会话列表，选中态/hover/滚动/空态插槽）、`BubbleList`（气泡流，贴底跟随、上滑加载更早消息、回到最新按钮）、`XSender`（输入框，Enter 发送、字数上限、清空）。视觉按抖音私信调：左栏 320px 白底、灰色圆角搜索条、未读红点压头像右上角内侧、自己蓝色 `#1c7dff` 实心气泡、对方 `#f2f3f5` 灰气泡、圆角 18px、时间分隔整行居中。
 - 上翻历史用 `before_id` 游标，滚动位置由 `BubbleList` 在插入旧消息后自行补正——早期是自己记 `scrollHeight` 差值算的，换成组件后这段逻辑删掉了。行样式走组件暴露的 `itemsStyle` / `itemsHoverStyle` / `itemsActiveStyle`，不 `:deep` 覆盖内部类名（内部结构会随版本变）。气泡配色必须带 `.elx-bubble__content-wrapper` 这一层选择器，组件默认规则挂在它上面，只写 `.elx-bubble__content` 特异性不够、自己的气泡仍是灰的（实测踩过）。
 - 前端发送是乐观渲染：点发送先画一条半透明气泡并生成 `client_msg_id`，服务端确认后替换成真实消息，失败则标红并提供「重发」——重发复用同一个幂等键，即使上一次其实已经落库也只会返回同一条。连按 Enter 不会被拦截，`sending` 是计数而不是布尔。
-- 前端的 WebSocket 是全局单例（`web/src/utils/ws.ts`）：`message.created` 一帧同时喂给聊天页（追加气泡）、会话列表（换摘要、顶到最前）和侧边栏角标（更新未读数），各订阅各的，页面卸载时退订。断线按 1→2→4…30 秒退避重连并叠 0~1 秒随机抖动，避免后端重启后所有客户端在同一秒涌回来；重连成功后自动补拉断线期间漏掉的消息。
+- 前端的 WebSocket 是全局单例（`web/src/utils/ws.ts`）：`message.created` 一帧同时喂给聊天页（追加气泡）、会话列表（换摘要、顶到最前）和顶栏角标（更新未读数），各订阅各的，页面卸载时退订。断线按 1→2→4…30 秒退避重连并叠 0~1 秒随机抖动，避免后端重启后所有客户端在同一秒涌回来；重连成功后自动补拉断线期间漏掉的消息。
 - 前端不再只存 token 和用户名：布局挂载时会调一次 `GET /users/me` 拿昵称头像，刷新页面后顶栏也能正确显示。登出会断开 WebSocket 并清空会话列表，否则下一个登录的人会先看到上一个人的私信。
+- 前端视觉是一套统一基座：色板、圆角、阴影、三级文字都定义在 `web/src/styles/index.css` 的 `--fs-*` 变量里，并把 Element Plus 的 `--el-color-primary` 等主题变量接到同一支蓝上。布局是「顶栏 + 内容区」：品牌/导航/私信/通知角标/用户菜单在顶栏，页面自己决定单栏还是两栏（文章列表是「卡片流 + 右侧栏热榜」，详情页是 720px 单栏）。页面状态进 Pinia（`article`、`hot` 两个 store），列表分页与榜单缓存不放在组件里：从详情页返回能保留页码，右侧栏与热榜页共用同一份榜单缓存。
 - 本地调试 WebSocket 时 `ws.allowed_origins` 要同时写 `127.0.0.1:5173` 和 `localhost:5173`：浏览器把它们当成两个不同的源，后端比对的是 `Origin` 的 `host:port`，漏一个的表现是页面里 WebSocket 握手 403、私信收不到实时消息。
+
+- 消息中心已落地（`web/src/views/notification/index.vue`）：顶部三个分类胶囊「全部 / 赞 / 评论」，数字来自 `GET /notifications/summary` 的一次 `GROUP BY type`（分类映射写在 `notification.kindEventTypes`，空分类表示不过滤）。已读只是把红点去掉，历史通知一直留在列表里可翻页、可点进文章，和抖音的消息中心一致；`PUT /notifications/read-all` 只改 `is_read`，不删记录。
+- 通知列表带上了「谁」：`GET /notifications` 的每条现在是 `{...通知字段, actor:{id,username,nickname,avatar_url}}`，actor 由 `user.Briefs` 一次批量查出，与关注列表、私信会话共用同一份展示口径。触发者账号注销时 `actor` 整个字段省略（`omitempty`），前端显示「有人」，不会出现空白名字。
+- 分类过滤的 `total` / `unread_count` / `list` 三条查询共用同一套过滤条件，否则切 tab 会出现「红点 2 条、列表 1 条」这种对不上的情况。前端按请求序号丢弃迟到响应：连续点 tab 时慢的那次回来若属于旧分类，直接扔掉。
+- 同一种事件类型有两种文案：`comment.created` 的 `target_type` 是 `article` 时显示「评论了你的文章」，是 `comment` 时显示「回复了你的评论」，只看 `type` 会把回复写成评论。
+- 评论支持回复：`comments` 表加了两列，`parent_id`（直接回复的那条，顶级为 0）与 `root_id`（所属根评论，顶级自己为 0），回复的回复统一挂回根评论，结构固定两层。列表只对根评论分页，回复用一次 `WHERE root_id IN (...)` 带回并按根评论归组，每条回复附带 `reply_to`（被回复者昵称），前端可以直接渲染「回复 @某人」。
+- 回复的收件人换成被回复者：`comment.created` 事件里，顶级评论的 `Target` 是文章（照旧通知文章作者），回复的 `Target` 是被回复的那条评论，`resolveCommentCreated` 据此分流。已知取舍是回复不再顺带通知文章作者——热门文章会因此刷屏，要做也应按用户设置来，不在 resolver 里硬编码。
+- 删根评论会连它下面的回复一起删（同事务），删回复只删那一条。不做级联的话，列表里会出现点不进父级、又找不到归属的孤儿回复。
+- 单条已读：`PUT /notifications/:id/read`，点开哪条就清哪条的红点（和抖音一致），`affected` 为 0 表示本来就已读；`read-all` 才是整页清零。归属判断在 `WHERE id = ? AND user_id = ?`，别人的通知返回 404。
+- 回复配额按根评论算：每页每条根评论最多带 200 条回复（`ROW_NUMBER() OVER (PARTITION BY root_id)`，MySQL 8），不是整页共用一个上限——共用时一条热帖会把配额吃光，后面的根评论回复为空而 `reply_count` 照常显示几百。
 
 ## 计划实现的功能
 
@@ -68,10 +79,12 @@ internal/floor/    抢楼活动与发号器
 internal/notification/ 站内通知：outbox 消费、落库、WebSocket 推送
 internal/realtime/     WebSocket 连接表 Hub
 internal/ws/           WebSocket 升级入口与心跳
-internal/event/    领域事件类型与 outbox 写入
+internal/event/    领域事件类型、outbox 写入、Stream 消费循环骨架（Consumer）
 internal/cache/    Redis JSON 读写的公共小工具（读/写/删 + 降级约定）
 internal/keys/     跨模块共用的 Redis key
-internal/httputil/ handler 侧的公共逻辑：当前用户、错误映射、分页
+internal/httputil/ handler 侧的公共逻辑：当前用户、错误映射、分页参数解析
+internal/paging/   分页参数校验与偏移量计算（handler 与 service 共用一份上界）
+internal/textutil/ 长度上限判断：区分按字符（varchar 列）与按字节（text 列）
 internal/domain/   领域错误哨兵
 internal/middleware/ 中间件（JWT、限流、访问日志、CORS、Recovery）
 internal/metrics/  Prometheus 指标定义与抓取 handler
@@ -327,7 +340,7 @@ curl.exe -X POST http://localhost:8080/api/articles `
 
 ## 安全与配置
 
-`config/config.yaml` 是被 Git 跟踪的示例配置，里面已有一份占位密码和示例 JWT secret。不可把真实数据库密码或生产密钥写进去。`.gitignore` 忽略 `.env` 与 `config/config.local.yaml`，不会忽略默认配置。当前加载器支持 `CONFIG_PATH`、`JWT_SECRET` 和 `MYSQL_PASSWORD` 环境变量，启动时用环境变量或未跟踪的本地配置提供真实值。提交前再确认一遍没有真实凭据。PowerShell 接口示例使用 `curl.exe`，避免命中 `curl` 别名。Windows 下把内联 JSON 传给原生程序时，单引号里的双引号会被命令行解析吃掉，所以本页写成 `\"`，实测能保住完整 JSON；也可以把 JSON 存成文件后用 `-d @body.json`。Git Bash 里不需要转义，02 章的 bash 示例保持单引号写法。
+`config/config.yaml` 是被 Git 跟踪的示例配置，里面已有一份占位密码和示例 JWT secret。不可把真实数据库密码或生产密钥写进去。`.gitignore` 忽略 `.env` 与 `config/config.local.yaml`，不会忽略默认配置。管理类接口走 `admin.user_ids` 白名单（目前只有创建抢楼活动的 `POST /api/floor-events`），填的是用户自增 id；留空表示没人能调，这是刻意的安全默认。当前加载器支持 `CONFIG_PATH`、`JWT_SECRET` 和 `MYSQL_PASSWORD` 环境变量，启动时用环境变量或未跟踪的本地配置提供真实值。提交前再确认一遍没有真实凭据。PowerShell 接口示例使用 `curl.exe`，避免命中 `curl` 别名。Windows 下把内联 JSON 传给原生程序时，单引号里的双引号会被命令行解析吃掉，所以本页写成 `\"`，实测能保住完整 JSON；也可以把 JSON 存成文件后用 `-d @body.json`。Git Bash 里不需要转义，02 章的 bash 示例保持单引号写法。
 
 ## 学习路线
 

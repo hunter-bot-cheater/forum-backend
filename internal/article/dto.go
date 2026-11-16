@@ -102,6 +102,9 @@ func excerptOf(text string) string {
 
 // articleListResp 是文章列表接口 data 的形状。
 // 字段写错由编译器拦截，别在响应里用 gin.H 拼字符串键。
+//
+// 四个分页字段与其它列表接口长得一样，但没有抽成泛型结构体：swag 解析
+// 匿名嵌入的泛型实例会失败，接口文档会变成空壳，详见 internal/paging 的说明。
 type articleListResp struct {
 	// List 声明成切片而不是指针，且调用方保证给它空切片而非 nil，
 	// 这样没有数据时序列化出来是 []，不会变成 null。
@@ -126,6 +129,13 @@ type createArticleReq struct {
 type articleDetailResp struct {
 	articleResp
 	LikeCount int64 `json:"like_count"`
+
+	// Liked 是「当前访问者点过没」，决定详情页的点赞按钮要不要点亮。
+	//
+	// 它只取决于发请求的人，所以不跟着文章进缓存——缓存键里没有用户维度，
+	// 存进去就会让 A 点过赞之后 B 也看到高亮的按钮。
+	// 游客（没登录或 token 过期）恒为 false：没有身份就无从判断。
+	Liked bool `json:"liked"`
 }
 
 // toArticleDetailResp 把详情模型转成对外结构体。

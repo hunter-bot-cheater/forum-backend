@@ -7,7 +7,7 @@ import {
   type LoginResp,
   type UserProfile,
 } from '@/api/user'
-import { getToken, setToken, removeToken } from '@/utils/auth'
+import { getToken, setToken, removeToken, runLogoutHooks } from '@/utils/auth'
 import { connectWS, disconnectWS } from '@/utils/ws'
 
 // 登录态与「当前用户是谁」。
@@ -92,6 +92,9 @@ export const useUserStore = defineStore('user', () => {
     // 登出必须断开 WebSocket：留着的话服务端会继续往这条连接推进来消息，
     // 下一个登录的人可能看到上一个人的私信。
     disconnectWS()
+    // 私信、通知这些带账号数据的 store 由它们自己注册到这里，
+    // 登出与 401 都走这一条路径，不会出现「退出登录清了、token 过期没清」。
+    runLogoutHooks()
   }
 
   return { token, profile, username, displayName, userId, login, register, fetchMe, resetToken }

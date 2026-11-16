@@ -1,136 +1,162 @@
 <template>
-  <!-- 整页用 el-container 布局：左栏会话、右栏聊天，高度由外层 el-main 决定。
-       不再自己写 flex 骨架，Element Plus 的 container 已经处理了 aside/main 的伸缩。 -->
-  <el-container class="im-page">
-    <!-- 左栏：会话列表。窄屏进聊天后整栏让位，避免两栏挤成一条缝。 -->
-    <el-aside class="im-aside" width="320px" :class="{ 'is-hidden-mobile': isMobile && activePeerId > 0 }">
-      <div class="im-aside__head">
-        <div class="im-aside__title">私信</div>
-        <el-input
-          v-model="keyword"
-          class="im-aside__search"
-          placeholder="搜索联系人"
-          :prefix-icon="Search"
-          clearable
-        />
-      </div>
+  <!-- 整页是一张卡片，落在和文章、热榜同一条 1120 内容带里：
+       之前是 el-container 直接铺满窗口，会话列表贴到屏幕最左边、
+       和顶栏 logo 完全对不上，看起来像另一个网站。 -->
+  <div class="im-page">
+    <div class="im-shell">
+      <!-- 左栏：会话列表。窄屏进聊天后整栏让位，避免两栏挤成一条缝。 -->
+      <aside class="im-aside" :class="{ 'is-hidden-mobile': isMobile && activePeerId > 0 }">
+        <div class="im-aside__head">
+          <div class="im-aside__title">
+            私信
+            <span v-if="unreadTotal > 0" class="im-aside__unread">{{ unreadTotal }} 条未读</span>
+          </div>
+          <el-input
+            v-model="keyword"
+            class="im-aside__search"
+            placeholder="搜索联系人"
+            :prefix-icon="Search"
+            clearable
+          />
+        </div>
 
-      <!-- Conversations 是组件库的会话列表：选中态、hover、滚动、空态插槽都由它提供。
-           每一行的内容用 #label 插槽定制成抖音那种「头像 + 昵称 + 摘要 + 时间」。 -->
-      <Conversations
-        class="im-conv"
-        :items="convItems"
-        :active="activePeerId > 0 ? activePeerId : undefined"
-        row-key="id"
-        label-key="label"
-        :show-built-in-menu="false"
-        :items-style="convItemStyle"
-        :items-hover-style="convHoverStyle"
-        :items-active-style="convActiveStyle"
-        @change="onConvChange"
-      >
-        <template #label="{ item }">
-          <div class="conv">
-            <el-badge :is-dot="item.unread > 0" class="conv__badge">
-              <el-avatar :size="44" :src="item.peer.avatar_url">
+        <!-- Conversations 是组件库的会话列表：选中态、hover、滚动、空态插槽都由它提供。
+             每一行的内容用 #label 插槽定制成「头像 + 昵称 + 摘要 + 时间」。 -->
+        <Conversations
+          class="im-conv"
+          :items="convItems"
+          :active="activePeerId > 0 ? activePeerId : undefined"
+          row-key="id"
+          label-key="label"
+          :show-built-in-menu="false"
+          :items-style="convItemStyle"
+          :items-hover-style="convHoverStyle"
+          :items-active-style="convActiveStyle"
+          @change="onConvChange"
+        >
+          <template #label="{ item }">
+            <div class="conv">
+              <!-- 头像统一走 avatarOf：没上传头像的人在这里和气泡里是同一张图，
+                   否则左栏是灰底文字、气泡里是彩色首字，同一个人两副面孔。 -->
+              <el-avatar
+                :size="42"
+                :src="avatarOf(item.peer.nickname, item.peer.avatar_url)"
+                class="conv__avatar"
+              >
                 {{ initials(item.peer.nickname) }}
               </el-avatar>
-            </el-badge>
-            <div class="conv__body">
-              <div class="conv__line">
-                <span class="conv__name">{{ item.peer.nickname }}</span>
-                <span class="conv__time">{{ item.timeText }}</span>
+              <div class="conv__body">
+                <div class="conv__line">
+                  <span class="conv__name">{{ item.peer.nickname }}</span>
+                  <span class="conv__time">{{ item.timeText }}</span>
+                </div>
+                <div class="conv__line">
+                  <span class="conv__preview">{{ item.preview }}</span>
+                  <!-- 未读数放右下角而不是压在头像上：头像只有 42px，
+                       数字角标会盖掉半张脸，而这一行的右半边本来就是空的。 -->
+                  <span v-if="item.unread > 0" class="conv__unread">
+                    {{ item.unread > 99 ? '99+' : item.unread }}
+                  </span>
+                </div>
               </div>
-              <div class="conv__preview">{{ item.preview }}</div>
             </div>
-          </div>
-        </template>
+          </template>
 
-        <template #footer>
-          <div v-if="visibleRows.length === 0" class="im-aside__empty">
-            <el-empty :image-size="64" :description="keyword ? '没找到匹配的联系人' : '还没有聊过天'" />
-          </div>
-        </template>
-      </Conversations>
-    </el-aside>
+          <template #footer>
+            <div v-if="visibleRows.length === 0" class="im-aside__empty">
+              <el-empty :image-size="64" :description="keyword ? '没找到匹配的联系人' : '还没有聊过天'" />
+            </div>
+          </template>
+        </Conversations>
+      </aside>
 
-    <!-- 右栏：与某人的专属聊天区 -->
-    <el-container class="im-chat" :class="{ 'is-hidden-mobile': isMobile && activePeerId === 0 }">
-      <template v-if="peer">
-        <el-header class="im-chat__head" height="60px">
-          <el-button v-if="isMobile" text class="im-chat__back" @click="backToList">返回</el-button>
-          <el-avatar :size="34" :src="peer.avatar_url">{{ initials(peer.nickname) }}</el-avatar>
-          <div class="im-chat__who">
-            <div class="im-chat__name">{{ peer.nickname }}</div>
-            <div class="im-chat__hint">{{ connectionText }}</div>
-          </div>
-        </el-header>
-
-        <!-- BubbleList 负责滚动、贴底跟随、上滑加载更早消息、回到最新按钮。
-             这些行为以前是自己写的，现在交给组件库，页面只管数据和边界状态。 -->
-        <el-main class="im-chat__body">
-          <BubbleList
-            ref="bubbleRef"
-            class="im-bubbles"
-            :list="bubbles"
-            :item-key="bubbleKey"
-            :auto-scroll="true"
-            :top-status="topStatus"
-            :load-more-top-threshold="80"
-            @load-more-top="loadOlder"
-          >
-            <!-- 用 #item 整条自定义，而不是 Bubble 的 #header：
-                 header 在气泡容器内部，宽度只到气泡那么宽，时间分隔会左对齐贴在气泡上方。
-                 抖音的时间是横跨整个消息区居中的，只能在这一层画。 -->
-            <template #item="{ item }">
-              <div class="chat-row">
-                <div v-if="item.showTime" class="chat-time">{{ item.timeText }}</div>
-                <Bubble
-                  :placement="item.placement"
-                  :content="item.content"
-                  :avatar="item.avatar"
-                  :shape="item.shape"
-                  :variant="item.variant"
-                  :max-width="item.maxWidth"
-                >
-                  <template #content>
-                    <span class="chat-text" :class="{ 'chat-text--pending': item.pending }">
-                      {{ item.content }}
-                    </span>
-                    <div v-if="item.failed" class="chat-failed">
-                      <span>发送失败</span>
-                      <el-button link size="small" @click.stop="retry(item.msg)">重发</el-button>
-                    </div>
-                  </template>
-                </Bubble>
+      <!-- 右栏：与某人的专属聊天区 -->
+      <section class="im-chat" :class="{ 'is-hidden-mobile': isMobile && activePeerId === 0 }">
+        <template v-if="peer">
+          <header class="im-chat__head">
+            <el-button v-if="isMobile" text class="im-chat__back" @click="backToList">返回</el-button>
+            <el-avatar :size="34" :src="avatarOf(peer.nickname, peer.avatar_url)">
+              {{ initials(peer.nickname) }}
+            </el-avatar>
+            <div class="im-chat__who">
+              <div class="im-chat__name">{{ peer.nickname }}</div>
+              <!-- 连着的时候显示 @用户名；昵称本来就是用户名时不显示，
+                   否则「123456789 / @123456789」上下重复一遍，纯占地方。
+                   断线提示优先，它比「对方叫什么」重要。 -->
+              <div class="im-chat__hint" :class="{ 'is-warn': connectionText }">
+                {{ connectionText || (peer.nickname === peer.username ? '' : '@' + peer.username) }}
               </div>
-            </template>
-          </BubbleList>
-        </el-main>
+            </div>
+          </header>
 
-        <el-footer class="im-chat__foot" height="auto">
-          <XSender
-            ref="senderRef"
-            class="im-sender"
-            placeholder="发消息…"
-            :loading="sending"
-            :max-length="1000"
-            submit-type="enter"
-            :clearable="true"
-            :custom-style="senderStyle"
-            @submit="submit"
-          />
-        </el-footer>
-      </template>
+          <!-- BubbleList 负责滚动、贴底跟随、上滑加载更早消息、回到最新按钮。
+               回到最新按钮默认停在底部正中，正好压住最后一条气泡，
+               所以用 back-button-position 挪到右下角。 -->
+          <div class="im-chat__body">
+            <BubbleList
+              ref="bubbleRef"
+              class="im-bubbles"
+              :list="bubbles"
+              :item-key="bubbleKey"
+              :auto-scroll="true"
+              :top-status="topStatus"
+              :load-more-top-threshold="80"
+              :back-button-position="{ right: '16px', bottom: '16px' }"
+              @load-more-top="loadOlder"
+            >
+              <!-- 用 #item 整条自定义，而不是 Bubble 的 #header：
+                   header 在气泡容器内部，宽度只到气泡那么宽，时间分隔会左对齐贴在气泡上方。
+                   抖音的时间是横跨整个消息区居中的，只能在这一层画。 -->
+              <template #item="{ item }">
+                <div class="chat-row">
+                  <div v-if="item.showTime" class="chat-time">{{ item.timeText }}</div>
+                  <Bubble
+                    :placement="item.placement"
+                    :content="item.content"
+                    :avatar="item.avatar"
+                    :shape="item.shape"
+                    :variant="item.variant"
+                    :max-width="item.maxWidth"
+                  >
+                    <template #content>
+                      <span class="chat-text" :class="{ 'chat-text--pending': item.pending }">
+                        {{ item.content }}
+                      </span>
+                      <div v-if="item.failed" class="chat-failed">
+                        <span>发送失败</span>
+                        <el-button link size="small" @click.stop="retry(item.msg)">重发</el-button>
+                      </div>
+                    </template>
+                  </Bubble>
+                </div>
+              </template>
+            </BubbleList>
+          </div>
 
-      <el-empty
-        v-else
-        class="im-chat__placeholder"
-        :image-size="80"
-        description="选择左侧的联系人，或从别人的主页点「私信」开始聊天"
-      />
-    </el-container>
-  </el-container>
+          <footer class="im-chat__foot">
+            <XSender
+              ref="senderRef"
+              class="im-sender"
+              placeholder="发消息…"
+              :loading="sending"
+              :max-length="1000"
+              submit-type="enter"
+              :clearable="true"
+              :custom-style="senderStyle"
+              @submit="submit"
+            />
+            <p v-if="!isMobile" class="im-chat__tip">Enter 发送，Shift + Enter 换行</p>
+          </footer>
+        </template>
+
+        <div v-else class="im-chat__placeholder">
+          <div class="im-chat__placeholder-icon">✉</div>
+          <p class="im-chat__placeholder-title">还没选联系人</p>
+          <p class="im-chat__placeholder-desc">从左边挑一个聊过的人，或在文章里点作者的「私信」</p>
+        </div>
+      </section>
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -192,11 +218,15 @@ const TIME_GAP = 5 * 60 * 1000 // 相邻消息间隔超过 5 分钟就插一条�
 const convItemStyle = {
   height: 'auto',
   padding: '8px 12px',
-  margin: '2px 8px',
+  // 左右不留外边距：组件默认给行加 margin-right: 20px，
+  // 高亮方框会比列表短一截，看着像没对齐。
+  margin: '2px 0',
   borderRadius: '8px',
 }
-const convHoverStyle = { background: '#f7f7f8' }
-const convActiveStyle = { background: '#f2f3f5' }
+// 选中态用主色的极浅档，而不是和页面底色一样的灰：
+// 会话列表里「我正在看这个人」是当前页面的焦点，得比 hover 更明确。
+const convHoverStyle = { background: 'var(--fs-surface-hover)' }
+const convActiveStyle = { background: 'var(--fs-primary-weak)' }
 
 // XSender 的根元素样式。默认是 AI 对话框的白色大卡片，
 // 这里压成抖音那种灰底圆角输入条，去掉描边。
@@ -258,6 +288,51 @@ const visibleRows = computed<ConvRow[]>(() => {
 // Conversations 的 items 与过滤后的行共用一份数据，避免两处过滤逻辑跑偏。
 const convItems = computed(() => visibleRows.value)
 
+// 左栏标题旁的未读合计。逐行加总比再请求一次未读接口便宜，
+// 而且 im store 在收到实时消息时会更新行上的 unread，这个数会跟着变。
+const unreadTotal = computed(() => {
+  let sum = 0
+  for (const row of im.conversations) {
+    sum += row.unread
+  }
+  return sum
+})
+
+// 气泡头像的配色。都是站点已有色系里的深一档，保证白字压得住。
+const AVATAR_COLORS = ['#1c7dff', '#f5552d', '#00a870', '#7b61ff', '#e6a23c', '#2f9bd6']
+
+// avatarOf 给没有上传头像的人生成一张首字头像。
+//
+// Bubble 的 avatar 只认图片地址、不认文字，想在气泡旁放 <el-avatar> 就要自己接管
+// 头像位与间距，和组件各算一套必然对不齐。这里生成一张 64×64 的 SVG data URI，
+// 布局仍由组件负责，只有图像内容是拼出来的。
+function avatarOf(name: string, url: string): string {
+  if (url) {
+    return url
+  }
+  let hash = 0
+  const chars = Array.from(name)
+  for (let i = 0; i < chars.length; i++) {
+    const code = chars[i].codePointAt(0)
+    if (code) {
+      hash = (hash + code) % 997
+    }
+  }
+  let color = AVATAR_COLORS[0]
+  const picked = AVATAR_COLORS[hash % AVATAR_COLORS.length]
+  if (picked) {
+    color = picked
+  }
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">' +
+    '<rect width="64" height="64" rx="32" fill="' + color + '"/>' +
+    '<text x="32" y="33" font-size="30" fill="#ffffff" text-anchor="middle" ' +
+    'dominant-baseline="middle" font-family="PingFang SC,Microsoft YaHei,sans-serif">' +
+    initials(name) +
+    '</text></svg>'
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg)
+}
+
 // 气泡由 messages 派生，不在两处各存一份状态：
 // 消息列表是唯一真相，组件只是换了个渲染形状。
 // 时间分隔按「与上一条相隔超过 5 分钟」算，全在一条时间轴上判断。
@@ -278,9 +353,9 @@ const bubbles = computed<BubbleItem[]>(() => {
     }
     let avatar = ''
     if (m.mine) {
-      avatar = myAvatar
+      avatar = avatarOf(me.profile ? me.profile.nickname : '我', myAvatar)
     } else if (peer.value) {
-      avatar = peer.value.avatar_url
+      avatar = avatarOf(peer.value.nickname, peer.value.avatar_url)
     }
     let key = 'msg-' + String(m.id)
     if (m.id === 0) {
@@ -669,44 +744,84 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-/* 抖音私信的取色：主色是偏亮的天蓝，气泡与按钮共用；
-   文字用近黑（#161823）而不是纯黑，纯黑在大面积白底上偏硬。 */
+/* 整页是一层浅灰底 + 一张居中白卡片，和文章列表、热榜共用同一套版式。
+   el-main 被 fullBleed 去掉了内边距，所以内边距与最大宽度都由这里给：
+   之前容器直接铺满窗口，左栏贴到屏幕最左边、和顶栏 logo 对不上。 */
 .im-page {
-  height: 100%;
-  --im-primary: #1c7dff;
-  --im-text: #161823;
-  --im-text-weak: #8a8b91;
-  --im-fill: #f2f3f5;
-  --el-color-primary: #1c7dff;
-  background: #fff;
-}
-
-/* 左栏固定 320：窄到放不下摘要，宽了挤压聊天区。 */
-.im-aside {
   display: flex;
   flex-direction: column;
-  border-right: 1px solid #f0f0f0;
-  background: #fff;
+  height: 100%;
+  min-height: 0;
+  padding: 20px 24px;
+  background: var(--fs-bg);
+  --im-primary: var(--fs-primary);
+  --im-text: var(--fs-text-1);
+  --im-text-weak: var(--fs-text-3);
+  --im-fill: var(--fs-surface-hover);
+}
+
+/* 高度靠 flex 分配而不是 height: 100%：
+   页面本身是主区域里的 flex 子项，父级高度是 flex 算出来的，
+   子项的百分比高度在这种链路上会退化成内容高度（实测只有 159px）。
+   给 shell 一个 flex: 1 + min-height: 0，高度就由外层直接给死。 */
+.im-shell {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  /* 宽度必须显式 100%：纵向 flex 容器里给了 margin: auto 之后交叉轴不再 stretch，
+     卡片会缩成内容那么宽（实测 506px），聊天区只剩一条缝。 */
+  width: 100%;
+  max-width: var(--fs-content-max);
+  margin: 0 auto;
+  background: var(--fs-surface);
+  border: 1px solid var(--fs-line);
+  border-radius: var(--fs-radius-lg);
+  box-shadow: var(--fs-shadow-sm);
+  overflow: hidden;
+}
+
+/* 左栏固定 300：窄到放不下摘要，宽了挤压聊天区。 */
+.im-aside {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  width: 300px;
+  min-height: 0;
+  border-right: 1px solid var(--fs-line);
   overflow: hidden;
 }
 
 .im-aside__head {
-  padding: 16px 16px 8px;
+  padding: 18px 16px 10px;
 }
 
 .im-aside__title {
-  font-size: 20px;
-  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  font-size: 17px;
+  font-weight: 600;
   color: var(--im-text);
-  margin-bottom: 10px;
+}
+
+/* 未读合计做成胶囊，和通知页「N 条未读」同一形状：
+   同一类信息在两页长得一样，用户才不用重新认。 */
+.im-aside__unread {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--fs-primary-weak);
+  color: var(--im-primary);
+  font-size: 12px;
+  font-weight: 500;
 }
 
 /* 搜索框做成灰底无边框，是抖音那种「一块圆角灰条」的观感。
    Element Plus 默认的描边输入框在这里会显得很重。 */
 .im-aside__search :deep(.el-input__wrapper) {
-  background: var(--im-fill);
+  background: var(--fs-bg);
   box-shadow: none;
-  border-radius: 18px;
+  border-radius: 999px;
   padding: 0 12px;
 }
 
@@ -718,29 +833,52 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  /* 组件默认 width: fit-content：放进 300px 的面板里只占 280，右边空一条，
+     选中态的方框也跟着短一截。 */
+  width: 100%;
+  /* 组件把每行内容区的高度写死成 20px，我们是「头像 + 两行字」的 48px 行，
+     方框就只包得住中间一条，头像上下都露在方框外面——看起来就是「方框不够大」。 */
+  --elx-conversations-label-height: 44px;
+  /* 组件自带的投影和面板边框叠在一起会显脏。 */
+  box-shadow: none;
 }
 
-/* 行内容：头像 + 两行文字 + 右侧时间/红点。 */
+/* 组件把列表的宽度、高度、内边距写在行内样式上（渲染时按内部逻辑算一遍），
+   行内样式优先级高于类选择器，只有 !important 能压过去。
+   不改的话：手机端列表固定 280px 宽，右边空出一大块；
+   桌面端左边 10px、右边 0，选中态的方框左右不对称。 */
+.im-conv :deep(.elx-conversations__list) {
+  width: 100% !important;
+  padding: 10px !important;
+  background: transparent;
+}
+
+/* 覆盖组件写死的两处尺寸：
+   行高 20px（内容区）与行右外边距 20px（高亮块比面板短一截）。
+   用 :deep 改内部类名，是因为这两个值在组件里是写死的，没有对应的 props。 */
+.im-conv :deep(.elx-conversations-item__content) {
+  height: auto;
+  min-height: 44px;
+}
+
+.im-conv :deep(.elx-conversations-item) {
+  margin-right: 0;
+}
+
+/* 行内容：头像 + 两列文字（昵称/时间、摘要/未读数）。
+   宽度必须写满：组件把 #label 插槽包在一个 auto 宽的 flex 子项里，
+   不给 width: 100% 时这一行只有内容那么宽，时间与未读数会停在半空中。 */
 .conv {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 4px 2px;
+  gap: 10px;
+  width: 100%;
   min-width: 0;
+  padding: 2px 0;
 }
 
-/* 未读红点压在头像右上角内侧。
-   el-badge 默认把点推到容器外侧（translateX(100%)），
-   而会话列表为了文字省略在行上设了 overflow 裁剪，外侧那半个点会被切掉——
-   表现是「有未读但看不见红点」。改成内侧定位就不依赖容器是否裁剪。 */
-.conv__badge :deep(.el-badge__content.is-dot) {
-  background: #fe2c55;
-  border: 2px solid #fff;
-  width: 10px;
-  height: 10px;
-  top: 2px;
-  right: 2px;
-  transform: none;
+.conv__avatar {
+  flex: none;
 }
 
 .conv__body {
@@ -756,7 +894,7 @@ onBeforeUnmount(() => {
 }
 
 .conv__name {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--im-text);
   overflow: hidden;
@@ -765,18 +903,35 @@ onBeforeUnmount(() => {
 }
 
 .conv__time {
-  flex: 0 0 auto;
+  flex: none;
   font-size: 12px;
   color: var(--im-text-weak);
 }
 
 .conv__preview {
-  margin-top: 3px;
+  flex: 1;
+  min-width: 0;
+  margin-top: 2px;
   font-size: 13px;
   color: var(--im-text-weak);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 未读数放每行右下角，而不是压在头像上：
+   头像只有 42px，数字角标会盖掉半张脸，而这一行右半边本来就是空的。 */
+.conv__unread {
+  flex: none;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--fs-like);
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
 }
 
 .im-aside__empty {
@@ -785,17 +940,20 @@ onBeforeUnmount(() => {
 
 .im-chat {
   display: flex;
+  flex: 1;
   flex-direction: column;
   min-width: 0;
-  background: #fff;
+  min-height: 0;
 }
 
 .im-chat__head {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 10px;
+  height: 60px;
   padding: 0 20px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--fs-line);
 }
 
 .im-chat__back {
@@ -815,12 +973,16 @@ onBeforeUnmount(() => {
 
 .im-chat__hint {
   font-size: 12px;
-  color: #e6a23c;
-  min-height: 16px;
+  color: var(--im-text-weak);
+  line-height: 1.4;
 }
 
-/* 消息区自己滚，页面不跟着滚；el-main 默认 20px 内边距在这里要去掉，
-   否则气泡区左右各缩进一块，和顶部不对齐。 */
+/* 断线提示用暖色：它是异常状态，不能和「@用户名」长得一样。 */
+.im-chat__hint.is-warn {
+  color: var(--fs-like);
+}
+
+/* 消息区自己滚，页面不跟着滚。 */
 .im-chat__body {
   flex: 1;
   min-height: 0;
@@ -830,6 +992,11 @@ onBeforeUnmount(() => {
 
 .im-bubbles {
   height: 100%;
+  /* 气泡头像尺寸交给组件自己的变量：它按这两个值算头像位与间距，
+     自己写死宽高会和内容区对不齐。 */
+  --el-bubble-avatar-placeholder-width: 32px;
+  --el-bubble-avatar-placeholder-height: 32px;
+  --el-bubble-avatar-placeholder-gap: 8px;
 }
 
 .chat-row {
@@ -838,10 +1005,10 @@ onBeforeUnmount(() => {
 
 .chat-time {
   width: 100%;
+  padding: 12px 0 6px;
   text-align: center;
   font-size: 12px;
-  color: #b0b1b6;
-  padding: 10px 0 6px;
+  color: var(--fs-text-3);
 }
 
 .chat-text {
@@ -857,12 +1024,12 @@ onBeforeUnmount(() => {
 }
 
 .chat-failed {
-  margin-top: 4px;
-  font-size: 12px;
-  color: #f56c6c;
   display: flex;
   align-items: center;
   gap: 6px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #f56c6c;
 }
 
 /* 气泡配色覆盖。组件库的类名是 elx- 前缀（不是 Element Plus 的 el-），
@@ -871,13 +1038,13 @@ onBeforeUnmount(() => {
    所以这里也要带上 wrapper，否则特异性不够、background 会被它盖掉。
    这是实测出来的：只写 .elx-bubble__content 时，自己的气泡仍然是灰的。 */
 .im-bubbles :deep(.elx-bubble__content-wrapper .elx-bubble__content) {
-  border-radius: 18px;
-  padding: 9px 14px;
+  border-radius: 14px;
+  padding: 8px 13px;
   background: var(--im-fill);
   color: var(--im-text);
   /* 组件默认给气泡算了 46px 的最小高度（12px 上下内边距 + 一行文字），
      一条「好」也占那么高，几条短消息之间会显得空得厉害。
-     置 0 让高度由内容决定，接近抖音那种紧凑的排布。 */
+     置 0 让高度由内容决定。 */
   min-height: 0;
 }
 
@@ -886,13 +1053,70 @@ onBeforeUnmount(() => {
   color: #fff;
 }
 
+/* 头像与气泡顶端对齐：默认是整体居中，多行气泡时会飘到中间去。 */
+.im-bubbles :deep(.elx-bubble) {
+  align-items: flex-start;
+}
+
+.im-bubbles :deep(.elx-bubble__content-wrapper) {
+  padding-top: 2px;
+}
+
 .im-chat__foot {
-  padding: 10px 20px 14px;
-  border-top: 1px solid #f0f0f0;
+  flex: none;
+  padding: 10px 16px 12px;
+  border-top: 1px solid var(--fs-line);
+}
+
+/* 组件默认是「白色卡片 + 内部灰输入条」的双层结构，
+   放在聊天窗底部像一张表单。去掉外层卡片的底、边框和投影，
+   只留灰色输入条与右侧两个按钮，跟微信/掘金的单行输入区一致。 */
+.im-chat__foot :deep(.elx-x-sender) {
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.im-chat__tip {
+  margin: 6px 6px 0;
+  font-size: 12px;
+  color: var(--fs-text-3);
+  text-align: right;
 }
 
 .im-chat__placeholder {
-  margin: auto;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.im-chat__placeholder-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  margin-bottom: 8px;
+  border-radius: 50%;
+  background: var(--fs-bg);
+  color: var(--fs-text-3);
+  font-size: 22px;
+}
+
+.im-chat__placeholder-title {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--fs-text-2);
+}
+
+.im-chat__placeholder-desc {
+  font-size: 13px;
+  color: var(--fs-text-3);
 }
 
 /* 窄屏：左栏和聊天区一次只显示一个，
@@ -902,14 +1126,33 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 767px) {
+  /* 手机上不要卡片：整屏就是聊天窗，多出来的圆角和边距只是浪费空间。 */
+  .im-page {
+    padding: 0;
+  }
+
+  .im-shell {
+    max-width: none;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
   .im-aside {
-    width: 100% !important;
-    flex: 1 1 100%;
+    width: 100%;
     border-right: none;
+  }
+
+  .im-chat__head {
+    padding: 0 12px;
   }
 
   .im-chat__body {
     padding: 8px 12px;
+  }
+
+  .im-chat__foot {
+    padding: 8px 12px 10px;
   }
 }
 </style>

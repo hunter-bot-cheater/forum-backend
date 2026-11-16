@@ -80,7 +80,7 @@ func TestHandlerListReturnsPage(t *testing.T) {
 	r := newCommentRouter(t, f)
 
 	for _, content := range []string{"第一条", "第二条"} {
-		if _, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, content); err != nil {
+		if _, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, 0, content); err != nil {
 			t.Fatalf("准备评论失败: %v", err)
 		}
 	}
@@ -199,7 +199,7 @@ func TestHandlerDeleteOthersComment(t *testing.T) {
 	f := newCommentFixture(t)
 	handler := NewCommentHandler(f.svc)
 
-	created, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, "别人删不掉")
+	created, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, 0, "别人删不掉")
 	if err != nil {
 		t.Fatalf("准备评论失败: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestHandlerDeleteOwnComment(t *testing.T) {
 	f := newCommentFixture(t)
 	r := newCommentRouter(t, f)
 
-	created, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, "会删掉我")
+	created, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, 0, "会删掉我")
 	if err != nil {
 		t.Fatalf("准备评论失败: %v", err)
 	}
@@ -233,5 +233,42 @@ func TestHandlerDeleteOwnComment(t *testing.T) {
 	}
 	if string(env.Data) != "null" {
 		t.Errorf("删除成功的 data 应为 null，实际 %s", env.Data)
+	}
+}
+
+// TestHandlerCreateReply 验证带 parent_id 的请求被当成回复处理，响应里带回层级字段。
+func TestHandlerCreateReply(t *testing.T) {
+	f := newCommentFixture(t)
+	r := newCommentRouter(t, f)
+
+	root, err := f.svc.Create(context.Background(), f.article.ID, f.commenter.ID, 0, "根评论")
+	if err != nil {
+		t.Fatalf("准备根评论失败: %v", err)
+	}
+
+	body := fmt.Sprintf(`{"content":"回复内容","parent_id":%d}`, root.ID)
+	w, env := doJSON(t, r, http.MethodPost, fmt.Sprintf("/api/articles/%d/comments", f.article.ID), body)
+	if w.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200，响应 %s", w.Code, w.Body.String())
+	}
+
+	var got commentResp
+	if err := json.Unmarshal(env.Data, &got); err != nil {
+		t.Fatalf("解析响应失败: %v", err)
+	}
+	if got.ParentID != root.ID || got.RootID != root.ID {
+		t.Fatalf("回复的 parent/root 期望 %d/%d，实际 %d/%d", root.ID, root.ID, got.ParentID, got.RootID)
+	}
+}
+
+// TestHandlerReplyToMissingParent 验证父评论不存在时返回 404，而不是 500。
+func TestHandlerReplyToMissingParent(t *testing.T) {
+	f := newCommentFixture(t)
+	r := newCommentRouter(t, f)
+
+	body := `{"content":"回复不存在的评论","parent_id":999999}`
+	w, _ := doJSON(t, r, http.MethodPost, fmt.Sprintf("/api/articles/%d/comments", f.article.ID), body)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("状态码 = %d，期望 404，响应 %s", w.Code, w.Body.String())
 	}
 }

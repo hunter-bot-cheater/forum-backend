@@ -848,3 +848,47 @@ func TestConcurrentSendKeepsSingleConversation(t *testing.T) {
 		t.Errorf("未读 = %d/%d，期望各 %d", conv.UnreadA, conv.UnreadB, n/2)
 	}
 }
+
+// TestMarkReadDoesNotDropConcurrentUnread 是「标记已读吃掉新消息红点」的回归测试。
+//
+// 真实竞态是：MarkRead 拿到 cleared 之后、更新计数之前，对方又发来一条，
+// Send 把 unread 加了 1。如果 MarkRead 无条件置 0，那条新消息的红点就没了。
+// 这里用等价的库内状态复现：计数比「本次能清掉的行数」多 3，
+// 多出来的部分就是在窗口期到达的消息，必须留着。
+func TestMarkReadDoesNotDropConcurrentUnread(t *testing.T) {
+	f := newMsgFixture(t)
+	ctx := context.Background()
+
+	// 两条历史未读，MarkRead 这次只会清掉这两条。
+	for i := 0; i < 2; i++ {
+		if _, err := f.svc.Send(ctx, f.alice.ID, f.bob.ID, "hi", ""); err != nil {
+			t.Fatalf("发送失败: %v", err)
+		}
+	}
+
+	// 模拟窗口期内又到了 3 条：只把计数调大，不插入消息行。
+	// 这样 MarkRead 的 cleared 仍然是 2，而计数是 5，两者之差就是不能被清掉的部分。
+	if err := f.db.Model(&model.Conversation{}).
+		Where("user_b_id = ?", f.bob.ID).
+		Update("unread_b", 5).Error; err != nil {
+		t.Fatalf("构造计数失败: %v", err)
+	}
+
+	cleared, err := f.svc.MarkRead(ctx, f.bob.ID, f.alice.ID)
+	if err != nil {
+		t.Fatalf("标记已读失败: %v", err)
+	}
+	if cleared != 2 {
+		t.Fatalf("清掉 %d 条，期望 2", cleared)
+	}
+
+	total, err := f.svc.UnreadTotal(ctx, f.bob.ID)
+	if err != nil {
+		t.Fatalf("取未读总数失败: %v", err)
+	}
+	// 5 - 2 = 3：窗口期到达的那几条必须留下红点。
+	// 无条件置 0 的实现会得到 0，这条用例就是用来抓它的。
+	if total != 3 {
+		t.Fatalf("标记后未读 = %d，期望 3（并发到达的消息不该被清掉）", total)
+	}
+}

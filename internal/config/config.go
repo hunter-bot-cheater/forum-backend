@@ -24,6 +24,21 @@ type Config struct {
 	CORS      CORSConfig      `mapstructure:"cors"`
 	Log       LogConfig       `mapstructure:"log"`
 	Metrics   MetricsConfig   `mapstructure:"metrics"`
+	Admin     AdminConfig     `mapstructure:"admin"`
+}
+
+// AdminConfig 是管理类接口的白名单。
+//
+// 项目里没有角色表，也不打算为了一两个运营接口引入一套 RBAC：
+// 需要权限的接口就那几个，把用户 id 列在配置里最直接，改了重启即可生效。
+// 代价是「谁算管理员」只能改文件，不能在线授予，这对当前规模是合理的。
+type AdminConfig struct {
+	// UserIDs 是允许调用管理接口的用户 id。
+	//
+	// 留空表示没有人可以调用，这是刻意的安全默认：
+	// 忘记配置时接口是关闭的，而不是对全部登录用户开放。
+	// 反过来的话，一次配置遗漏就等于把创建活动的权限交给了任何注册用户。
+	UserIDs []uint `mapstructure:"user_ids"`
 }
 
 type ServerConfig struct {
@@ -145,6 +160,9 @@ func Load() (*Config, error) {
 	v.SetDefault("rate_limit.rate", 2)
 	v.SetDefault("rate_limit.key_prefix", "forum:dev:rate:")
 	v.SetDefault("cors.allowed_origins", []string{})
+	// 管理员白名单默认是空列表：不写就是「没人能调管理接口」。
+	// 同样必须显式注册默认值，否则 yaml 里没写这一项时 Unmarshal 会跳过整个键。
+	v.SetDefault("admin.user_ids", []uint{})
 	// 慢查询阈值 200ms：低于它的 SQL 在开发机上看不出慢，抓到的都是真该改的。
 	v.SetDefault("mysql.slow_query_ms", 200)
 	// 日志默认按 JSON 打控制台。本机想看人话就在 config.yaml 里把 format 改成 text。

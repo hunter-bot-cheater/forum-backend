@@ -18,6 +18,7 @@ import (
 	"forum-backend/internal/domain"
 	"forum-backend/internal/metrics"
 	"forum-backend/internal/model"
+	"forum-backend/internal/paging"
 	"forum-backend/internal/user"
 )
 
@@ -276,8 +277,9 @@ func (s *Service) ListFollowers(ctx context.Context, userID, viewerID uint, page
 // 固定开销是 4 次查询：确认用户存在、总数、当前页关系、批量取用户信息；
 // 若 viewer 已登录再加 1 次批量查关注状态，与页大小无关。
 func (s *Service) list(ctx context.Context, ownerID, viewerID uint, ownerCol, otherCol string, page, pageSize int) ([]Item, int64, error) {
-	if page < 1 || pageSize < 1 || pageSize > 50 {
-		return nil, 0, fmt.Errorf("%w: invalid pagination", domain.ErrInvalidInput)
+	q, err := paging.New(page, pageSize)
+	if err != nil {
+		return nil, 0, err
 	}
 	// 用户不存在时返回 404，而不是一个空列表：
 	// 前端拿到空列表会以为「这个人没有关注任何人」，其实是页面地址错了。
@@ -286,7 +288,7 @@ func (s *Service) list(ctx context.Context, ownerID, viewerID uint, ownerCol, ot
 	}
 
 	var total int64
-	err := s.db.WithContext(ctx).Model(&model.Follow{}).
+	err = s.db.WithContext(ctx).Model(&model.Follow{}).
 		Where(ownerCol+" = ?", ownerID).Count(&total).Error
 	if err != nil {
 		return nil, 0, fmt.Errorf("count follow list: %w", err)
@@ -304,7 +306,7 @@ func (s *Service) list(ctx context.Context, ownerID, viewerID uint, ownerCol, ot
 		Select(otherCol+" AS other_id", "created_at").
 		Where(ownerCol+" = ?", ownerID).
 		Order("id DESC").
-		Offset((page - 1) * pageSize).Limit(pageSize).
+		Offset(q.Offset()).Limit(q.PageSize).
 		Find(&rows).Error
 	if err != nil {
 		return nil, 0, fmt.Errorf("list follows: %w", err)

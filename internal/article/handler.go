@@ -1,6 +1,8 @@
 package article
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -10,15 +12,26 @@ import (
 	"forum-backend/pkg/response"
 )
 
-// ArticleHandler 是文章模块的 HTTP 入口，只依赖同包的 service，不认识 GORM。
+// LikedChecker 回答「这个用户点过这篇文章吗」。
+//
+// 用接口而不是直接 import like 包：like 已经依赖 article（点赞后要调 InvalidateDetailCache），
+// article 反过来再依赖 like 就成了循环依赖。实现由 router 在装配期注入 like.LikeService。
+type LikedChecker interface {
+	HasLiked(ctx context.Context, articleID, userID uint) (bool, error)
+}
+
+// ArticleHandler 是文章模块的 HTTP 入口，只依赖同包的 service 与一个点赞查询接口，
+// 不认识 GORM，也不认识 like 包的类型。
 // 每个方法都走同一个套路：解析参数 → 调 service → 成功交 DTO / 失败交 MapServiceError。
 type ArticleHandler struct {
 	svc *ArticleService
+	// liked 只服务详情页的「我点过没」。游客访问时用不到。
+	liked LikedChecker
 }
 
-// NewArticleHandler 注入文章 service，由 router 在装配期调用。
-func NewArticleHandler(svc *ArticleService) *ArticleHandler {
-	return &ArticleHandler{svc: svc}
+// NewArticleHandler 注入文章 service 与点赞查询，由 router 在装配期调用。
+func NewArticleHandler(svc *ArticleService, liked LikedChecker) *ArticleHandler {
+	return &ArticleHandler{svc: svc, liked: liked}
 }
 
 // List godoc
@@ -90,8 +103,26 @@ func (h *ArticleHandler) Detail(c *gin.Context) {
 		httputil.MapServiceError(c, "article detail", err)
 		return
 	}
-	// 详情比列表多一个 like_count，所以用另一个 DTO 包一层。
-	response.OK(c, toArticleDetailResp(a))
+	// 详情比列表多一个 like_count 与 liked，所以用另一个 DTO 包一层。
+	resp := toArticleDetailResp(a)
+
+	// liked 不能跟着文章进缓存：缓存里存的是文章本身（含 like_count），
+	// 「我点过没」每个用户都不同，只能按当前访问者实时查。
+	// 路由挂了 OptionalJWTAuth，没登录或 token 过期时 CurrentUserID 返回 false，
+	// 此时保持 false——游客没有可判断的身份。
+	if userID, ok := httputil.CurrentUserID(c); ok && h.liked != nil {
+		liked, err := h.liked.HasLiked(c.Request.Context(), uint(id), userID)
+		if err != nil {
+			// 点赞状态查不出来不该让整篇文章打不开：正文已经拿到了。
+			// 这里降级成「未点赞」，用户真点了会走 Like 接口，那边返回的才是真实状态。
+			slog.WarnContext(c.Request.Context(), "check liked for article detail",
+				"article_id", id, "user_id", userID, "error", err)
+		} else {
+			resp.Liked = liked
+		}
+	}
+
+	response.OK(c, resp)
 }
 
 // Create godoc

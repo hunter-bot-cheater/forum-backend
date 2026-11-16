@@ -50,10 +50,16 @@ service.interceptors.response.use(
     const message = resp?.data?.message || error.message || '请求失败'
     if (status === 401) {
       // 登录过期或没带 token：清掉本地状态，跳回登录页。
+      // resetToken 会连带跑一遍各 store 注册的清理（私信会话列表、通知红点），
+      // 所以这里不逐个 store 去清——漏一个就会出现「下一个账号看到上一个账号的数据」。
       removeToken()
       useUserStore().resetToken()
       ElMessage.error('登录已过期，请重新登录')
-      router.replace('/login')
+      // 首页会并发发好几个请求，同时 401 时只跳一次。
+      // 已经在登录页还去 replace，会让路由收到一串重复导航。
+      if (router.currentRoute.value.path !== '/login') {
+        router.replace('/login')
+      }
     } else if (status === 429) {
       // 限流：后端按客户端 IP 分桶，参数见 config/config.yaml 的 rate_limit，首页会并发多个请求。
       // 不要把 429 自动重试——重试本身也吃令牌，越重试越晚恢复。

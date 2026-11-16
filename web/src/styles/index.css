@@ -1,73 +1,149 @@
-* {
+/* 全局设计基座。
+   色板、字号、圆角、阴影只在这里定义一份：早先文章列表、热榜、通知三页
+   各写了一套局部色板（--ar-text / --hot-text / --nt-title），同一层级的文字
+   在不同页面深浅不一，改一次配色要翻三个文件。 */
+
+:root {
+  /* 主色是整站唯一的强调色：链接、选中态、主按钮都用它。
+     强调色一多，页面就分不出「哪里可以点」。 */
+  --fs-primary: #1c7dff;
+  --fs-primary-hover: #4a95ff;
+  --fs-primary-weak: #eaf2ff;
+  /* 再淡一档，用于未读行的底色：整列都未读时 #eaf2ff 会连成一片蓝条纹，
+     比未读点本身还抢眼。 */
+  --fs-primary-faint: #f6faff;
+
+  /* 中性色靠明度差分段：页面背景比卡片低一档，卡片之间用间距拉开，
+     不靠给每块都描边框——满屏分割线是最容易显得廉价的做法。 */
+  --fs-bg: #f2f3f5;
+  --fs-surface: #ffffff;
+  --fs-surface-hover: #f7f8fa;
+
+  /* 三级文字：标题 / 正文 / 辅助信息。 */
+  --fs-text-1: #1d2129;
+  --fs-text-2: #4e5969;
+  --fs-text-3: #86909c;
+
+  --fs-line: #e5e6eb;
+  --fs-line-soft: #f2f3f5;
+
+  /* 点赞与热度用的是同一支暖红：榜单名次、心形、未读点都取它。
+     页面上只剩「主色蓝」和「热度红」两个有色相的颜色，再多一种就会花。 */
+  --fs-like: #f5552d;
+  --fs-like-weak: #fff2ee;
+
+  --fs-radius-sm: 6px;
+  --fs-radius: 8px;
+  --fs-radius-lg: 12px;
+
+  /* 阴影只做两档：常态几乎看不见，hover 时抬起一点。
+     阴影太重会让卡片像浮在页面外面的贴纸。 */
+  --fs-shadow-sm: 0 1px 2px rgba(29, 33, 41, 0.04);
+  --fs-shadow: 0 4px 16px rgba(29, 33, 41, 0.08);
+
+  --fs-header-h: 60px;
+  --fs-content-max: 1120px;
+  --fs-rail-w: 280px;
+
+  color-scheme: light;
+}
+
+/* 把 Element Plus 的主题变量接到自己的色板上。
+   main.ts 里 index.css 在 element-plus 的样式之后引入，同权重覆盖生效，
+   这样 el-button / el-input / el-pagination 的蓝色和页面里的链接是同一个蓝。 */
+:root {
+  --el-color-primary: var(--fs-primary);
+  --el-color-primary-light-3: #60a4ff;
+  --el-color-primary-light-5: #8dbeff;
+  --el-color-primary-light-7: #bbd8ff;
+  --el-color-primary-light-8: #d1e5ff;
+  --el-color-primary-light-9: #e8f2ff;
+  --el-color-primary-dark-2: #1664cc;
+
+  --el-text-color-primary: var(--fs-text-1);
+  --el-text-color-regular: var(--fs-text-2);
+  --el-text-color-secondary: var(--fs-text-3);
+  --el-text-color-placeholder: #a9aeb8;
+
+  --el-border-color: var(--fs-line);
+  --el-border-color-light: var(--fs-line);
+  --el-border-color-lighter: var(--fs-line-soft);
+
+  --el-border-radius-base: var(--fs-radius);
+  --el-bg-color-page: var(--fs-bg);
+  --el-font-size-base: 14px;
+}
+
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
 html,
 body,
 #app {
+  height: 100%;
   margin: 0;
   padding: 0;
-  height: 100%;
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    'Helvetica Neue', Arial, sans-serif;
-  background: #f0f2f5;
-  color: #303133;
+  background: var(--fs-bg);
+  color: var(--fs-text-1);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+  /* macOS 上关掉次像素抗锯齿：中文字形在这套字号下会更清晰一点。 */
+  -webkit-font-smoothing: antialiased;
 }
 
-/* 登录/注册页居中容器 */
-.auth-container {
-  height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: #f0f2f5;
+/* 标题与段落的外边距一律由使用方决定：
+   浏览器默认的 1em 上下边距在卡片里会把留白撑成两倍，还得到处写 margin: 0 覆盖。 */
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
 }
 
-.auth-card {
-  width: 380px;
+a {
+  color: inherit;
+  text-decoration: none;
 }
 
-/* 左侧栏沿用 vue3-element-admin 的深色主题 */
-.sidebar-container {
-  background: #304156;
+/* 滚动条收窄成一条细线：Windows 默认的 17px 宽滚动条会把内容区挤歪，
+   在浅色底上尤其显眼。 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
 }
 
-.logo {
-  color: #fff;
-  text-align: center;
-  padding: 16px;
-  font-size: 18px;
-  font-weight: bold;
-  letter-spacing: 2px;
+::-webkit-scrollbar-thumb {
+  background: #d7d9de;
+  border-radius: 4px;
 }
 
-.sidebar-menu {
-  border-right: none;
-  background: #304156;
+::-webkit-scrollbar-thumb:hover {
+  background: #c2c5cc;
 }
 
-.sidebar-menu .el-menu-item {
-  color: #bfcbd9;
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 
-.sidebar-menu .el-menu-item.is-active {
-  color: #409eff;
-  background: #263445;
+/* 内容宽度由外壳统一控制，页面内部只管自己的栅格。 */
+.fs-container {
+  width: 100%;
+  max-width: var(--fs-content-max);
+  margin: 0 auto;
 }
 
-/* 顶栏 */
-.navbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background: #fff;
-  border-bottom: 1px solid #e6e6e6;
-  padding: 0 20px;
-}
-
-.page-container {
-  padding: 20px;
+/* 白底卡片。页面里需要「一块内容」时套这个类，不要各自写背景与圆角。 */
+.fs-card {
+  background: var(--fs-surface);
+  border-radius: var(--fs-radius-lg);
+  box-shadow: var(--fs-shadow-sm);
 }

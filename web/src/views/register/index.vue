@@ -1,38 +1,43 @@
 <template>
-  <div class="auth-container">
-    <el-card class="auth-card">
-      <h2 style="text-align: center; margin-top: 0">注册</h2>
-      <el-form
-        ref="formRef"
-        :model="form"
-        :rules="rules"
-        label-width="80px"
-        @keyup.enter="onSubmit"
-      >
-        <el-form-item label="用户名" prop="username">
-          <el-input v-model="form.username" placeholder="3-32 位字母数字下划线" />
-        </el-form-item>
-        <el-form-item label="密码" prop="password">
-          <el-input
-            v-model="form.password"
-            type="password"
-            show-password
-            placeholder="8-72 位"
-          />
-        </el-form-item>
-        <el-form-item>
-          <el-button type="primary" :loading="loading" @click="onSubmit">注册并登录</el-button>
-          <el-button @click="goLogin">去登录</el-button>
-        </el-form-item>
-      </el-form>
-    </el-card>
-  </div>
+  <AuthCard title="创建账号" subtitle="注册后用同一个账号浏览、发帖与收发私信。">
+    <el-form
+      ref="formRef"
+      :model="form"
+      :rules="rules"
+      size="large"
+      @keyup.enter="onSubmit"
+    >
+      <el-form-item prop="username">
+        <el-input
+          v-model="form.username"
+          placeholder="用户名（3-32 位字母数字下划线）"
+          :prefix-icon="User"
+        />
+      </el-form-item>
+      <el-form-item prop="password">
+        <el-input
+          v-model="form.password"
+          type="password"
+          show-password
+          placeholder="密码（8-72 位）"
+          :prefix-icon="Lock"
+        />
+      </el-form-item>
+      <el-button type="primary" :loading="loading" @click="onSubmit">注册并登录</el-button>
+    </el-form>
+
+    <template #foot>
+      已有账号？<router-link to="/login">直接登录</router-link>
+    </template>
+  </AuthCard>
 </template>
 
 <script setup lang="ts">
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { Lock, User } from '@element-plus/icons-vue'
+import AuthCard from '@/components/AuthCard.vue'
 import { useUserStore } from '@/store/modules/user'
 
 const router = useRouter()
@@ -59,9 +64,5 @@ async function onSubmit() {
   } finally {
     loading.value = false
   }
-}
-
-function goLogin() {
-  router.push('/login')
 }
 </script>

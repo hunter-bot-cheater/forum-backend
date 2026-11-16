@@ -24,11 +24,22 @@ import (
 	"forum-backend/internal/keys"
 	"forum-backend/internal/metrics"
 	"forum-backend/internal/model"
+	"forum-backend/internal/paging"
+	"forum-backend/internal/textutil"
 )
 
 // 固定排序：排序片段写成常量，禁止把 c.Query("sort") 拼进 Order()。
 // 用户输入直接进 SQL 就是注入口，排序字段尤其容易漏，因为它的值没法用占位符代替。
 const articleListOrder = "created_at DESC, id DESC"
+
+// maxTitleRunes 是标题的字符上限，与 articles.title 的 varchar(128) 对齐。
+// varchar 在 MySQL 里按字符计，所以判断必须用字符而不是字节。
+const maxTitleRunes = 128
+
+// maxContentBytes 是正文的字节上限，与 articles.content 的 text 列对齐。
+// text 的上限是 65535 字节，取 50000 留出余量；按字节判是因为
+// 列本身按字节计，按字符放行会让 50000 个汉字（15 万字节）撞上列上限。
+const maxContentBytes = 50000
 
 // articleListColumns 是列表查询要取的列：不取 content 全文，只截开头当摘要。
 // 原因是一页 10 篇、单篇正文上限 50000 字节，取全文等于每次往内存搬几百 KB，
@@ -69,9 +80,11 @@ func (s *ArticleService) Create(ctx context.Context, userID uint, title, content
 	if title == "" || content == "" {
 		return nil, fmt.Errorf("%w: title and content are required", domain.ErrInvalidInput)
 	}
-	// 上限按字节算（Go 的 len 对字符串取字节数，中文一个字占 3 字节）。
-	// 正文 50000 字节够写长文，同时挡住「把整个文件贴进来」这类请求。
-	if len(title) > 128 || len(content) > 50000 {
+	// 标题按字符判：articles.title 是 varchar(128)，MySQL 按字符计，
+	// 用 len() 会把 43 个汉字误判成超长。
+	// 正文按字节判：articles.content 是 text，容量上限就是 65535 字节，
+	// 50000 字节留出余量，同时挡住「把整个文件贴进来」这类请求。
+	if textutil.TooLongRunes(title, maxTitleRunes) || textutil.TooLongBytes(content, maxContentBytes) {
 		return nil, fmt.Errorf("%w: title or content too long", domain.ErrInvalidInput)
 	}
 
@@ -101,11 +114,10 @@ func (s *ArticleService) Create(ctx context.Context, userID uint, title, content
 func (s *ArticleService) List(ctx context.Context, page, pageSize int) ([]*model.Article, int64, error) {
 	// handler 层已经用 httputil.ParsePage 校验过一遍，这里再校验是为了保住 service 的边界：
 	// 别的地方（比如以后的后台任务、命令行工具）直接调 service 时也不会传进非法值。
-	if page < 1 {
-		return nil, 0, fmt.Errorf("%w: page must be >= 1", domain.ErrInvalidInput)
-	}
-	if pageSize < 1 || pageSize > 50 {
-		return nil, 0, fmt.Errorf("%w: page_size must be between 1 and 50", domain.ErrInvalidInput)
+	// 规则统一走 paging.New，handler 与 service 共用一份上界，不会各写一个数字而漂移。
+	q, err := paging.New(page, pageSize)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	var total int64
@@ -126,12 +138,12 @@ func (s *ArticleService) List(ctx context.Context, page, pageSize int) ([]*model
 	// 第二个参数限定只取展示用的四列，别把密码哈希读进来（见 preloadAuthor）。
 	// Select 只取列表需要的列，正文只截开头（见 articleListColumns）。
 	// Offset 跳过前面几页，Limit 取当前页大小；排序由常量固定，不接收用户输入。
-	err := s.db.WithContext(ctx).
+	err = s.db.WithContext(ctx).
 		Select(articleListColumns).
 		Preload("User", preloadAuthor).
 		Order(articleListOrder).
-		Offset((page - 1) * pageSize).
-		Limit(pageSize).
+		Offset(q.Offset()).
+		Limit(q.PageSize).
 		Find(&articles).Error
 	if err != nil {
 		return nil, total, fmt.Errorf("list articles page=%d size=%d: %w", page, pageSize, err)

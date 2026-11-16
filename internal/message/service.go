@@ -15,7 +15,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -23,6 +22,8 @@ import (
 	"forum-backend/internal/domain"
 	"forum-backend/internal/event"
 	"forum-backend/internal/model"
+	"forum-backend/internal/paging"
+	"forum-backend/internal/textutil"
 	"forum-backend/internal/user"
 )
 
@@ -37,8 +38,8 @@ const maxContentRunes = 1000
 const maxClientMsgIDLen = 64
 
 // maxMessageLimit 是消息列表一次最多取多少条。
-// 和 httputil.ParsePage 的上限一致，避免出现「翻历史一页拉一千条」的请求。
-const maxMessageLimit = 50
+// 数值直接引用 paging.MaxPageSize：两处各写一个数字，改了一处就会漂。
+const maxMessageLimit = paging.MaxPageSize
 
 // Service 是私信模块的业务逻辑。
 // 展示信息统一从 user.Briefs 取，和关注、通知共用同一份口径。
@@ -95,14 +96,16 @@ func (s *Service) Send(ctx context.Context, senderID, receiverID uint, content, 
 	if content == "" {
 		return nil, fmt.Errorf("%w: content is required", domain.ErrInvalidInput)
 	}
-	if utf8.RuneCountInString(content) > maxContentRunes {
+	// 内容与幂等键都是 varchar 列，MySQL 按字符计，判断也必须按字符。
+	// 统一走 textutil，调用点一眼能看出单位，不会有人再把 len() 当字符用。
+	if textutil.TooLongRunes(content, maxContentRunes) {
 		return nil, fmt.Errorf("%w: content exceeds %d characters", domain.ErrInvalidInput, maxContentRunes)
 	}
 
 	// 幂等键按「没传」和「传了」两种情况走两条路，数据库里必须存 NULL 而不是 ''，
 	// 否则空串会撞上唯一索引（原因见 model.Message.ClientMsgID 的注释）。
 	clientMsgID = strings.TrimSpace(clientMsgID)
-	if utf8.RuneCountInString(clientMsgID) > maxClientMsgIDLen {
+	if textutil.TooLongRunes(clientMsgID, maxClientMsgIDLen) {
 		return nil, fmt.Errorf("%w: client_msg_id exceeds %d characters", domain.ErrInvalidInput, maxClientMsgIDLen)
 	}
 	var key *string
@@ -219,7 +222,8 @@ func findMessageByClientID(tx *gorm.DB, convID uint, clientMsgID string, current
 //
 // 固定 3 次查询：总数、当前页会话、批量取对方信息与最后一条消息，与页大小无关。
 func (s *Service) Conversations(ctx context.Context, userID uint, page, pageSize int) ([]ConversationItem, int64, error) {
-	if err := validatePaging(page, pageSize); err != nil {
+	q, err := paging.New(page, pageSize)
+	if err != nil {
 		return nil, 0, err
 	}
 
@@ -235,10 +239,10 @@ func (s *Service) Conversations(ctx context.Context, userID uint, page, pageSize
 	}
 
 	// 初始化成空切片：页越界时 Find 不填充，JSON 仍是 [] 而不是 null。
-	convs := make([]model.Conversation, 0, pageSize)
-	err := mine(s.db.WithContext(ctx)).
+	convs := make([]model.Conversation, 0, q.PageSize)
+	err = mine(s.db.WithContext(ctx)).
 		Order("last_message_at DESC, id DESC").
-		Offset((page - 1) * pageSize).Limit(pageSize).
+		Offset(q.Offset()).Limit(q.PageSize).
 		Find(&convs).Error
 	if err != nil {
 		return nil, 0, fmt.Errorf("list conversations: %w", err)
@@ -410,9 +414,23 @@ func (s *Service) MarkRead(ctx context.Context, userID, peerID uint) (int64, err
 		}
 		cleared = res.RowsAffected
 
+		// 未读数按「减去这次真正清掉的行数」算，而不是直接置 0。
+		//
+		// 竞态是这样发生的：本事务先把 read_at 更新完、拿到 cleared=5，
+		// 同一时刻对方发来第 6 条，Send 那边的 unread 已经变成 6。
+		// 此时无条件置 0，第 6 条的红点就被这次「标记已读」吃掉了，
+		// 用户看到的是会话里有一条没读的消息，列表上却没有红点。
+		// 减掉 cleared 只会清掉属于自己的那 5 条，新到的那条留着。
+		//
+		// GREATEST 兜住负数：计数被人工改小、或者历史上写入过不一致的值时，
+		// unread - cleared 可能是负的，负数会让角标显示 -1。
+		//
+		// 取舍：如果 unread 比真实未读消息多（脏数据），减完会残留一个消不掉的红点。
+		// 相比「悄悄丢一条新消息的红点」，残留一个偏大的数字更容易被发现和修复。
+		column := unreadColumn(conv, userID)
 		if err := tx.Model(&model.Conversation{}).Where("id = ?", conv.ID).
-			Update(unreadColumn(conv, userID), 0).Error; err != nil {
-			return fmt.Errorf("reset unread: %w", err)
+			Update(column, gorm.Expr("GREATEST("+column+" - ?, 0)", cleared)).Error; err != nil {
+			return fmt.Errorf("decrease unread: %w", err)
 		}
 		return nil
 	})
@@ -556,18 +574,6 @@ func unreadColumn(conv *model.Conversation, userID uint) string {
 // 中间的空格与换行保留：用户可能故意用空行分段。
 func normalizeContent(s string) string {
 	return strings.TrimSpace(s)
-}
-
-// validatePaging 校验会话列表的分页参数。
-//
-// 和 httputil.ParsePage 的上限保持一致，但这里再判一次：
-// service 可能被别的入口调用（以后的 WebSocket、后台脚本），
-// 不能指望每个调用方都先过一遍 HTTP 层的解析。
-func validatePaging(page, pageSize int) error {
-	if page < 1 || pageSize < 1 || pageSize > maxMessageLimit {
-		return fmt.Errorf("%w: invalid pagination", domain.ErrInvalidInput)
-	}
-	return nil
 }
 
 // validateMessageQuery 校验消息列表的游标参数。

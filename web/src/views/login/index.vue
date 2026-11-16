@@ -1,38 +1,39 @@
 <template>
-  <div class="auth-container">
-    <el-card class="auth-card">
-      <h2 style="text-align: center; margin-top: 0">登录</h2>
-      <el-form
-        ref="formRef"
-        :model="form"
-        :rules="rules"
-        label-width="80px"
-        @keyup.enter="onSubmit"
-      >
-        <el-form-item label="用户名" prop="username">
-          <el-input v-model="form.username" placeholder="3-32 位字母数字下划线" />
-        </el-form-item>
-        <el-form-item label="密码" prop="password">
-          <el-input
-            v-model="form.password"
-            type="password"
-            show-password
-            placeholder="8-72 位"
-          />
-        </el-form-item>
-        <el-form-item>
-          <el-button type="primary" :loading="loading" @click="onSubmit">登录</el-button>
-          <el-button @click="goRegister">去注册</el-button>
-        </el-form-item>
-      </el-form>
-    </el-card>
-  </div>
+  <AuthCard title="欢迎回来" subtitle="登录后可以参与讨论、关注作者、收发私信。">
+    <el-form
+      ref="formRef"
+      :model="form"
+      :rules="rules"
+      size="large"
+      @keyup.enter="onSubmit"
+    >
+      <el-form-item prop="username">
+        <el-input v-model="form.username" placeholder="用户名" :prefix-icon="User" />
+      </el-form-item>
+      <el-form-item prop="password">
+        <el-input
+          v-model="form.password"
+          type="password"
+          show-password
+          placeholder="密码"
+          :prefix-icon="Lock"
+        />
+      </el-form-item>
+      <el-button type="primary" :loading="loading" @click="onSubmit">登录</el-button>
+    </el-form>
+
+    <template #foot>
+      还没有账号？<router-link to="/register">立即注册</router-link>
+    </template>
+  </AuthCard>
 </template>
 
 <script setup lang="ts">
 import { reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { Lock, User } from '@element-plus/icons-vue'
+import AuthCard from '@/components/AuthCard.vue'
 import { useUserStore } from '@/store/modules/user'
 
 const router = useRouter()
@@ -58,9 +59,5 @@ async function onSubmit() {
   } finally {
     loading.value = false
   }
-}
-
-function goRegister() {
-  router.push('/register')
 }
 </script>

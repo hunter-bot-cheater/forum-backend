@@ -8,6 +8,7 @@ import {
   type ConversationResp,
   type MessageResp,
 } from '@/api/message'
+import { onLogout } from '@/utils/auth'
 import { onFrame, onReconnect } from '@/utils/ws'
 
 // 私信的全局状态：会话列表 + 总未读。
@@ -41,6 +42,19 @@ export const useImStore = defineStore('im', () => {
 
   // inflight 是正在进行的会话列表请求，用来合并并发调用（见 refresh 的注释）。
   let inflight: Promise<void> | null = null
+
+  // requestSeq 是「同一类请求」的代次：只接受最后发出的那一次结果。
+  // 没有它的话，两次并发 refresh 回来的顺序不定，旧的会覆盖新的。
+  let requestSeq = 0
+
+  // sessionSeq 是「登录会话」的代次：登出时加一，此后所有在途请求的结果全部作废。
+  // 没有它的话：退出登录的瞬间正在飞的那个 GET /conversations 回来，
+  // 会把上一个账号的会话列表写进已经清空的 store，下一个登录的人直接看到别人的私信。
+  //
+  // 为什么不用一个代次搞定两件事：一次正常的列表刷新会把它加一，
+  // 同时在飞的「未读数刷新」就会被误判成过期，角标偶尔不更新。
+  // 两个概念分开之后，刷新列表只影响列表，登出才影响全部。
+  let sessionSeq = 0
 
   const hasUnread = computed(() => totalUnread.value > 0)
 
@@ -93,32 +107,52 @@ export const useImStore = defineStore('im', () => {
     if (inflight) {
       return inflight
     }
-    inflight = loadConversations()
+    const task = loadConversations()
+    inflight = task
     try {
-      await inflight
+      await task
     } finally {
-      inflight = null
+      // 只清自己这一次的标记：reset 之后可能有新请求已经接管了 inflight，
+      // 无条件置空会把新请求的合并标记提前清掉。
+      if (inflight === task) {
+        inflight = null
+      }
     }
   }
 
   async function loadConversations() {
+    requestSeq += 1
+    const seq = requestSeq
+    const session = sessionSeq
     loading.value = true
     try {
       const [list, unread] = await Promise.all([listConversations(1, 50), getUnreadTotal()])
+      // 两个条件都要满足：自己是最后发出的那次请求，且期间没有登出。
+      if (seq !== requestSeq || session !== sessionSeq) {
+        return
+      }
       conversations.value = list.list
       totalUnread.value = unread.unread
       loaded.value = true
     } catch {
       // 失败保留旧数据。请求拦截器已经弹过提示，这里再抛会让页面报错白屏。
     } finally {
-      loading.value = false
+      if (seq === requestSeq && session === sessionSeq) {
+        loading.value = false
+      }
     }
   }
 
   // refreshUnread 只刷总未读数，用于「本地算不准」的兜底场景。
   async function refreshUnread() {
+    // 只看会话代次，不看请求代次：它和列表刷新是两件独立的事，
+    // 同时进行时不该因为对方发了新请求就把自己的结果丢掉。
+    const session = sessionSeq
     try {
       const data = await getUnreadTotal()
+      if (session !== sessionSeq) {
+        return
+      }
       totalUnread.value = data.unread
     } catch {
       // 同上，角标短暂不准可以接受。
@@ -209,11 +243,23 @@ export const useImStore = defineStore('im', () => {
   }
 
   // reset 在登出时清空：不清理的话下一个人登录会先看到上一个人的会话列表。
+  //
+  // 两个代次各自加一：
+  //   - sessionSeq 让所有在途请求的结果作废（这是本函数的主要目的）；
+  //   - requestSeq 让 inflight 里那个旧任务的 finally 不再有资格清标记。
   function reset() {
+    sessionSeq += 1
+    requestSeq += 1
+    inflight = null
     conversations.value = []
     totalUnread.value = 0
+    loading.value = false
     loaded.value = false
   }
+
+  // 登出（含 token 过期）时清空账号数据。
+  // 注册一次即可：store 是单例，setup 只跑一次。
+  onLogout(reset)
 
   return {
     conversations,

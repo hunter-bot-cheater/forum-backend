@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"strconv"
-	"time"
 
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
@@ -22,9 +20,6 @@ const (
 	// pushTypeMessageCreated 是推给前端的消息类型。
 	// 前端按它分发：message.created 追加气泡，notification.created 更新红点。
 	pushTypeMessageCreated = "message.created"
-
-	pushReadBlock = 2 * time.Second // 等新事件时最多阻塞多久，顺便当退出检查点
-	pushBatchSize = 20              // 一次最多取多少条，控制单轮处理时长
 )
 
 // PushWorker 把 message.created 事件推给收件人的在线连接。
@@ -65,65 +60,25 @@ func NewPushWorker(db *gorm.DB, rdb *redis.Client, hub *realtime.Hub, users *use
 	}
 }
 
-// Run 建好消费组后循环消费，ctx 取消后退出，由 main 的 WaitGroup 等它收尾。
+// Run 消费事件直到 ctx 取消，由 main 的 WaitGroup 等它收尾。
+//
+// 循环骨架（建组、补 PEL、取新消息、成功才 ACK、读失败退避）在 event.Consumer，
+// 这里只声明本实例的组名与处理函数。
+//
+// FromStart 为 false：消费组从 "$" 开始，只接收建组之后产生的事件。
+// 推送是尽力而为，用户不在线就跳过，他下次打开聊天页会从 MySQL 拉完整历史；
+// 用 "0" 的代价是每次部署都把整个 Stream 重放一遍，把几天前的消息重新推给在线用户。
 func (w *PushWorker) Run(ctx context.Context) {
-	// "$" 表示只接收本组创建之后产生的事件。
-	// 推送是尽力而为：用户不在线就跳过，他下次打开聊天页会从 MySQL 拉完整历史。
-	// 用 "0" 的代价是每次部署都把整个 Stream 重放一遍，把几天前的消息重新推给在线用户。
-	_ = w.rdb.XGroupCreateMkStream(ctx, event.StreamKey, w.group, "$").Err()
-
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		// 先补处理 PEL（上次读走但没 ACK 的），再取新消息。
-		w.consume(ctx, "0")
-		w.consume(ctx, ">")
+	c := &event.Consumer{
+		RDB:       w.rdb,
+		Stream:    event.StreamKey,
+		Group:     w.group,
+		Name:      w.consumer,
+		Handler:   w.handle,
+		FromStart: false,
+		LogTag:    "message push",
 	}
-}
-
-// consume 读一批消息逐条处理，成功才 ACK。
-// start 为 "0" 表示重读 PEL，为 ">" 表示只要从未投递给本组的新消息。
-func (w *PushWorker) consume(ctx context.Context, start string) {
-	// 读 PEL 时 PEL 可能本来就是空的，阻塞两秒纯属白等，传 -1 立即返回。
-	block := pushReadBlock
-	if start == "0" {
-		block = -1
-	}
-
-	streams, err := w.rdb.XReadGroup(ctx, &redis.XReadGroupArgs{
-		Group:    w.group,
-		Consumer: w.consumer,
-		Streams:  []string{event.StreamKey, start},
-		Count:    pushBatchSize,
-		Block:    block,
-	}).Result()
-	// redis.Nil 是「阻塞超时、没有新消息」，属于正常情况。
-	if errors.Is(err, redis.Nil) {
-		return
-	}
-	if err != nil {
-		if ctx.Err() != nil {
-			return // 退出过程中断开连接，不当作故障
-		}
-		slog.ErrorContext(ctx, "message push read group", "from", start, "error", err)
-		return
-	}
-
-	for _, stream := range streams {
-		for _, msg := range stream.Messages {
-			if err := w.handle(ctx, msg); err != nil {
-				// 不 ACK，消息留在 PEL 下一轮重试。
-				// 重推同一条消息只会让前端多收一帧，前端按 message.id 去重即可；
-				// 反过来「ACK 了但没推」会让在线用户看不到这条，必须重进页面才发现。
-				slog.ErrorContext(ctx, "message push handle", "message_id", msg.ID, "error", err)
-				continue
-			}
-			if err := w.rdb.XAck(ctx, event.StreamKey, w.group, msg.ID).Err(); err != nil {
-				slog.ErrorContext(ctx, "message push ack", "message_id", msg.ID, "error", err)
-			}
-		}
-	}
+	c.Run(ctx)
 }
 
 // handle 把一条事件变成一次 WebSocket 推送。
