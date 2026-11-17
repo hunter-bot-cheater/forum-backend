@@ -16,6 +16,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"forum-backend/internal/domain"
+	"forum-backend/internal/event"
 	"forum-backend/internal/metrics"
 	"forum-backend/internal/model"
 	"forum-backend/internal/paging"
@@ -82,13 +83,33 @@ func (s *Service) Follow(ctx context.Context, followerID, followeeID uint) (*Sta
 		return nil, err
 	}
 
+	// 关系与事件必须写进同一个事务：发通知的意图要和「关注成立」一起提交。
+	// 分成两次写的话，进程挂在中间就会出现「关注成功但对方永远收不到通知」；
+	// 反过来先发事件再建关系，则可能通知已经到了、关系却没建立。
+	//
 	// ON DUPLICATE KEY DO NOTHING：并发重复请求由唯一索引挡住，
 	// 谁先插入谁生效，后来的那条静默跳过，不会报错也不会多一行。
 	// RowsAffected 为 0 说明这次是重复关注，用它填 Changed 让前端知道关系没变。
 	row := model.Follow{FollowerID: followerID, FolloweeID: followeeID}
-	res := s.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
-	if res.Error != nil {
-		return nil, fmt.Errorf("follow user %d: %w", followeeID, res.Error)
+	created := false
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&row)
+		if res.Error != nil {
+			return fmt.Errorf("follow user %d: %w", followeeID, res.Error)
+		}
+		if res.RowsAffected == 0 {
+			// 重复关注：关系没变，事务正常提交，但不发第二条通知。
+			// 连点两下都发的话，对方会平白多一个红点，点进去却只有同一个人。
+			return nil
+		}
+		created = true
+		// Target 填被关注的人：消费端直接用它当收件人，不必回查关注表。
+		// Created 留空，关注没有对应的实体，通知点开只需要知道「是谁」。
+		return event.EmitCreated(ctx, tx, event.TypeFollowCreated, followerID,
+			event.Target{Type: event.TargetUser, ID: followeeID}, nil)
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	// 写完之后重新数一次，而不是在旧值上 +1：
@@ -102,10 +123,10 @@ func (s *Service) Follow(ctx context.Context, followerID, followeeID uint) (*Sta
 	// 关系真的变了才需要清缓存：重复关注没有改任何数据，计数也没变，
 	// 白删一次只会让下一次读多走一趟数据库。
 	// 两个人都要删：关注者少了一个「关注数」，被关注者多了一个「粉丝数」。
-	if res.RowsAffected > 0 {
+	if created {
 		s.invalidateStats(ctx, followerID, followeeID)
 	}
-	return &State{Following: true, FollowerCount: count, Changed: res.RowsAffected > 0}, nil
+	return &State{Following: true, FollowerCount: count, Changed: created}, nil
 }
 
 // Unfollow 解除关注，本来就没关注时同样返回成功。

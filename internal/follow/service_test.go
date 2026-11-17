@@ -8,6 +8,7 @@ import (
 	"gorm.io/gorm"
 
 	"forum-backend/internal/domain"
+	"forum-backend/internal/event"
 	"forum-backend/internal/model"
 	"forum-backend/internal/testutil"
 	"forum-backend/internal/user"
@@ -303,5 +304,86 @@ func TestListSkipsDeletedUser(t *testing.T) {
 	}
 	if len(items) != 0 {
 		t.Errorf("本页条数 = %d，期望 0", len(items))
+	}
+}
+
+// loadOutbox 按插入顺序读出全部发件箱事件。
+// 直接查 MySQL 而不是看 Redis：这里要验证的是「事件有没有产生」，
+// relay 什么时候把它搬进 Stream 是另一条链路，混在一起会让失败原因变模糊。
+func loadOutbox(t *testing.T, db *gorm.DB) []model.OutboxEvent {
+	t.Helper()
+
+	rows := make([]model.OutboxEvent, 0)
+	if err := db.Order("id ASC").Find(&rows).Error; err != nil {
+		t.Fatalf("读取发件箱失败: %v", err)
+	}
+	return rows
+}
+
+// TestFollowEmitsNotificationEvent 验证关注成功时写下一条 follow.created。
+//
+// 通知中心为关注准备好了整条消费链路（分类、收件人、跳转目标），
+// 之前唯一缺的就是这里不发事件，表现是「关注了人，对方永远收不到通知」。
+// 没有这个用例，谁把 EmitCreated 删掉都不会报任何错。
+func TestFollowEmitsNotificationEvent(t *testing.T) {
+	f := newFollowFixture(t)
+	ctx := context.Background()
+
+	if _, err := f.svc.Follow(ctx, f.alice.ID, f.bob.ID); err != nil {
+		t.Fatalf("关注失败: %v", err)
+	}
+
+	rows := loadOutbox(t, f.db)
+	if len(rows) != 1 {
+		t.Fatalf("发件箱有 %d 条事件，期望 1 条", len(rows))
+	}
+	row := rows[0]
+	if row.EventType != event.TypeFollowCreated {
+		t.Errorf("事件类型 = %q，期望 %q", row.EventType, event.TypeFollowCreated)
+	}
+	// 聚合类型与 id 决定排查时能不能从事件直接反查到被关注的人。
+	if row.AggregateType != event.TargetUser || row.AggregateID != f.bob.ID {
+		t.Errorf("聚合 = %s/%d，期望 user/%d", row.AggregateType, row.AggregateID, f.bob.ID)
+	}
+
+	p, err := event.Decode(row.Payload)
+	if err != nil {
+		t.Fatalf("解码事件失败: %v", err)
+	}
+	if p.ActorID != f.alice.ID {
+		t.Errorf("actor = %d，期望关注者 %d", p.ActorID, f.alice.ID)
+	}
+	if p.Target.Type != event.TargetUser || p.Target.ID != f.bob.ID {
+		t.Errorf("target = %s/%d，期望 user/%d", p.Target.Type, p.Target.ID, f.bob.ID)
+	}
+	// 关注没有新建实体，带上 Created 只会让消费端多一个没有意义的分支。
+	if p.Created != nil {
+		t.Errorf("关注事件不该带 Created，实际 %+v", *p.Created)
+	}
+}
+
+// TestRepeatFollowEmitsOnce 验证重复关注不再发通知，取关也不撤回已发的。
+//
+// 重复关注是常态（连点、失败重试），每次都发的话对方会看到一串同一个人的红点。
+// 取关不回头删通知：通知记录的是「当时有人关注了你」这件事，
+// 关系后来解除了，也不该让这条历史凭空消失。
+func TestRepeatFollowEmitsOnce(t *testing.T) {
+	f := newFollowFixture(t)
+	ctx := context.Background()
+
+	for i := 1; i <= 2; i++ {
+		if _, err := f.svc.Follow(ctx, f.alice.ID, f.bob.ID); err != nil {
+			t.Fatalf("第 %d 次关注失败: %v", i, err)
+		}
+	}
+	if got := len(loadOutbox(t, f.db)); got != 1 {
+		t.Fatalf("重复关注后事件数 = %d，期望 1", got)
+	}
+
+	if _, err := f.svc.Unfollow(ctx, f.alice.ID, f.bob.ID); err != nil {
+		t.Fatalf("取关失败: %v", err)
+	}
+	if got := len(loadOutbox(t, f.db)); got != 1 {
+		t.Fatalf("取关后事件数 = %d，期望仍是 1", got)
 	}
 }

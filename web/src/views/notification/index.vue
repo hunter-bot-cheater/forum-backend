@@ -56,10 +56,10 @@
               @click.stop="goUser(item)"
             >{{ initialOf(item) }}</el-avatar>
             <span
-              v-if="kindOf(item)"
+              v-if="badgeOf(item)"
               class="nt__kind"
               :class="'is-' + kindOf(item)"
-            >{{ kindOf(item) === 'like' ? '赞' : '评' }}</span>
+            >{{ badgeOf(item) }}</span>
           </div>
 
           <div class="nt__body">
@@ -110,12 +110,13 @@ import type { NotificationKind, NotificationResp } from '@/api/notification'
 const router = useRouter()
 const store = useNotificationStore()
 
-// 分类固定三项：关注事件还没接，先不摆一个永远为空的 tab。
-// 以后接入 follow.created 时，这里加一行即可，后端已经把分类算好了。
+// 分类与后端 KindLike / KindComment / KindFollow 一一对应。
+// 顺序按互动频率排：赞最多、评论次之、关注最少，最常看的一类放最左边。
 const tabs: { label: string; kind: NotificationKind }[] = [
   { label: '全部', kind: '' },
   { label: '赞', kind: 'like' },
   { label: '评论', kind: 'comment' },
+  { label: '关注', kind: 'follow' },
 ]
 
 // 顶部胶囊用全站未读，tab 用本分类未读，两个数字口径不同不能混用。
@@ -165,18 +166,37 @@ function initialOf(item: NotificationResp): string {
   return initials(nameOf(item))
 }
 
-// kindOf 把事件类型归成角标要显示的两种。
+// kindOf 把事件类型归成角标要用的分类。
 // 只用于角标的颜色与单字，文案仍由 actionOf 负责：
 // 两者用途不同，合并会让「回复了你的评论」被压成「评论」两个字。
 //
-// 未识别的类型返回空串，不画角标：关注类事件没有「赞/评」可言，
-// 硬归成评论会在头像上标一个错的字。
-function kindOf(item: NotificationResp): 'like' | 'comment' | '' {
+// 未识别的类型返回空串，不画角标：新事件类型接进来时，
+// 硬归成某一类会在头像上标一个错字，比暂时没有角标更糟。
+function kindOf(item: NotificationResp): 'like' | 'comment' | 'follow' | '' {
   if (item.type === 'like.created') {
     return 'like'
   }
   if (item.type === 'comment.created') {
     return 'comment'
+  }
+  if (item.type === 'follow.created') {
+    return 'follow'
+  }
+  return ''
+}
+
+// badgeOf 给出角标里的那个字。三个分类各一个字，
+// 一列通知扫下去靠颜色和这个字就能分出是赞、是评论还是新粉丝。
+function badgeOf(item: NotificationResp): string {
+  const kind = kindOf(item)
+  if (kind === 'like') {
+    return '赞'
+  }
+  if (kind === 'comment') {
+    return '评'
+  }
+  if (kind === 'follow') {
+    return '关'
   }
   return ''
 }
@@ -199,6 +219,9 @@ function actionOf(item: NotificationResp): string {
     }
     return '评论了你的文章'
   }
+  if (item.type === 'follow.created') {
+    return '关注了你'
+  }
   return '和你互动了'
 }
 
@@ -216,10 +239,17 @@ function goUser(item: NotificationResp) {
 // 回复类通知能指到具体那一条，所以带上 ?comment=<id>，由详情页翻页并高亮；
 // 点赞、以及「评论了你的文章」（target_type=article，指整篇文章）没有具体评论可指，
 // 直接进文章。comment.created 的两种含义看 target_type 分，见 actionOf。
+//
+// 关注类通知没有文章可跳（article_id 为 0），落点是触发者的主页：
+// 收到「谁关注了我」之后最自然的动作是去看看这个人是谁。
 function openTarget(item: NotificationResp) {
   // 点开即已读：只清这一条的红点，不像「全部已读」那样把没看的也一起清。
   // 不 await：紧接着就要跳转，红点本地已经先消掉了。
   void store.markRead(item.id)
+  if (item.type === 'follow.created') {
+    goUser(item)
+    return
+  }
   if (item.article_id <= 0) {
     return
   }
@@ -413,13 +443,19 @@ function onPage(next: number) {
   line-height: 1;
 }
 
-/* 赞用暖红、评论用主色：整站只有这两支有语义的颜色，不再引入第三种。 */
+/* 赞用暖红、评论用主色：页面上有色相的就这两支。
+   关注没有「内容」或「热度」的含义，借哪一支都会误导，
+   所以用中性深灰，靠明度区分而不是再加一种色相。 */
 .nt__kind.is-like {
   background: var(--fs-like);
 }
 
 .nt__kind.is-comment {
   background: var(--fs-primary);
+}
+
+.nt__kind.is-follow {
+  background: var(--fs-text-2);
 }
 
 .nt__body {
