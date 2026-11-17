@@ -496,13 +496,18 @@ docker compose build
 
 如果中途报 `signal: killed` 或 `exit code: 137`，是内存不够，处理办法见第 15 节。
 
-构建前先建好放用户头像的目录：
+构建前先建好放用户头像的目录，并把属主改成容器里跑服务的那个用户：
 
 ```bash
 mkdir -p uploads
+sudo chown -R 10001:10001 uploads
 ```
 
-compose 里把它挂给了 api（可写）和 web（只读）。不建的话 Docker 会以 root 自动创建一个，能跑，但权限和属主由 Docker 决定，以后想用普通用户排查会别扭；自己先建一次省事。
+`10001` 是 `Dockerfile` 里 `adduser -D -u 10001 forum` 给容器用户定的 uid。api 进程以非 root 运行，目录要是留在 `root:root` 的 755 上，它创建 `avatars/2026/11/` 这一步就会 `permission denied`，上传接口直接 500。
+
+这个坑只在 Linux 服务器上出现：本机 Docker Desktop（Windows / macOS）的 bind mount 不校验 POSIX 权限，本地传得好好的，一上服务器就不行。少了 `chown`，第 12 节「头像能上传」那条会红，排查时还得进容器 `ls -l` 才看得出来。
+
+compose 里把它挂给了 api（可写）和 web（只读，Nginx 直接从盘上吐文件）。不自己建目录的话 Docker 会用 root 创建一次，同样得补这条 `chown`。
 
 这个目录**不在 git 里**（`.gitignore` 已忽略），也不会随镜像一起打包——它是运行时数据，重建镜像、`git pull` 都不会动它。
 
