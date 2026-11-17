@@ -197,7 +197,7 @@ func (s *Service) SaveAvatar(r io.Reader) (*Saved, error) {
 	// 否则一张 50000×50000 的 PNG 会先把内存吃光再谈校验。
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(raw))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnsupported, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnsupported, err)
 	}
 	if !supportedFormat(format) {
 		return nil, fmt.Errorf("%w: %s", ErrUnsupported, format)
@@ -211,7 +211,7 @@ func (s *Service) SaveAvatar(r io.Reader) (*Saved, error) {
 
 	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnsupported, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnsupported, err)
 	}
 
 	// JPEG 的方向信息在 EXIF 里，image.Decode 不认。
