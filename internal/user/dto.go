@@ -108,6 +108,28 @@ func toProfileResp(u *model.User, following, followers int64, isFollowing bool) 
 	}
 }
 
+// meResp 是 GET/PUT /users/me 的 data：自己的资料，外加一个身份标记。
+//
+// 没有把 is_admin 放进 profileResp，是因为两者的主语不同：
+// profileResp 描述「主页上这个人是谁」，而 is_admin 描述的是「当前登录者
+// 能做什么」。公开主页也返回 profileResp，在那里带上这个字段会被读成
+// 「这个人是管理员」，实际取的却是查看者自己的身份，迟早被误用。
+//
+// 内嵌而不是抄字段，理由同上面的 profileResp：userResp 以后加字段时
+// 这里自动跟着变。
+type meResp struct {
+	profileResp
+	// IsAdmin 来自配置里的 admin.user_ids，不是数据库字段：
+	// 管理员是部署者定的，不给用户表加一个能被注册流程写到的列。
+	IsAdmin bool `json:"is_admin"`
+}
+
+// toMeResp 给一份已经组装好的资料补上查看者身份。
+// isAdmin 由 handler 用白名单查好传入，这个函数不发请求也不读配置。
+func toMeResp(p profileResp, isAdmin bool) meResp {
+	return meResp{profileResp: p, IsAdmin: isAdmin}
+}
+
 // toUserResp 把数据库模型转换成对外结构体。
 // 转换只发生在 handler 层：service 继续只认识 model.User，
 // 不需要 import handler 包，依赖方向保持单向。

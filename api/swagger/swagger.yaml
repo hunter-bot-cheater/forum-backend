@@ -672,6 +672,40 @@ definitions:
       user:
         $ref: '#/definitions/user.userResp'
     type: object
+  user.meResp:
+    properties:
+      avatar_url:
+        type: string
+      bio:
+        type: string
+      created_at:
+        type: string
+      follower_count:
+        type: integer
+      following_count:
+        type: integer
+      has_custom_nickname:
+        description: |-
+          HasCustomNickname 表示用户在库里真的设过昵称。
+          Nickname 是展示名（空时已回退成 Username），光看它分不清
+          「用户设了昵称且刚好等于用户名」和「用户没设昵称」。
+          个人中心的编辑表单靠这个布尔值决定输入框回填昵称还是回填空串。
+        type: boolean
+      id:
+        type: integer
+      is_admin:
+        description: |-
+          IsAdmin 来自配置里的 admin.user_ids，不是数据库字段：
+          管理员是部署者定的，不给用户表加一个能被注册流程写到的列。
+        type: boolean
+      is_following:
+        description: IsFollowing 表示当前登录用户是否关注了这个人，未登录时固定 false。
+        type: boolean
+      nickname:
+        type: string
+      username:
+        type: string
+    type: object
   user.profileResp:
     properties:
       avatar_url:
@@ -2176,7 +2210,7 @@ paths:
             - $ref: '#/definitions/httputil.SwaggerEnvelope'
             - properties:
                 data:
-                  $ref: '#/definitions/user.profileResp'
+                  $ref: '#/definitions/user.meResp'
               type: object
         "401":
           description: 未登录

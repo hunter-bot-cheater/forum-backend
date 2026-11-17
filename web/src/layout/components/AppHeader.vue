@@ -52,6 +52,9 @@
             <el-dropdown-menu>
               <el-dropdown-item command="profile">我的主页</el-dropdown-item>
               <el-dropdown-item command="settings">编辑资料</el-dropdown-item>
+              <!-- 只有白名单里的账号才看到这一项。isAdmin 来自 /users/me 的
+                   is_admin，未加载完时是 false，所以刷新后这一项会晚几百毫秒出现。 -->
+              <el-dropdown-item v-if="userStore.isAdmin" command="admin">管理后台</el-dropdown-item>
               <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
             </el-dropdown-menu>
           </template>
@@ -132,6 +135,9 @@ function onCommand(command: string) {
   if (command === 'settings') {
     goSettings()
   }
+  if (command === 'admin') {
+    goAdmin()
+  }
 }
 
 // 下拉里的「我的主页」要拼自己的 id。profile 还没拉回来时 userId 是 0，
@@ -147,6 +153,13 @@ function goProfile() {
 // 编辑资料页自己从 store / 接口取资料，不需要 id，任何时候都能进。
 function goSettings() {
   void router.push('/settings/profile')
+}
+
+// 管理后台。菜单项已经按 isAdmin 过滤，这里不再判一次：
+// 就算有人手动敲 /admin，页面会显示「只有管理员能打开」，
+// 后端接口也会 403，前端这层判断只是为了不让入口出现在普通用户面前。
+function goAdmin() {
+  void router.push('/admin')
 }
 
 // 写文章是登录后才能做的事。这里不自己判 token，交给路由守卫：

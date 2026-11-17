@@ -53,7 +53,14 @@ func newUserRouter(svc *UserService, loginAs uint) *gin.Engine {
 
 // newUserRouterWithStats 与 newUserRouter 相同，但允许指定关注统计的返回值。
 func newUserRouterWithStats(svc *UserService, loginAs uint, stats FollowStats) *gin.Engine {
-	h := NewUserHandler(svc, nil, nil, stats)
+	// 默认按「不是管理员」装配：绝大多数用例不关心这个身份，
+	// 只有专门测 is_admin 的用例才用下面那个能指定白名单的版本。
+	return newUserRouterWithAdmin(svc, loginAs, stats, func(uint) bool { return false })
+}
+
+// newUserRouterWithAdmin 允许指定管理员判定，用来测 /users/me 的 is_admin。
+func newUserRouterWithAdmin(svc *UserService, loginAs uint, stats FollowStats, isAdmin func(uint) bool) *gin.Engine {
+	h := NewUserHandler(svc, nil, nil, stats, isAdmin)
 	r := gin.New()
 	r.GET("/api/users/:id", h.Detail)
 	r.GET("/api/users/me", asUser(loginAs), h.Me)
@@ -278,9 +285,72 @@ func TestUpdateMeReturnsProfileShape(t *testing.T) {
 	}
 }
 
-// TestUpdateMeClearNicknameRoundTrip 验证「清空昵称」这条链路是自洽的。
+// TestMeReportsAdminFlag 验证 /users/me 的 is_admin 跟白名单判定一致。
 //
-// 传空串后：库里存空串，响应 nickname 回退成用户名，同时 has_custom_nickname 变 false。
+// 前端用户菜单靠这个字段决定要不要显示「管理后台」入口：判错了，
+// 普通用户点进去只会看到 403 的空页，而真正的管理员根本找不到入口。
+func TestMeReportsAdminFlag(t *testing.T) {
+	db := testutil.NewDB(t)
+	u := testutil.SeedUser(t, db, "admin_flag")
+	svc := NewUserService(db)
+
+	// 同一个人、同一个接口，只换判定函数：分数来自白名单，与用户自身数据无关。
+	asAdmin := newUserRouterWithAdmin(svc, u.ID, stubFollowStats{}, func(id uint) bool { return id == u.ID })
+	w, env := do(t, asAdmin, http.MethodGet, "/api/users/me", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d，期望 200, body=%s", w.Code, w.Body.String())
+	}
+	var admin struct {
+		IsAdmin bool `json:"is_admin"`
+	}
+	if err := json.Unmarshal(env.Data, &admin); err != nil {
+		t.Fatalf("解析 data 失败: %v", err)
+	}
+	if !admin.IsAdmin {
+		t.Error("is_admin = false，期望 true")
+	}
+
+	// 不在白名单里：同一个用户必须拿到 false，
+	// 而不是因为「资料里刚好有个字段」被带出来。
+	asUserRouter := newUserRouter(svc, u.ID)
+	_, env = do(t, asUserRouter, http.MethodGet, "/api/users/me", "")
+	var normal struct {
+		IsAdmin bool `json:"is_admin"`
+	}
+	if err := json.Unmarshal(env.Data, &normal); err != nil {
+		t.Fatalf("解析 data 失败: %v", err)
+	}
+	if normal.IsAdmin {
+		t.Error("is_admin = true，期望 false")
+	}
+}
+
+// TestPublicProfileHasNoAdminFlag 验证公开主页不暴露 is_admin。
+//
+// 这个字段的主语是「查看者」，不是「主页上这个人」。如果它跟着 profileResp
+// 一起出现，看别人的主页时会被读成「这个人是管理员」——语义完全错了。
+func TestPublicProfileHasNoAdminFlag(t *testing.T) {
+	db := testutil.NewDB(t)
+	me := testutil.SeedUser(t, db, "viewer")
+	target := testutil.SeedUser(t, db, "someone")
+	// 把自己设成管理员，确保「字段没被带出来」不是因为刚好没人有权限。
+	r := newUserRouterWithAdmin(NewUserService(db), me.ID, stubFollowStats{},
+		func(id uint) bool { return id == me.ID })
+
+	w, env := do(t, r, http.MethodGet, "/api/users/"+strconv.FormatUint(uint64(target.ID), 10), "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d，期望 200, body=%s", w.Code, w.Body.String())
+	}
+	var got map[string]json.RawMessage
+	if err := json.Unmarshal(env.Data, &got); err != nil {
+		t.Fatalf("解析 data 失败: %v", err)
+	}
+	if _, ok := got["is_admin"]; ok {
+		t.Error("公开主页出现了 is_admin，这个字段只属于 /users/me")
+	}
+}
+
+// TestUpdateMeClearNicknameRoundTrip 验证「清空昵称」这条链路是自洽的。// 传空串后：库里存空串，响应 nickname 回退成用户名，同时 has_custom_nickname 变 false。
 // 少了最后这个布尔值，前端编辑表单拿 nickname 回填会显示成用户名，
 // 用户没法表达「我要清空昵称」，也分不清自己到底设过没有。
 func TestUpdateMeClearNicknameRoundTrip(t *testing.T) {

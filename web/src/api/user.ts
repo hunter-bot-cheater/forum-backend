@@ -22,6 +22,16 @@ export interface UserProfile extends UserResp {
   is_following: boolean
 }
 
+// MeResp 是 /users/me 的返回：自己主页的那份资料，外加「我是不是管理员」。
+//
+// is_admin 只在 /users/me 上有，公开主页（/users/:id）故意没有：
+// 这个字段描述的是查看者，不是主页上那个人。混进公开主页的响应里，
+// 会让人以为在说「这个人是管理员」。
+// 判定源是后端的 admin.user_ids 白名单，前端不做任何本地推导。
+export interface MeResp extends UserProfile {
+  is_admin: boolean
+}
+
 // LoginResp 是登录与刷新共用的 token 形状。
 //
 // 双 token：access 15 分钟，随每个请求发送；refresh 7 天，只在刷新接口用。
@@ -51,14 +61,14 @@ export function logout(refreshToken: string) {
   })
 }
 
-// getMe 取当前登录用户的资料 + 关注统计。
+// getMe 取当前登录用户的资料 + 关注统计 + 管理员标记。
 //
 // 为什么需要它：登录接口只返回 token 和用户名，前端把 token 存进 localStorage 后
 // 刷新页面，内存里的用户信息全没了，而聊天、点赞、个人中心都要用到 id 与昵称。
 // 靠登录响应在本地持久化也能凑合，但头像昵称改过之后本地就是旧值，
 // 走一次 /users/me 才是唯一可信的来源。
 export function getMe() {
-  return request<UserProfile>({ url: '/users/me', method: 'get' })
+  return request<MeResp>({ url: '/users/me', method: 'get' })
 }
 
 export function register(data: { username: string; password: string }) {
@@ -85,10 +95,10 @@ export interface ProfilePatch {
 }
 
 // updateMe 保存当前用户的资料，返回更新后的完整主页结构。
-// 返回的是 profileResp 而不是 userResp：调用方拿到后直接覆盖本地 profile，
-// 关注计数不会因为这次更新被抹成 0。
+// 返回的是 meResp 而不是 userResp：调用方拿到后直接覆盖本地 profile，
+// 关注计数不会因为这次更新被抹成 0，is_admin 也不会丢。
 export function updateMe(patch: ProfilePatch) {
-  return request<UserProfile>({ url: '/users/me', method: 'put', data: patch })
+  return request<MeResp>({ url: '/users/me', method: 'put', data: patch })
 }
 
 // FollowState 是关注 / 取关之后的返回。

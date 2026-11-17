@@ -62,6 +62,16 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '通知' },
       },
       {
+        // 管理后台。路由守卫只做「有没有 token」这一件事，不在这里判断管理员：
+        // 刷新页面时 profile 还没拉回来，isAdmin 一定是 false，
+        // 那样的守卫会把真正的管理员也弹回列表页。页面内部等资料到了再决定显示什么，
+        // 真正的权限边界在后端 /api/admin 的 RequireAdmin。
+        path: 'admin',
+        name: 'Admin',
+        component: () => import('@/views/admin/index.vue'),
+        meta: { title: '管理后台' },
+      },
+      {
         // 用户主页。id 用 props 之外的 route.params 读，所以不禁用 props。
         // 放在一级路径而不是 /users/me：同一个人只有一个地址，自己看自己也是这条，
         // 顶栏与详情页都只需要拼 id，不用判断「是不是我」再换地址。

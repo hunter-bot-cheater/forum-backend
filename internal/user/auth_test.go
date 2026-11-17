@@ -36,7 +36,10 @@ func newAuthRouter(t *testing.T) *gin.Engine {
 	if err != nil {
 		t.Fatalf("NewManager() error = %v", err)
 	}
-	h := NewUserHandler(NewUserService(db), session.NewService(manager, rdb), NewLoginGuard(rdb), stubFollowStats{})
+	// 认证链路用不到管理员判定，给一个恒 false 的函数即可：
+	// 这里没有 /users/me 路由，is_admin 不会出现在任何响应里。
+	h := NewUserHandler(NewUserService(db), session.NewService(manager, rdb), NewLoginGuard(rdb),
+		stubFollowStats{}, func(uint) bool { return false })
 
 	r := gin.New()
 	r.POST("/api/register", h.Register)

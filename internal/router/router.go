@@ -158,7 +158,11 @@ func New(deps Deps) (*gin.Engine, error) {
 	// 登录失败锁定按用户名计数，与按 IP 的限流互补：
 	// 限流挡的是「一台机器狂打」，换 IP 就绕过；锁定挡的是「盯着一个账号猜」。
 	loginGuard := user.NewLoginGuard(deps.Redis)
-	userHandler := user.NewUserHandler(userSvc, sessionSvc, loginGuard, followSvc)
+	// 把白名单判定同时交给 /users/me 和 RequireAdmin：
+	// 前端靠 is_admin 决定菜单里出不出现管理后台，判定源必须是同一个，
+	// 否则会出现「菜单里有入口、点进去 403」。
+	userHandler := user.NewUserHandler(userSvc, sessionSvc, loginGuard, followSvc,
+		middleware.AdminChecker(deps.Admin.UserIDs))
 	followHandler := follow.NewHandler(followSvc)
 
 	// 自动标签是可选的：开关打开且填了密钥才注入，否则传 nil，

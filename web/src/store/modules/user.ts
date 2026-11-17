@@ -6,7 +6,7 @@ import {
   register as registerApi,
   getMe,
   type LoginResp,
-  type UserProfile,
+  type MeResp,
 } from '@/api/user'
 import {
   getToken,
@@ -28,7 +28,14 @@ export const useUserStore = defineStore('user', () => {
   // profile 在刷新后是空的，layout 挂载时会调 fetchMe 补上。
   // 页面不能假设它一定有值：首屏那一瞬间就是 null，
   // 需要展示名字的地方用 displayName 兜底。
-  const profile = ref<UserProfile | null>(null)
+  //
+  // 类型用 MeResp 而不是 UserProfile：多出来的 is_admin 是顶栏菜单的开关依据。
+  const profile = ref<MeResp | null>(null)
+  // profileLoaded 表示 fetchMe 已经跑过一次（不论成败）。
+  //
+  // 页面靠它区分「资料还在路上」和「资料拉失败了」：只看 profile 是不是 null
+  // 的话，请求失败时页面会永远停在骨架屏上，用户既没提示也没得重试。
+  const profileLoaded = ref(false)
 
   const username = computed(() => {
     if (profile.value) {
@@ -48,6 +55,15 @@ export const useUserStore = defineStore('user', () => {
     }
     return 0
   })
+  // isAdmin 决定顶栏菜单里出不出现「管理后台」。
+  // 只做展示开关，真正的权限判定在后端（/api/admin 那一组挂了白名单），
+  // 前端把它改成 true 也调不动任何管理接口。
+  const isAdmin = computed(() => {
+    if (profile.value) {
+      return profile.value.is_admin === true
+    }
+    return false
+  })
 
   function applyLogin(resp: LoginResp) {
     token.value = resp.access_token
@@ -63,6 +79,9 @@ export const useUserStore = defineStore('user', () => {
       following_count: 0,
       follower_count: 0,
       is_following: false,
+      // 登录响应里没有这个字段（登录只发身份），先按「不是管理员」填，
+      // 随后 fetchMe 会用真实值覆盖。这一瞬间菜单里少一个入口比多一个 403 好。
+      is_admin: false,
     }
     // 登录成功后立刻建连：用户接下来多半要聊天或看通知，
     // 等到进入私信页才连会错过这段时间的推送。
@@ -81,13 +100,15 @@ export const useUserStore = defineStore('user', () => {
       return data
     } catch {
       return null
+    } finally {
+      profileLoaded.value = true
     }
   }
 
   // applyProfile 用一份完整资料替换本地状态。
   // 只给「资料刚改完」的场景用：顶栏的昵称头像要立刻变，
   // 等下一次 fetchMe 才刷新的话，用户会以为没保存成功。
-  function applyProfile(data: UserProfile) {
+  function applyProfile(data: MeResp) {
     profile.value = data
   }
 
@@ -111,6 +132,8 @@ export const useUserStore = defineStore('user', () => {
     clearTokens()
     token.value = ''
     profile.value = null
+    // 换人登录后要重新走一遍 fetchMe，否则下一个账号会继承「已加载完」这个状态。
+    profileLoaded.value = false
     // 登出必须断开 WebSocket：留着的话服务端会继续往这条连接推进来消息，
     // 下一个登录的人可能看到上一个人的私信。
     disconnectWS()
@@ -136,5 +159,19 @@ export const useUserStore = defineStore('user', () => {
     resetToken()
   }
 
-  return { token, profile, username, displayName, userId, login, register, fetchMe, applyProfile, resetToken, logout }
+  return {
+    token,
+    profile,
+    profileLoaded,
+    username,
+    displayName,
+    userId,
+    isAdmin,
+    login,
+    register,
+    fetchMe,
+    applyProfile,
+    resetToken,
+    logout,
+  }
 })

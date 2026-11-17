@@ -36,14 +36,20 @@ type UserHandler struct {
 	session *session.Service
 	guard   *LoginGuard
 	follow  FollowStats
+	// isAdmin 判定一个用户 id 是不是管理端白名单里的人。
+	// 只给 /users/me 用：前端要靠它决定菜单里出不出现管理后台。
+	// 白名单是部署者配置，不是数据库字段，所以这里注入的是判定函数而不是查库。
+	isAdmin func(uint) bool
 }
 
 // NewUserHandler 注入用户 service、登录态管理、失败锁定与关注统计。
 // 不注入 jwt.Manager：token 的签发与校验都由 session 包负责，
 // 校验走中间件、签发走 session，handler 拿不到 Manager 也就不会有人绕过登记直接签一个。
 // guard 允许为 nil：单元测试里不需要 Redis，这里判空跳过，生产装配时一定传。
-func NewUserHandler(svc *UserService, sessionSvc *session.Service, guard *LoginGuard, followStats FollowStats) *UserHandler {
-	return &UserHandler{svc: svc, session: sessionSvc, guard: guard, follow: followStats}
+// isAdmin 由路由层用 config 的 admin.user_ids 构造（middleware.AdminChecker），
+// 与 RequireAdmin 共用同一份名单，不会出现「菜单里有入口、点进去 403」。
+func NewUserHandler(svc *UserService, sessionSvc *session.Service, guard *LoginGuard, followStats FollowStats, isAdmin func(uint) bool) *UserHandler {
+	return &UserHandler{svc: svc, session: sessionSvc, guard: guard, follow: followStats, isAdmin: isAdmin}
 }
 
 // registerReq 是注册与登录共用的请求体。两个接口要的字段完全一样，就共用一个结构体。
@@ -314,12 +320,12 @@ func (h *UserHandler) buildProfile(c *gin.Context, u *model.User, viewerID uint)
 // @Summary      当前登录用户资料
 // @Tags         users
 // @Produce      json
-// @Success      200  {object}  httputil.SwaggerEnvelope{data=user.profileResp}
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=user.meResp}
 // @Failure      401  {string}  string    "未登录"
 // @Security     Bearer
 // @Router       /users/me [get]
 // Me 处理 GET /api/users/me，身份只从 token 取，不接受查询参数指定用户。
-// 返回形状与公开主页完全一致，前端个人中心只写一套渲染。
+// 返回形状在公开主页的基础上多一个 is_admin，前端个人中心只写一套渲染。
 func (h *UserHandler) Me(c *gin.Context) {
 	userID, ok := httputil.CurrentUserID(c)
 	if !ok {
@@ -339,7 +345,7 @@ func (h *UserHandler) Me(c *gin.Context) {
 		httputil.MapServiceError(c, "current user stats", err)
 		return
 	}
-	response.OK(c, profile)
+	response.OK(c, toMeResp(profile, h.isAdmin(userID)))
 }
 
 // UpdateMe godoc
@@ -385,5 +391,5 @@ func (h *UserHandler) UpdateMe(c *gin.Context) {
 		httputil.MapServiceError(c, "update profile stats", err)
 		return
 	}
-	response.OK(c, profile)
+	response.OK(c, toMeResp(profile, h.isAdmin(userID)))
 }

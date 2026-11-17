@@ -200,3 +200,61 @@ export function unlikeArticle(id: number) {
     method: 'delete',
   })
 }
+
+// 管理端标签接口。与上面的公开 listTags 分开：这里带 id、带分页、能搜名字，
+// 而且只有白名单里的管理员能调（/api/admin 那一组挂了 RequireAdmin）。
+
+// AdminTagItem 是管理端标签列表的一行。
+// 与 TagCount 的区别就是多一个 id：改名按 id 定位，因为名字正是要被改掉的东西。
+export interface AdminTagItem {
+  id: number
+  name: string
+  // count 为 0 表示没有任何文章在用。这类标签后端也会列出来——
+  // 它们正是最该清理的一批，看不见就没法处理。
+  count: number
+}
+
+export interface AdminTagListResp {
+  list: AdminTagItem[]
+  total: number
+  page: number
+  page_size: number
+}
+
+// adminListTags 分页列出全部标签，可按名字模糊搜。
+export function adminListTags(keyword = '', page = 1, pageSize = 20) {
+  const params: Record<string, string | number> = { page, page_size: pageSize }
+  const kw = keyword.trim()
+  if (kw !== '') {
+    params.keyword = kw
+  }
+  return request<AdminTagListResp>({
+    url: '/admin/tags',
+    method: 'get',
+    params,
+  })
+}
+
+// TagRenameResult 是一次改名/合并的结果。
+//
+// merged 为 true 表示这次不只是改了个词：目标名字本来就有标签，
+// 后端把源标签下的文章整体并了过去，源标签行已被删除。
+// moved_articles 是因此受影响的文章数，管理员据此知道刚才动了多少东西。
+export interface TagRenameResult {
+  tag_id: number
+  name: string
+  merged: boolean
+  moved_articles: number
+}
+
+// renameTag 把标签改成新名字；新名字已存在时后端自动合并，不报「重名」。
+//
+// 改名会清掉受影响文章的详情缓存，一次可能几千篇，接口耗时比普通写接口长一点，
+// 调用方不要因为一两秒没返回就重复提交。
+export function renameTag(id: number, name: string) {
+  return request<TagRenameResult>({
+    url: '/admin/tags/' + String(id),
+    method: 'put',
+    data: { name },
+  })
+}

@@ -97,6 +97,8 @@ metrics:
 # 管理类接口的白名单：创建抢楼活动（POST /api/floor-events）、
 # 举报处置后台（/api/admin/reports）与标签改名合并（/api/admin/tags）。
 # 填的是 users 表的自增 id，不是用户名。
+# 这份名单同时决定 GET /users/me 里的 is_admin：前端靠它决定菜单里出不出现
+# 「管理后台」入口，两处判定共用 middleware.AdminChecker，不会一处开一处关。
 # 留空 = 谁都调不了（安全默认）：忘配时接口是关的，而不是对全部登录用户敞开。
 # 列表类型不支持用环境变量覆盖（viper 不会把逗号分隔的字符串拆成切片），改完重启生效。
 admin:
