@@ -1,5 +1,5 @@
 # 常用开发命令
-.PHONY: run run-release build build-release migrate test test-integration test-cover lint tidy swagger web-dev web-build web-preview backup up down
+.PHONY: run run-release build build-release migrate test test-integration test-cover lint tidy swagger web-dev web-build web-preview pack pack-tar backup up down
 
 run:   ## 启动服务
 	go run ./cmd/server
@@ -51,6 +51,12 @@ web-build: ## 构建前端静态产物到 web/dist
 
 web-preview: ## 构建并预览前端产物，端口由 vite.config.ts 固定为 5173
 	cd web && npm run build && npm run preview
+
+pack: ## 本机编译 Linux 产物到 .build/，服务器只需十几秒打镜像（见 docs/10 13.5）
+	bash scripts/pack-linux.sh
+
+pack-tar: ## 同上，再打一个 .build/forum-linux-amd64.tar.gz 方便 scp
+	bash scripts/pack-linux.sh --tar
 
 backup: ## 备份数据库到 backups/，保留 7 天（KEEP_DAYS 可改）
 	bash scripts/backup.sh

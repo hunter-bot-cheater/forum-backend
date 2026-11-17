@@ -1,0 +1,39 @@
+# 「本机编译、服务器只打镜像」用的叠加层，完整说明见 docs/10 第 13.5 节。
+#
+# 叠在三份文件的最上层，顺序不能反：
+#   docker-compose.yml                     本地全套（端口 8088、无证书）
+#   deploy/prod/docker-compose.prod.yml    生产差异（80/443、TZ、日志上限、数据卷）
+#   deploy/prod/docker-compose.artifact.yml 本文件，只换构建来源
+#
+# 改的只有 build 的 context 与 dockerfile：编译搬到本机（scripts/pack-linux.sh），
+# 服务器这一步只剩 COPY。端口、挂载、环境变量、依赖关系全部沿用前两份。
+#
+# 为什么用 context 覆盖而不是 build: !reset null：compose 没有「删掉一个字段」的语法
+# （!reset 要 2.24.4 以上，且对 map 类型的写法容易踩坑）。把 context 指到
+# 预编译产物目录、dockerfile 指到产物里的那份，效果一样且不依赖新版特性。
+#
+# dockerfile 必须显式写：根 compose 里 web 服务原本写的是 deploy/web.Dockerfile，
+# 这个路径是相对 context 解析的，不覆盖会去 .build/web/deploy/ 下找一个不存在的文件。
+# api / migrate 原本是短语法 build: .，没有 dockerfile 字段，写不写都一样，写上统一。
+
+services:
+  api:
+    image: forum-api:${IMAGE_TAG:-local}
+    build:
+      # 相对项目根目录，里面是 pack-linux.sh 生成的二进制与 Dockerfile
+      context: .build/api
+      dockerfile: Dockerfile
+
+  # migrate 与 api 是同一个镜像，只是启动命令不同（见根目录 compose 的 command）。
+  # 这里给同一个 tag，避免 compose 打两份完全一样的镜像。
+  migrate:
+    image: forum-api:${IMAGE_TAG:-local}
+    build:
+      context: .build/api
+      dockerfile: Dockerfile
+
+  web:
+    image: forum-web:${IMAGE_TAG:-local}
+    build:
+      context: .build/web
+      dockerfile: Dockerfile

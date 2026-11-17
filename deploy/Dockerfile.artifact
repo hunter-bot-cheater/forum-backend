@@ -1,0 +1,39 @@
+# 后端运行镜像（预编译版）：只做 COPY，不在镜像里编译。
+#
+# 与根目录 Dockerfile 的区别只有一个：那边从 golang 镜像开始跑 go build，
+# 这边直接吃 scripts/pack-linux.sh 在本机交叉编译好的二进制。
+# 运行期需要的东西完全一样（ca-certificates、tzdata、非 root 用户）。
+#
+# 什么时候用它：服务器只有 2 核，拉 golang 镜像加编译要几分钟，内存紧张时
+# 还会被 OOM 杀掉。改成本机编译后，服务器这一步只是拷贝，十几秒结束。
+#
+# 构建上下文是 .build/api（见 deploy/prod/docker-compose.artifact.yml）。
+# scripts/pack-linux.sh 会把这份文件复制成 .build/api/Dockerfile，
+# 所以下面的 COPY 路径都相对于那个目录，且构建时不需要指定 -f。
+FROM alpine:3.20
+
+# ca-certificates：调大模型接口走 HTTPS，没有根证书会直接握手失败。
+# tzdata：日志与 created_at 都按本地时区渲染，容器默认是 UTC。
+RUN apk add --no-cache ca-certificates tzdata \
+    && adduser -D -u 10001 forum
+
+WORKDIR /app
+
+COPY forum-server forum-migrate /app/
+
+# 统一补一次可执行位。从 Windows（Git Bash / MSYS tar）打出来的包里，
+# 文件模式经常是 0644，传上来直接跑会报 permission denied。
+RUN chmod 0755 /app/forum-server /app/forum-migrate
+
+COPY config/config.yaml /app/config/config.yaml
+
+# 用非 root 跑：容器被拿到 shell 时，攻击者也只能动 /app 下这几个文件。
+# uid 固定 10001，宿主机 uploads/ 的属主要与之对齐，否则写不进头像目录。
+USER forum
+
+EXPOSE 8080
+
+ENV CONFIG_PATH=/app/config/config.yaml \
+    GIN_MODE=release
+
+CMD ["/app/forum-server"]

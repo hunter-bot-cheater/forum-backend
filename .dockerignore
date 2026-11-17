@@ -9,6 +9,9 @@ backups
 # 用户上传的图片。它是运行时数据，不进镜像；
 # 不排掉的话每次构建都要把几百 MB 的头像传给 docker daemon。
 uploads
+# 本机打包产物：只在 artifact 版构建里当上下文用（那份的 context 直接指向
+# .build/api 与 .build/web），普通 docker build 的上下文没有它，别白传几十 MB。
+.build
 logs
 tmp
 .git

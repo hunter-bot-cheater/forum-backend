@@ -16,6 +16,7 @@
 | 免费额度够用多久 | 约 1796 小时，折合约 74 天，也就是 3 个月试用期里前 2.5 个月不花钱 |
 | 选香港对不对 | 对。香港地域不需要 ICP 备案，买了当天就能绑域名 |
 | 2G 内存会不会不够 | 跑起来够（常驻约 1G），**构建镜像**那几分钟是峰值，必须加 2G swap |
+| 服务器构建太慢怎么办 | 本机交叉编译，服务器只打镜像，5 到 15 分钟变十几秒，见 13.5 |
 | 部署方式 | Docker Compose，四个容器：mysql、redis、api、web（nginx） |
 | 需要开哪些端口 | 只开 22、80、443。3306、6379、8080 一个都不要开 |
 | 证书怎么来 | Let's Encrypt + certbot，90 天自动续期，免费 |
@@ -444,11 +445,24 @@ docker compose exec -T \
 
 ### 7.3 收紧文件权限
 
+这两个文件含数据库密码与 JWT 密钥，默认 644 在多用户机器上等于公开。但它们的读者不是同一个人，权限不能一刀切：
+
 ```bash
-chmod 600 .env config/config.yaml
+chmod 600 .env
+chown 10001:10001 config/config.yaml
+chmod 640 config/config.yaml
+ls -l .env config/config.yaml
 ```
 
-这两个文件里有数据库密码和 JWT 密钥，600 表示只有 root 能读写。默认是 644（同组和其他用户可读），在多用户机器上等于公开。
+- `.env` 只给 Docker Compose 读，compose 是 root 跑的，`600` 就够，别的进程不用读它。
+- `config/config.yaml` 要挂进 api 容器（`./config/config.yaml:/app/config/config.yaml:ro`），而容器里的进程以 `uid 10001`（`forum`）运行。写成 `600 root:root` 的话容器内读不到，api 一启动就报 `加载配置失败: read config: open /app/config/config.yaml: permission denied`，然后反复重启。`640` + 属主 10001 的效果是「root 能改、容器能读、其他用户读不到」。
+
+用 `vi` 改完配置后要再 `chown 10001:10001 config/config.yaml` 一次。`vi` 保存是「写临时文件再改名」，新文件的属主变成 root，下次重启 api 又会 permission denied。判断方法：
+
+```bash
+stat -c '%U:%G %a %n' config/config.yaml
+# 要的是 forum:forum 640（uid 10001 在容器外没有用户名时会显示 10001:10001）
+```
 
 ---
 
@@ -473,6 +487,8 @@ source ~/.bashrc
 
 注意这里写的是绝对路径。相对路径是相对「当前目录」解析的，你在别的目录执行 `docker compose` 就会找不到文件，报 `no configuration file provided`。
 
+如果你打算按 13.5 的方式部署（本机编译、服务器只打镜像），`COMPOSE_FILE` 还要再加第三份 `deploy/prod/docker-compose.artifact.yml`。13.5 第四步有完整命令，这里的写法不用推翻，只是末尾多一段路径。
+
 还要记住一件事：**`~/.bashrc` 只对交互式登录的 shell 生效，cron 不读它**。所以写进 crontab 的命令必须自己带上 `COMPOSE_FILE`（见 13.2 的例子），否则定时任务会报找不到配置文件，而且你收不到任何提示。
 
 先看一眼合并后的结果，确认端口和挂载都对：
@@ -484,6 +500,8 @@ docker compose config | head -60
 `docker compose config` 会把多个文件合并、把变量替换成真实值，然后打印最终配置。**这是排查「我明明配了怎么没生效」最快的手段**，比猜快得多。
 
 ### 8.2 构建镜像
+
+> **先看 13.5**。服务器是 2 核 2G 的话，建议走 13.5：本机编译好、服务器只打镜像，把这一节的 5 到 15 分钟压到十几秒，也不会被 OOM 打断。走 13.5 就整个跳过这一节，构建命令换成 13.5 第五步的 `docker compose build api web`；不过下面 `uploads` 目录那段仍然要做。
 
 ```bash
 cd /opt/forum
@@ -965,6 +983,8 @@ curl -I --resolve jiushixixi.xyz:80:<你的公网IP> http://jiushixixi.xyz
 
 ### 13.1 发版流程
 
+如果按 13.5 的方式部署，`git pull` 与 `docker compose build` 这一段要换成「本机打包 → scp → 服务器解包 → build」，13.5 的「以后发版」一节有完整命令。下面这套是在服务器上从源码编译的版本。
+
 ```bash
 cd /opt/forum
 git pull --ff-only
@@ -1066,6 +1086,364 @@ docker compose ps
 curl -I https://jiushixixi.xyz
 ```
 
+### 13.5 本机编译、服务器只打镜像（推荐）
+
+8.2 里那条 `docker compose build` 是在服务器上从源码编译：下 golang 镜像、拉 Go 模块、`go build`，再下 node 镜像、`npm ci`、`vite build`。2 核 2G 的机器做这些事要 5 到 15 分钟，内存不够时还会被 OOM 杀掉（`exit code 137`）。
+
+这套办法把编译搬到你的 Windows 电脑上：本机交叉编译出 linux/amd64 的二进制和前端静态文件，用 scp 传上去，服务器那一步只剩 `COPY`，十几秒就能出镜像。**你的电脑不需要装 Docker**，服务器也不需要多装任何东西。
+
+分工是这样的：
+
+| 在哪 | 做什么 | 花多久 |
+|---|---|---|
+| 你的电脑 | `go build` 加 `npm run build` | 1 到 3 分钟 |
+| 传输 | scp 一个几十 MB 的压缩包 | 看上行带宽，通常十几秒 |
+| 服务器 | `COPY` 进镜像、起容器 | 十几秒 |
+
+下面用你给的地址 `root@47.86.29.94` 举例。以后换机器，把命令里的 IP 换掉即可。
+
+#### 本机准备
+
+需要 Go 1.26 以上与 Node 22，和 `Dockerfile`、CI 里用的版本对齐：
+
+```bash
+go version      # go1.27.x 也可以，go.mod 要求的是 1.26
+node -v         # v22.x
+```
+
+`scp` 与 `ssh` 在 Windows 自带（Git Bash 里直接可用）。没有的话装 Git for Windows，或在「设置 → 应用 → 可选功能」里加 OpenSSH 客户端。
+
+#### 服务器上只需要叠加层那一个文件
+
+这套办法用到三个新文件，但只有第三个要单独出现在服务器上：
+
+```
+deploy/Dockerfile.artifact                后端运行镜像，只做 COPY
+deploy/web.Dockerfile.artifact            前端运行镜像，只做 COPY
+deploy/prod/docker-compose.artifact.yml   把构建上下文换成 .build 的叠加层
+```
+
+前两个在第一步打包时会被拷成 `.build/api/Dockerfile` 与 `.build/web/Dockerfile`，跟着 tar 包一起上去。叠加层里写的 `dockerfile: Dockerfile` 是相对 context（`.build/api`）解析的，所以服务器上真正被读到的就是包内那两份，`deploy/` 下有没有原文件都不影响。
+
+只有叠加层要落在 `/opt/forum/deploy/prod/`。它还没进 git 的时候，服务器 `git clone` 下来的目录里没有，第四步 `docker compose config` 会报 `no such file or directory`。先从本机补传：
+
+```bash
+cd /d/go学习/forum-backend
+scp deploy/prod/docker-compose.artifact.yml root@47.86.29.94:/opt/forum/deploy/prod/
+```
+
+核对：
+
+```bash
+ssh root@47.86.29.94 "ls -l /opt/forum/deploy/prod/docker-compose.artifact.yml; ls -l /opt/forum/.build/api/Dockerfile /opt/forum/.build/web/Dockerfile"
+```
+
+后面两条要等包解开才有，属于正常。
+
+这个文件进了 git 之后，这一步就省了：服务器 `git pull` 就有了。判断方法是在本机 `git status --short deploy/prod/docker-compose.artifact.yml`，没有输出就说明已在版本里。
+
+如果 `git clone` 的目录不是 `/opt/forum`，上面所有路径跟着换。
+
+#### 第一步：本机打包
+
+先提交，再打包。标签里带 commit 短哈希，工作区还有未提交改动时，包里的代码和这个哈希对不上，线上排查会被带偏、回退也找不到对应源码。脚本因此会直接拒绝：
+
+```bash
+cd /d/go学习/forum-backend
+git status --short      # 确认要提交的就是这些
+git add <改动的文件>
+git commit -m "fix(web): ..."
+git push
+bash scripts/pack-linux.sh --tar
+```
+
+真的只想验证打包流程、不在乎标签准不准（比如第一次跑通脚本），加 `--allow-dirty` 放行。
+
+`--tar` 表示额外打一个 `forum-linux-amd64.tar.gz`；不加只生成目录，适合你自己用 rsync 同步。
+
+脚本做的每一件事都对应根目录 `Dockerfile` 里的一步，参数故意写成一样的，避免「本机编的和服务器编的行为不同」：
+
+- `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build`：在 Windows 上编出 Linux 的静态二进制。`CGO_ENABLED=0` 是关键，关掉 cgo 才不依赖 Linux 的 C 库，产物才能直接塞进 alpine 跑。
+- `-trimpath -ldflags="-s -w"`：去掉本机绝对路径与符号表，体积小三成左右。
+- `npm run build`：产出 `web/dist`。
+- 把 `config/config.docker.yaml`、`deploy/nginx.docker.conf` 和两份 artifact 版 Dockerfile 一起放进产物目录。
+
+产物结构：
+
+```
+.build/
+  BUILD_INFO                 这次打包对应的标签、commit、时间、目标架构
+  IMAGE_TAG                  只含一行标签，服务器上 $(cat .build/IMAGE_TAG) 直接用
+  forum-linux-amd64.tar.gz   给服务器用的压缩包
+  api/
+    forum-server             后端
+    forum-migrate            建表程序
+    config/config.yaml       镜像内的默认配置
+    Dockerfile               只做 COPY 的构建文件
+  web/
+    dist/                    前端静态文件
+    default.conf             容器内 nginx 配置
+    Dockerfile
+```
+
+`.build/` 已经在 `.gitignore` 与 `.dockerignore` 里：它是构建结果，不进仓库，普通的 `docker build` 也不会把它当上下文传一遍。
+
+想确认包里有什么、对应哪一版代码：
+
+```bash
+tar -tzf .build/forum-linux-amd64.tar.gz | head -20
+cat .build/BUILD_INFO
+```
+
+`BUILD_INFO` 的 `tag` 就是这次要用的镜像标签，形如 `1118-0228-7d2ac1f`：`月日-时分` 加 commit 短哈希。前半段说明什么时候打的包，后半段说明是哪个 commit——`docker images` 里看到哪个标签，就知道该 `git show` 哪次提交。`dirty` 正常应该是 0，不为 0 只可能出自 `--allow-dirty`。
+
+#### 第二步：传到服务器
+
+```bash
+scp .build/forum-linux-amd64.tar.gz root@47.86.29.94:/tmp/
+```
+
+`scp` 的语法是 `scp 本地文件 用户@主机:目标路径`。第一次连接会问 `Are you sure you want to continue connecting?`，输 `yes`，然后输 root 密码。
+
+用密钥登录就加 `-i`：
+
+```bash
+scp -i ~/.ssh/jiushixixi.pem .build/forum-linux-amd64.tar.gz root@47.86.29.94:/tmp/
+```
+
+`~/.ssh` 在 Windows 上是 `C:\Users\admin\.ssh`，Git Bash 里写 `~/.ssh` 就能找到。
+
+SSH 端口不是 22 时用大写 `-P`：
+
+```bash
+scp -P 2222 .build/forum-linux-amd64.tar.gz root@47.86.29.94:/tmp/
+```
+
+注意 `scp` 的端口参数是大写 `-P`，`ssh` 的是小写 `-p`。这两个不一样，写混了会报 `unknown option`。
+
+传到 `/tmp` 而不是直接传进 `/opt/forum`，是为了先看一眼包的结构再往项目目录里解，传错了不会污染项目。传完核对大小，避免网络中断留下半个包：
+
+```bash
+ssh root@47.86.29.94 "ls -lh /tmp/forum-linux-amd64.tar.gz"
+```
+
+与本机 `ls -lh .build/forum-linux-amd64.tar.gz` 看到的字节数一致就对了。
+
+#### 第三步：服务器解包
+
+```bash
+ssh root@47.86.29.94
+cd /opt/forum
+tar -xzf /tmp/forum-linux-amd64.tar.gz -C /opt/forum
+cat /opt/forum/.build/BUILD_INFO
+```
+
+`-C /opt/forum` 指定解到哪。包里存的路径就是 `.build/api`、`.build/web`，所以解完正好落在项目根下，不需要再挪文件，compose 里相对路径 `context: .build/api` 才成立。
+
+解完顺手删掉压缩包，40G 系统盘别留垃圾：
+
+```bash
+rm -f /tmp/forum-linux-amd64.tar.gz
+```
+
+#### 第四步：改成三份 compose 文件
+
+8.1 里设置的 `COMPOSE_FILE` 是两份，现在要加第三份，它负责把「构建来源」从源码换成 `.build` 里的产物：
+
+```bash
+export COMPOSE_FILE=/opt/forum/docker-compose.yml:/opt/forum/deploy/prod/docker-compose.prod.yml:/opt/forum/deploy/prod/docker-compose.artifact.yml
+```
+
+同样写进 `~/.bashrc` 长期生效：
+
+```bash
+echo 'export COMPOSE_FILE=/opt/forum/docker-compose.yml:/opt/forum/deploy/prod/docker-compose.prod.yml:/opt/forum/deploy/prod/docker-compose.artifact.yml' >> ~/.bashrc
+source ~/.bashrc
+```
+
+顺序不能反，后面的文件覆盖前面的。第三份只改三件事：`api`、`migrate`、`web` 的 `build.context` 指到 `.build/api` 与 `.build/web`，镜像名固定成 `forum-api` 与 `forum-web`。端口、挂载、环境变量、依赖关系全部沿用前两份。
+
+确认合并结果对：
+
+```bash
+docker compose config | grep -A2 'context:'
+```
+
+应该看到三处 `context`，两个是 `/opt/forum/.build/api`，一个是 `/opt/forum/.build/web`。如果还是 `/opt/forum`，说明第三份没被读到，检查 `COMPOSE_FILE` 的路径。
+
+#### 第五步：打镜像
+
+如果之前在服务器上试过源码构建（`docker compose build` 不带服务名，会把 `api`、`migrate`、`web` 三个服务一起编），先清掉那次留下的半截状态：
+
+```bash
+cd /opt/forum
+docker compose down          # 停掉起了一半的容器；不要加 -v，数据卷要留
+docker builder prune -f      # 清掉卡住的构建缓存，能腾出几百 MB 到几 G
+df -h /
+```
+
+源码构建在 2 核 2G 上是「看起来卡住」而不是报错：`migrate` 和 `api` 共用 golang 镜像，要跑两遍 `go build`，内存不够时被内核 OOM 杀掉，`docker compose` 只会安静地停在那里。走本机编译之后，`golang` 与 `node` 这两个大镜像不会再被拉。
+
+标签在第一步打包时就定好了，写在 `.build/IMAGE_TAG` 里跟着压缩包一起上来（形如 `1118-0228-7d2ac1f`）。这一步只是把它抄进 `.env`：
+
+```bash
+cd /opt/forum
+sed -i '/^IMAGE_TAG=/d' .env
+echo "IMAGE_TAG=$(cat .build/IMAGE_TAG)" >> .env
+grep -n '^IMAGE_TAG=' .env
+```
+
+不要在服务器上自己用 `date +%m%d-%H%M` 算：那样算出来的是「上服务器的时间」，和本机打包时间差几分钟，而且不带 commit，`docker images` 里那一行对不回任何源码。
+
+这里用「先删再追加」而不是 `sed "s/^IMAGE_TAG=.*/…/"`：`.env` 里本来没有这一行时，`s///` 匹配不到任何东西，命令返回 0、什么也不做，而且不会有任何提示。标签于是一直落到默认值 `local`，`docker images` 里全是同名镜像，回退时无版可选。早先复制出来的 `.env` 里往往只有一行注释 `# IMAGE_TAG=local`，正好命中这种情况。
+
+`IMAGE_TAG` 是 `docker-compose.artifact.yml` 里 `${IMAGE_TAG:-local}` 取的值。写进 `.env` 而不是 `export`，是因为 compose 会自动读项目目录下的 `.env`，你下次开一个新终端它还在，`build` 与后面的 `up -d` 一定用的是同一个标签。
+
+用 `export` 的后果很具体：关掉终端就没了，之后 `up -d` 会去找默认的 `local`，启动的可能是另一份旧镜像。
+
+每次都换标签的理由：不换的话所有版本都叫 `local`，出问题想回上一版就无从下手。现在的标签自带 commit 哈希，`docker images` 里的每一行都能直接对到某次提交，回退时也清楚退的是哪一版代码。
+
+然后构建：
+
+```bash
+docker compose build api web
+```
+
+这次只做三件事：拉 `alpine:3.20` 与 `nginx:1.27-alpine`（第一次要下几十 MB）、`apk add ca-certificates tzdata`、把产物 `COPY` 进去。没有编译，2 核 2G 也能在一分钟内完成。
+
+`api` 与 `migrate` 用的是同一个镜像，`build api` 之后 `migrate` 不用再单独构建。
+
+#### 第六步：起服务
+
+首次部署按 8.3 的顺序：
+
+```bash
+docker compose up -d mysql redis
+docker compose run --rm migrate
+docker compose up -d --no-build
+```
+
+`--no-build` 是把意图写清楚：镜像已经构建好了，不要因为看到 build 定义又回去编译。镜像存在时它本来就不会编译，这个参数是防止哪天改乱了文件顺序又走回编译路径。
+
+`docker compose run --rm migrate` 用的就是刚构建的 `forum-api:<IMAGE_TAG>`，和 api 完全同一份代码。
+
+探活：
+
+```bash
+docker compose ps
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1/readyz
+```
+
+#### 以后发版
+
+只改了后端：
+
+```bash
+# 本机：先提交，脚本会拦下未提交的改动
+cd /d/go学习/forum-backend
+git add <改动的文件> && git commit -m "fix(api): ..." && git push
+bash scripts/pack-linux.sh --api-only --tar
+scp .build/forum-linux-amd64.tar.gz root@47.86.29.94:/tmp/
+
+# 服务器
+cd /opt/forum
+tar -xzf /tmp/forum-linux-amd64.tar.gz -C /opt/forum
+sed -i '/^IMAGE_TAG=/d' .env && echo "IMAGE_TAG=$(cat .build/IMAGE_TAG)" >> .env
+rm -f /tmp/forum-linux-amd64.tar.gz
+docker compose build api web
+docker compose up -d --no-deps api
+docker compose up -d --no-deps --force-recreate web
+```
+
+`--api-only` 让脚本跳过 `npm run build`，几十秒就能打包完。
+
+最后那条重建 web 不能省，理由在 9.2 与 13.1：Nginx 启动时把 `api` 解析成 IP 缓存住，api 容器换了 IP 它不知道，继续往旧 IP 发请求，结果是全站 502。重建一次让它重新解析，一两秒的事。
+
+只改了前端：
+
+```bash
+# 本机
+git add <改动的文件> && git commit -m "fix(web): ..." && git push
+bash scripts/pack-linux.sh --web-only --tar
+scp .build/forum-linux-amd64.tar.gz root@47.86.29.94:/tmp/
+
+# 服务器
+cd /opt/forum
+tar -xzf /tmp/forum-linux-amd64.tar.gz -C /opt/forum
+sed -i '/^IMAGE_TAG=/d' .env && echo "IMAGE_TAG=$(cat .build/IMAGE_TAG)" >> .env
+rm -f /tmp/forum-linux-amd64.tar.gz
+docker compose build api web
+docker compose up -d --no-deps --force-recreate web
+```
+
+改了表结构的话，在 `up -d api` 之前加一步 `docker compose run --rm migrate`。
+
+两个发版块里都是 `build api web`，即使只改了一端。原因是标签是全局的：只构建 api 的话，`IMAGE_TAG` 换了而 web 镜像还停在旧标签，下一次 `up -d` 会在服务器上临时补一次构建，回退时也会发现某个标签缺一个镜像。两端一起构建，`docker images` 里每个标签都是成对的，代价只是多十几秒 COPY。
+
+#### 回退到上一版
+
+```bash
+docker images | grep forum-api
+```
+
+每一行是某一次构建：
+
+```
+forum-api   1118-1012-7d2ac1f   a1b2c3d4e5f6   2 minutes ago   62MB
+forum-api   1117-2310-3f91ab2   9f8e7d6c5b4a   3 hours ago     62MB
+```
+
+标签后半段就是 commit，`git show 3f91ab2` 能直接看到那一版改了什么，不用靠时间戳猜。
+
+把 `.env` 里的标签改回旧值，再起容器：
+
+```bash
+sed -i '/^IMAGE_TAG=/d' .env && echo "IMAGE_TAG=1117-2310-3f91ab2" >> .env
+docker compose up -d --no-deps api
+docker compose up -d --no-deps --force-recreate web
+```
+
+镜像还在本地，不用重新构建，几秒就切回去。这也是每次换标签最实际的好处。
+
+#### 服务器上要不要留源码
+
+不需要。整条链路里服务器做的只有 `COPY`，`cmd/`、`internal/`、`pkg/`、`web/src/`、根 `Dockerfile`、`deploy/web.Dockerfile` 一次都不会被读到。运行时真正用得上的只有这几类：
+
+| 文件 | 用途 |
+|---|---|
+| `docker-compose.yml` + `deploy/prod/docker-compose.prod.yml` + `deploy/prod/docker-compose.artifact.yml` | 除了端口和变量，剩下的就是「用哪份产物建镜像」 |
+| `.build/` | 解包得到的二进制、`dist`，以及两处 `Dockerfile`（包里自带） |
+| `.env`、`config/config.yaml` | 密码、密钥、站点配置 |
+| `deploy/prod/nginx.conf`、`locations.conf`、`my.cnf` | 挂载进容器 |
+| `scripts/backup.sh`、`certbot/`、`uploads/` | 备份、证书、用户上传 |
+
+但也不建议直接 `rm -rf`：`git pull` 是更新 compose 与 `deploy/prod/` 下那些配置的唯一手段，删了就只能一个个 `scp`，迟早漏一个文件。
+
+折中的做法是把工作区瘦成「只留部署相关文件」，用 git 自带的 sparse-checkout：
+
+```bash
+cd /opt/forum
+git sparse-checkout init --no-cone
+git sparse-checkout set '/docker-compose.yml' '/deploy/' '/scripts/' '/docs/' '/README.md' '/.env.example'
+ls
+```
+
+它只改工作区，`.git` 里的历史不动，`git pull` 照常。`.build/`、`certbot/`、`uploads/`、`.env`、`config/config.yaml` 都是未跟踪或被忽略的文件，不受影响。
+
+好处不只是省几十兆磁盘，更重要的是堵住了最危险的那条路：没有源码时，一旦 `COMPOSE_FILE` 丢了、`context` 退回 `.`，`docker compose build` 会**立刻**报 `Cannot locate specified Dockerfile`，而不是像现在这样安静地开始编译、把 2G 内存吃穿、连 ssh 都登不上。
+
+要恢复源码：`git sparse-checkout disable`。
+
+#### 这套方式的坑
+
+- **架构必须对**。脚本里写死 `GOARCH=amd64`，阿里云经济型 e 是 x86，正确。如果换成 ARM 实例（倚天 710），要改成 `GOARCH=arm64`，否则容器起来报 `exec format error`。
+- **忘了 build**。`up -d` 发现同名镜像已经存在就不会重建，你会以为「代码传上去了但没生效」。每次先 `build` 再 `up`。
+- **`.build` 和 git 不是一回事**。换一台电脑、删掉 `.build`、或者 `git pull` 之后都要重新打包。`BUILD_INFO` 里的 commit 与 dirty 就是用来核对这个的。
+- **镜像标签一直是 `local`**。`local` 是 `${IMAGE_TAG:-local}` 的兜底值，不是自动生成的。三种原因：`.env` 里没有 `IMAGE_TAG=` 这一行（用 `sed s///` 改不存在的行会静默失败）、改了 `.env` 却没有重新 `build`（标签是构建时定下的名字，不会追溯改名）、`.build/IMAGE_TAG` 没跟包一起上来（旧包或解错了位置）。查当前解析结果：`docker compose config | grep 'image:'`，两处 `forum-api:` + 一处 `forum-web:` 的那个值就是下次 `build` 会打的标签。
+- **服务器上不能临时走源码编译**。只要 `COMPOSE_FILE` 带着第三份文件，context 就指向 `.build`，没传产物会报 `no such file or directory`。真想临时走源码编译，把第三份从 `COMPOSE_FILE` 里去掉再 `docker compose build`。
+- **uploads 目录权限照旧**。8.2 那条 `chown -R 10001:10001 uploads` 与编译方式无关，仍然要做。
+- **本机 Go 版本不能低于 go.mod 要求**。`go.mod` 写的是 `go 1.26`，本机 1.27 可以，1.25 会直接报错。
+
 ---
 
 ## 14. 2G 机器的三条护栏
@@ -1082,15 +1460,16 @@ curl -I https://jiushixixi.xyz
 
 ### 14.3 构建时的内存
 
-三条路，按推荐顺序：
+四条路，按推荐顺序：
 
-1. **加 swap**（第 5.3 节）。最简单，代价是构建慢一点。
-2. **先单独构建前端**，再构建后端。两个峰值不在同一时间出现：
+1. **本机编译、服务器只打镜像**（13.5）。编译这件事完全离开服务器，`go build` 与 `npm run build` 都在你自己的电脑上跑，服务器那一步只剩 `COPY`，根本碰不到内存峰值。不用装 Docker，也不用镜像仓库，代价只是多一条 scp。
+2. **加 swap**（第 5.3 节）。最简单，代价是构建慢一点。已经按 13.5 部署的话，swap 仍然留着，它兜的是运行期而不是构建期。
+3. **先单独构建前端**，再构建后端。两个峰值不在同一时间出现：
    ```bash
    docker compose build web
    docker compose build api
    ```
-3. **在本地构建好镜像推到镜像仓库**。需要阿里云容器镜像服务（ACR）或个人版免费额度，流程是本地 `docker build` → `docker push` → 服务器 `docker pull` → `up -d`。只有 2G 上反复构建失败时才值得上这套。
+4. **在本地构建好镜像推到镜像仓库**。需要阿里云容器镜像服务（ACR）或个人版免费额度，流程是本地 `docker build` → `docker push` → 服务器 `docker pull` → `up -d`。比 13.5 多一步「本机装 Docker」，好处是连基础镜像都不用服务器下载。只有 13.5 也不够用时才值得上这套。
 
 ---
 
@@ -1165,15 +1544,20 @@ openssl rand -hex 16    # 填进 .env 的 MYSQL_PASSWORD
 openssl rand -hex 32    # 填进 .env 的 JWT_SECRET
 vi .env                 # 填密码，NGINX_CONF 先写 nginx.http.conf
 vi config/config.yaml   # 改 ws.allowed_origins 与 admin.user_ids
-chmod 600 .env config/config.yaml
+chmod 600 .env
+chown 10001:10001 config/config.yaml && chmod 640 config/config.yaml   # 容器内以 uid 10001 读它
 
 # 5. 构建与启动
-export COMPOSE_FILE=/opt/forum/docker-compose.yml:/opt/forum/deploy/prod/docker-compose.prod.yml
+#    按 13.5 走：先在【本机】执行 bash scripts/pack-linux.sh --tar
+#    再 scp .build/forum-linux-amd64.tar.gz root@47.86.29.94:/tmp/
+#    登录服务器后 tar -xzf /tmp/forum-linux-amd64.tar.gz -C /opt/forum
+#    （不走 13.5 的话，COMPOSE_FILE 去掉最后一段，build api web 换成 build）
+export COMPOSE_FILE=/opt/forum/docker-compose.yml:/opt/forum/deploy/prod/docker-compose.prod.yml:/opt/forum/deploy/prod/docker-compose.artifact.yml
 docker compose config | head -40
-docker compose build
+docker compose build api web
 docker compose up -d mysql redis
 docker compose run --rm migrate
-docker compose up -d
+docker compose up -d --no-build
 curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1/readyz
 
 # 6. 域名解析生效后申请证书
