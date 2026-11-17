@@ -16,7 +16,13 @@
       <div class="dt-meta">
         <!-- 作者区整体可点：从一篇文章进作者主页是最常见的下一步，
              这里做成一个整体而不是只让名字可点。 -->
-        <el-avatar :size="28" :src="authorAvatar" class="dt-meta__link" @click="goUser(article.author)">
+        <el-avatar
+          :size="28"
+          :src="authorAvatar"
+          :style="{ backgroundColor: avatarColor(authorName) }"
+          class="dt-meta__link"
+          @click="goUser(article.author)"
+        >
           {{ authorInitial }}
         </el-avatar>
         <span class="dt-meta__name dt-meta__link" @click="goUser(article.author)">{{ authorName }}</span>
@@ -71,12 +77,16 @@
         </h2>
 
         <div class="dt-composer">
-          <el-avatar :size="32" :src="myAvatar">{{ myInitial }}</el-avatar>
+          <el-avatar
+            :size="32"
+            :src="myAvatar"
+            :style="{ backgroundColor: avatarColor(user.profile?.nickname) }"
+          >{{ myInitial }}</el-avatar>
           <div class="dt-composer__body">
             <el-input
               v-model="newComment"
               type="textarea"
-              :rows="2"
+              :autosize="{ minRows: 2 }"
               maxlength="2000"
               show-word-limit
               resize="none"
@@ -107,7 +117,13 @@
           />
 
           <div v-for="root in comments" :key="root.id" class="dt-item" :data-cid="root.id">
-            <el-avatar :size="32" :src="avatarOf(root)" class="dt-who" @click="goUser(root.author)">
+            <el-avatar
+              :size="32"
+              :src="avatarOf(root)"
+              :style="{ backgroundColor: avatarColor(nameOf(root)) }"
+              class="dt-who"
+              @click="goUser(root.author)"
+            >
               {{ initialOf(root) }}
             </el-avatar>
 
@@ -129,7 +145,7 @@
                 <el-input
                   v-model="replyContent"
                   type="textarea"
-                  :rows="2"
+                  :autosize="{ minRows: 2 }"
                   maxlength="2000"
                   resize="none"
                   :placeholder="'回复 ' + nameOf(root)"
@@ -149,7 +165,13 @@
 
               <div v-if="(root.replies ?? []).length > 0" class="dt-replies">
                 <div v-for="reply in root.replies" :key="reply.id" class="dt-reply" :data-cid="reply.id">
-                  <el-avatar :size="24" :src="avatarOf(reply)" class="dt-who" @click="goUser(reply.author)">
+                  <el-avatar
+                    :size="24"
+                    :src="avatarOf(reply)"
+                    :style="{ backgroundColor: avatarColor(nameOf(reply)) }"
+                    class="dt-who"
+                    @click="goUser(reply.author)"
+                  >
                     {{ initialOf(reply) }}
                   </el-avatar>
 
@@ -176,7 +198,7 @@
                       <el-input
                         v-model="replyContent"
                         type="textarea"
-                        :rows="2"
+                        :autosize="{ minRows: 2 }"
                         maxlength="2000"
                         resize="none"
                         :placeholder="'回复 ' + nameOf(reply)"
@@ -253,6 +275,7 @@ import { useUserStore } from '@/store/modules/user'
 import type { Brief } from '@/api/message'
 import type { ReportTarget } from '@/api/report'
 import ReportDialog from '@/components/ReportDialog.vue'
+import { avatarColor } from '@/utils/avatar'
 import { formatCount, formatRelativeTime, initials } from '@/utils/format'
 import { goBack as goBackTo } from '@/utils/nav'
 import { keepInPlace } from '@/utils/scroll'
@@ -1117,5 +1140,18 @@ function goTag(name: string) {
   display: flex;
   justify-content: center;
   padding: 18px 0 8px;
+}
+
+/* 手机上把左右内边距从 28 收到 16：外壳已经让掉 12px，再留 28px 的话
+   390 宽的屏幕正文只剩 310px，一行不到十个汉字，读起来一直在换行。
+   标题同步降一档，22px 的字在窄屏上会有明显的挤压感。 */
+@media (max-width: 720px) {
+  .dt-page {
+    padding: 0 16px 28px;
+  }
+
+  .dt-title {
+    font-size: 22px;
+  }
 }
 </style>

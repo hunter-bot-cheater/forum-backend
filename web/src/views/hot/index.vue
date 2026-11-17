@@ -2,7 +2,6 @@
   <div class="fs-container hot">
     <div class="hot__head">
       <h1 class="hot__title">热榜</h1>
-      <span class="hot__hint">点赞 × 3 + 浏览 · 前 {{ TOP_N }} 篇</span>
     </div>
 
     <!-- 整张榜单装进一张卡片：条目之间用细分隔线，而不是每条一张卡。
@@ -54,10 +53,9 @@ onMounted(() => {
   max-width: 820px;
 }
 
+/* 只剩标题，不再需要 flex 对齐；padding 与 h1 的全局 margin: 0 配合，
+   让标题左边缘和下面卡片的文字起点对齐。 */
 .hot__head {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
   margin-bottom: 14px;
   padding: 0 2px;
 }
@@ -66,11 +64,6 @@ onMounted(() => {
   font-size: 22px;
   font-weight: 700;
   color: var(--fs-text-1);
-}
-
-.hot__hint {
-  font-size: 13px;
-  color: var(--fs-text-3);
 }
 
 .hot__card {

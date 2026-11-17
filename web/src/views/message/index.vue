@@ -41,6 +41,7 @@
               <el-avatar
                 :size="42"
                 :src="avatarOf(item.peer.nickname, item.peer.avatar_url)"
+                :style="{ backgroundColor: avatarColor(item.peer.nickname) }"
                 class="conv__avatar"
               >
                 {{ initials(item.peer.nickname) }}
@@ -78,6 +79,7 @@
             <el-avatar
               :size="34"
               :src="avatarOf(peer.nickname, peer.avatar_url)"
+              :style="{ backgroundColor: avatarColor(peer.nickname) }"
               class="im-chat__peer"
               @click="goUser(peer.id)"
             >
@@ -172,6 +174,7 @@ import { Bubble, BubbleList, Conversations, XSender } from 'vue-element-plus-x'
 import { listMessages, sendMessage, type Brief, type ConversationResp, type MessageResp } from '@/api/message'
 import { useImStore } from '@/store/modules/im'
 import { useUserStore } from '@/store/modules/user'
+import { avatarColor } from '@/utils/avatar'
 import { onFrame, onReconnect, wsState } from '@/utils/ws'
 import { formatChatTime, formatListTime, initials, newClientMsgId } from '@/utils/format'
 
@@ -303,34 +306,21 @@ const unreadTotal = computed(() => {
   return sum
 })
 
-// 气泡头像的配色。都是站点已有色系里的深一档，保证白字压得住。
-const AVATAR_COLORS = ['#1c7dff', '#f5552d', '#00a870', '#7b61ff', '#e6a23c', '#2f9bd6']
-
 // avatarOf 给没有上传头像的人生成一张首字头像。
 //
 // Bubble 的 avatar 只认图片地址、不认文字，想在气泡旁放 <el-avatar> 就要自己接管
 // 头像位与间距，和组件各算一套必然对不齐。这里生成一张 64×64 的 SVG data URI，
 // 布局仍由组件负责，只有图像内容是拼出来的。
+//
+// 底色走 utils/avatar 的 avatarColor：和评论区的彩色首字同一套算法，
+// 同一个人在气泡里和在评论列表里是同一个颜色。
 function avatarOf(name: string, url: string): string {
   if (url) {
     return url
   }
-  let hash = 0
-  const chars = Array.from(name)
-  for (let i = 0; i < chars.length; i++) {
-    const code = chars[i].codePointAt(0)
-    if (code) {
-      hash = (hash + code) % 997
-    }
-  }
-  let color = AVATAR_COLORS[0]
-  const picked = AVATAR_COLORS[hash % AVATAR_COLORS.length]
-  if (picked) {
-    color = picked
-  }
   const svg =
     '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64">' +
-    '<rect width="64" height="64" rx="32" fill="' + color + '"/>' +
+    '<rect width="64" height="64" rx="32" fill="' + avatarColor(name) + '"/>' +
     '<text x="32" y="33" font-size="30" fill="#ffffff" text-anchor="middle" ' +
     'dominant-baseline="middle" font-family="PingFang SC,Microsoft YaHei,sans-serif">' +
     initials(name) +
@@ -450,8 +440,17 @@ function goUser(id: number) {
   router.push('/users/' + String(id))
 }
 
+// 手机上的「返回」是回会话列表。从列表点进来的历史上一页就是它，退回去能保住
+// 列表的滚动位置；从文章页或主页点「私信」进来的没有列表可退，用 replace 落回列表。
+// 这条不用 utils/nav 的 goBack：那个的语义是「回上一页」，这里要的是「回列表」。
 function backToList() {
-  router.push('/messages')
+  const state = window.history.state as { back?: unknown } | null
+  const previous = typeof state?.back === 'string' ? state.back : ''
+  if (previous === '/messages') {
+    router.back()
+    return
+  }
+  void router.replace('/messages')
 }
 
 // loadConversation 拉「与某人的第一页」。
@@ -538,8 +537,15 @@ async function loadOlder() {
   }
 }
 
+// 滚到底要等两帧：第一帧把新气泡挂上去，第二帧 BubbleList 才量得到真实内容高度、
+// 算出底部位置。同一帧里直接调，它按上一版的高度算，会停在半路。
+// 手机上可视区本来就矮，这个偏差直接表现成「进来停在最上面」。
 function scrollToBottom(smooth: boolean) {
-  bubbleRef.value?.scrollToBottom(smooth)
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      bubbleRef.value?.scrollToBottom(smooth)
+    })
+  })
 }
 
 // syncLatest 在断线重连后补拉一次「最新一页」，把断线期间漏掉的消息接上。
@@ -764,7 +770,8 @@ onBeforeUnmount(() => {
 .im-page {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  /* 高度完全由外层 fullBleed 的 flex 分配，这里不能再写 height: 100%：
+     百分比高度在这条链路上解析不出确定值，会和 flex 抢着决定高度。 */
   min-height: 0;
   padding: 20px 24px;
   background: var(--fs-bg);
@@ -958,6 +965,12 @@ onBeforeUnmount(() => {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  /* 输入区不再封顶之后，它可能比整栏还高（2000 字的上限真的能写满一屏）。
+     让这一栏自己滚，底部就能一直翻到，而不是被 .im-shell 的 overflow: hidden
+     直接裁掉——那正是「输入框没了、也拖不动」的成因。
+     overscroll-behavior 把滚动链切断：滑到底不会把整个页面一起带着弹。 */
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .im-chat__head {
@@ -1007,10 +1020,12 @@ onBeforeUnmount(() => {
   color: var(--fs-like);
 }
 
-/* 消息区自己滚，页面不跟着滚。 */
+/* 消息区自己滚，页面不跟着滚。
+   min-height 不是 0 而是 120：输入框写成一段长文时，先压消息区，
+   压到 120 就不再让——再让下去消息全看不见了，剩下的高度交给整栏滚动。 */
 .im-chat__body {
   flex: 1;
-  min-height: 0;
+  min-height: 120px;
   padding: 8px 20px;
   overflow: hidden;
 }
@@ -1104,6 +1119,16 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 
+/* 输入区要跟着内容长高，而不是在固定高度的小窗里自己滚。
+   组件给可编辑区写了 overflow-y: auto 和一个 44px 的 min-height，
+   高度一旦被父级锁死，写三四行就只能在原地翻，前面的字看不见。
+   height: auto 用 !important 是为了压住组件可能写在行内样式上的高度
+   （行内样式优先级高于类选择器，只有 !important 能盖过去）。
+   这里刻意不设 max-height：写多少就长多高，超出一屏由 .im-chat 整栏滚。 */
+.im-chat__foot :deep(.chat-rich-text) {
+  height: auto !important;
+}
+
 .im-chat__tip {
   margin: 6px 6px 0;
   font-size: 12px;
@@ -1170,6 +1195,9 @@ onBeforeUnmount(() => {
 
   .im-chat__head {
     padding: 0 12px;
+    /* 手机上顶栏已经占 60px，聊天头再占 60px 就吃掉八分之一屏，
+       收到 52px 仍然放得下 34px 头像与两行文字。 */
+    height: 52px;
   }
 
   .im-chat__body {

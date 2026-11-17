@@ -52,6 +52,10 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
+  /* iOS Safari 的 100vh 是「地址栏收起时」的高度，比当前可视区高 60 到 100px。
+     用它撑底会让页面底部一段永远在屏幕外。dvh 跟着工具栏伸缩走，
+     写两行是先给老浏览器一个可用的值，再让新浏览器覆盖。 */
+  min-height: 100dvh;
   background: var(--fs-bg);
 }
 
@@ -100,6 +104,11 @@ onMounted(() => {
      输入框被顶到屏幕外。写死高度才对得上「沉浸式」这三个字。 */
   flex: none;
   height: calc(100vh - var(--fs-header-h));
+  /* 手机上必须用 dvh。iOS Safari 的 100vh 把底部工具栏那一条也算进去了，
+     照它算高度，聊天输入框正好被工具栏压在屏幕外；而这里 overflow: hidden，
+     用户连滚都滚不到，表现就是「输入框没了、页面拖不动」。
+     dvh 是当前可视高度，键盘弹起时也会跟着缩，输入框始终留在屏幕内。 */
+  height: calc(100dvh - var(--fs-header-h));
   overflow: hidden;
 }
 

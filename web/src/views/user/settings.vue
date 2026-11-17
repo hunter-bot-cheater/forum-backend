@@ -26,6 +26,7 @@
           <el-avatar
             :size="64"
             :src="previewAvatar"
+            :style="{ backgroundColor: avatarColor(nickname.trim() || username) }"
             class="field__avatar"
             @error="onAvatarError"
           >
@@ -89,7 +90,7 @@
             <el-input
               v-model="bio"
               type="textarea"
-              :autosize="{ minRows: 3, maxRows: 6 }"
+              :autosize="{ minRows: 3 }"
               resize="none"
               :maxlength="bioLimit"
               show-word-limit
@@ -122,6 +123,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { updateMe, type ProfilePatch, type UserProfile } from '@/api/user'
 import { uploadAvatar } from '@/api/upload'
 import { useUserStore } from '@/store/modules/user'
+import { avatarColor } from '@/utils/avatar'
 import { initials } from '@/utils/format'
 import { goBack as goBackTo } from '@/utils/nav'
 
@@ -502,7 +504,7 @@ onMounted(() => {
   gap: 8px;
 }
 
-/* 原生 file 控件完全藏起来，靠「上传图片」按钮触发它的 click。
+/* 原生 file 控件完全藏起来，靠「上传头像」按钮触发它的 click。
    display:none 不影响 input.click()，现代浏览器都允许。 */
 .field__file {
   display: none;

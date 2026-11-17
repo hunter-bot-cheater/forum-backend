@@ -45,7 +45,12 @@
           class="ac__author"
           @click.stop
         >
-          <el-avatar :size="24" :src="authorAvatar" class="ac__avatar">
+          <el-avatar
+            :size="24"
+            :src="authorAvatar"
+            :style="{ backgroundColor: avatarColor(authorName) }"
+            class="ac__avatar"
+          >
             {{ authorInitial }}
           </el-avatar>
           <span class="ac__name">{{ authorName }}</span>
@@ -65,6 +70,7 @@
 import { computed } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import type { ArticleListItem } from '@/api/article'
+import { avatarColor } from '@/utils/avatar'
 import { formatCount, formatRelativeTime, initials } from '@/utils/format'
 
 // 列表里的一篇文章。只负责展示，取数与分页交给 article store：

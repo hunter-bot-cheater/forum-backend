@@ -81,6 +81,9 @@ withDefaults(
   display: grid;
   place-items: center;
   min-height: 100vh;
+  /* 与外壳同一个理由：iOS Safari 的 100vh 把底部工具栏也算进去，
+     登录卡会被顶出屏幕一点，出现一条没有意义的滚动。 */
+  min-height: 100dvh;
   padding: 32px 24px;
   background:
     radial-gradient(820px 380px at 50% -8%, #dfeaff 0%, rgba(223, 234, 255, 0) 72%),

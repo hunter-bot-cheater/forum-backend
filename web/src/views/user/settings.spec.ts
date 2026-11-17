@@ -103,11 +103,11 @@ describe('头像', () => {
     const wrapper = mountPage()
     await flushPromises()
 
-    // 头像区没有可输入的控件，只有「上传图片」按钮和隐藏的 file。
+    // 头像区没有可输入的控件，只有「上传头像」按钮和隐藏的 file。
     const avatarField = wrapper.findAll('.field')[0]
     expect(avatarField.find('input[type="text"]').exists()).toBe(false)
     expect(avatarField.find('input[type="file"]').exists()).toBe(true)
-    expect(avatarField.find('.field__row .el-button').text()).toBe('上传图片')
+    expect(avatarField.find('.field__row .el-button').text()).toBe('上传头像')
   })
 
   it('旧外链的图打不开时明说原因，并且不挡着重新上传', async () => {
@@ -115,7 +115,7 @@ describe('头像', () => {
     await flushPromises()
 
     // 刚进页面、图还没报错，走的是普通说明。
-    expect(wrapper.find('.field__hint').text()).toContain('上传图片')
+    expect(wrapper.find('.field__hint').text()).toContain('上传头像')
 
     await emitAvatarError(wrapper)
 

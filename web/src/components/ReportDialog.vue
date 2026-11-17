@@ -20,7 +20,7 @@
     <el-input
       v-model="detail"
       type="textarea"
-      :rows="3"
+      :autosize="{ minRows: 3 }"
       maxlength="200"
       show-word-limit
       resize="none"

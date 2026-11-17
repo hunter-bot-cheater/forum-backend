@@ -16,7 +16,12 @@
       <!-- 头部：身份 + 计数 + 操作。计数直接取主页接口的返回值，
            不额外查文章数以外的统计——文章总数来自下面的列表接口。 -->
       <section class="fs-card up__head">
-        <el-avatar :size="76" :src="avatarURL" class="up__avatar">{{ initial }}</el-avatar>
+        <el-avatar
+          :size="76"
+          :src="avatarURL"
+          :style="{ backgroundColor: avatarColor(profile.nickname) }"
+          class="up__avatar"
+        >{{ initial }}</el-avatar>
 
         <div class="up__info">
           <div class="up__name-row">
@@ -121,6 +126,7 @@
             <el-avatar
               :size="44"
               :src="avatarOf(item)"
+              :style="{ backgroundColor: avatarColor(item.nickname) }"
               class="person__avatar"
               @click="goUser(item.id)"
             >
@@ -176,6 +182,7 @@ import {
   type UserProfile,
 } from '@/api/user'
 import { useUserStore } from '@/store/modules/user'
+import { avatarColor } from '@/utils/avatar'
 import { formatRelativeTime, initials } from '@/utils/format'
 import { goBack as goBackTo } from '@/utils/nav'
 import { keepInPlace } from '@/utils/scroll'

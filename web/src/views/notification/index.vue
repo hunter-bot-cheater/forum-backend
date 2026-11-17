@@ -52,6 +52,7 @@
             <el-avatar
               :size="40"
               :src="avatarOf(item)"
+              :style="{ backgroundColor: avatarColor(nameOf(item)) }"
               class="nt__who"
               @click.stop="goUser(item)"
             >{{ initialOf(item) }}</el-avatar>
@@ -104,6 +105,7 @@ import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useNotificationStore } from '@/store/modules/notification'
+import { avatarColor } from '@/utils/avatar'
 import { formatListTime, initials } from '@/utils/format'
 import { keepInPlace } from '@/utils/scroll'
 import type { NotificationKind, NotificationResp } from '@/api/notification'

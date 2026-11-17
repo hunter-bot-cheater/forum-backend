@@ -44,7 +44,11 @@
 
         <el-dropdown trigger="click" @command="onCommand">
           <div class="hdr__user">
-            <el-avatar :size="28" :src="avatar">{{ initial }}</el-avatar>
+            <el-avatar
+              :size="28"
+              :src="avatar"
+              :style="{ backgroundColor: avatarColor(shownName) }"
+            >{{ initial }}</el-avatar>
             <span v-if="shownName" class="hdr__user-name">{{ shownName }}</span>
             <el-icon :size="12" class="hdr__caret"><ArrowDown /></el-icon>
           </div>
@@ -70,6 +74,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '@/store/modules/user'
 import { useImStore } from '@/store/modules/im'
 import { useNotificationStore } from '@/store/modules/notification'
+import { avatarColor } from '@/utils/avatar'
 import { initials } from '@/utils/format'
 
 const route = useRoute()
@@ -349,7 +354,8 @@ async function logout() {
   }
 
   .hdr__name,
-  .hdr__user-name {
+  .hdr__user-name,
+  .hdr__caret {
     display: none;
   }
 
