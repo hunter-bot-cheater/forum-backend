@@ -3051,6 +3051,9 @@ const docTemplate = `{
                 "like_count": {
                     "type": "integer"
                 },
+                "liked": {
+                    "type": "boolean"
+                },
                 "score": {
                     "type": "number"
                 },

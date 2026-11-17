@@ -80,12 +80,15 @@ const fallbackTTL = 5 * time.Second
 //
 // Score 是排名依据，等于 ScoreOf(LikeCount, ViewCount)；
 // 两个原始数字单独留着，前端才能解释「它凭什么排在这里」。
+// Liked 的主语是当前访问者，不是文章本身：它由 FillLiked 按需填，
+// 不参与任何排序与缓存。
 type HotArticle struct {
 	ArticleID uint    `json:"article_id"`
 	Score     float64 `json:"score"`
 	Title     string  `json:"title"`
 	LikeCount int64   `json:"like_count"`
 	ViewCount int64   `json:"view_count"`
+	Liked     bool    `json:"liked"`
 }
 
 // hotRow 是 MySQL 聚合查询的落点：一篇怎么排、得了多少分、原始计数各是多少。
@@ -206,6 +209,46 @@ func (s *HotService) Top(ctx context.Context, n int) ([]HotArticle, error) {
 		}
 	}
 	return s.loadByIDs(ctx, rows)
+}
+
+// FillLiked 给榜单补上「当前访问者赞过哪些」，viewerID 为 0（游客）时直接返回。
+//
+// 单独一步而不是塞进 Top：Top 的结果与访问者无关，对账和自愈都复用它；
+// 「谁在看」每个请求都不同，混进 Top 会让同一份榜单没法共用。
+//
+// 一次 IN 查询取回这一屏的标记，走 uk_article_user 的最左前缀，
+// 每条只扫自己那段索引。游客不查：热榜是公开页，大多数访问没有登录态，
+// 为它们多打一次库换不到任何信息。
+func (s *HotService) FillLiked(ctx context.Context, list []HotArticle, viewerID uint) error {
+	if viewerID == 0 || len(list) == 0 {
+		return nil
+	}
+
+	ids := make([]uint, 0, len(list))
+	for _, item := range list {
+		ids = append(ids, item.ArticleID)
+	}
+
+	var likedIDs []uint
+	err := s.db.WithContext(ctx).Model(&model.ArticleLike{}).
+		Where("user_id = ? AND article_id IN ?", viewerID, ids).
+		Pluck("article_id", &likedIDs).Error
+	if err != nil {
+		return fmt.Errorf("load liked marks for %d articles: %w", len(ids), err)
+	}
+
+	// 用集合回填而不是逐条判断：IN 查回来的顺序由数据库决定，
+	// 和榜单顺序无关，按下标对齐是错的。
+	liked := make(map[uint]struct{}, len(likedIDs))
+	for _, id := range likedIDs {
+		liked[id] = struct{}{}
+	}
+	for i := range list {
+		if _, ok := liked[list[i].ArticleID]; ok {
+			list[i].Liked = true
+		}
+	}
+	return nil
 }
 
 // readyState 读 hotReadyKey 的值并解析成 readyState。

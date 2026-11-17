@@ -16,6 +16,8 @@ function makeItems(count: number): HotArticle[] {
       like_count: i * 10,
       view_count: i * 100,
       score: i * 30 + i * 100,
+      // 默认都不点亮：多数用例不关心爱心，只有专门的用例会改这一项。
+      liked: false,
     })
   }
   return items
@@ -118,5 +120,26 @@ describe('HotRankCard', () => {
   it('标题可以换，默认是「热榜」', () => {
     expect(mountCard({ items: [] }).find('.hr__title').text()).toBe('热榜')
     expect(mountCard({ items: [], title: '本周热榜' }).find('.hr__title').text()).toBe('本周热榜')
+  })
+
+  it('只有我赞过的条目点亮爱心', () => {
+    // 两篇里第一篇我赞过、第二篇没有。判据必须是 item.liked，
+    // 拿 like_count 判断的话这两篇都会点亮（都有赞，只是不全是我点的）。
+    const items = makeItems(2)
+    items[0].liked = true
+
+    const wrapper = mountCard({ items })
+
+    const hearts = wrapper.findAll('.hr__heart')
+    expect(hearts).toHaveLength(2)
+    expect(hearts[0].classes()).toContain('is-liked')
+    expect(hearts[1].classes()).not.toContain('is-liked')
+  })
+
+  it('游客（全部未点赞）时没有一个爱心点亮', () => {
+    const wrapper = mountCard({ items: makeItems(5) })
+
+    // 游客没有身份，后端一律回 liked=false；前端若漏判就会出现满屏红心。
+    expect(wrapper.findAll('.hr__heart.is-liked')).toHaveLength(0)
   })
 })

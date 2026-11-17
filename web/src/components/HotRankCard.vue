@@ -17,7 +17,10 @@
         <router-link :to="'/articles/' + String(item.article_id)" class="hr__link">
           <span class="hr__rank" :class="{ 'is-top': index < 3 }">{{ index + 1 }}</span>
           <span class="hr__text">{{ item.title }}</span>
-          <span class="hr__like">♥ {{ item.like_count }}</span>
+          <span class="hr__like">
+            <span class="hr__heart" :class="{ 'is-liked': item.liked }">♥</span>
+            {{ item.like_count }}
+          </span>
         </router-link>
       </li>
     </ol>
@@ -137,6 +140,18 @@ const more = computed(() => props.items.length > props.limit)
   flex: none;
   font-size: 12px;
   color: var(--fs-text-3);
+}
+
+/* 只有当前访问者赞过才点亮。判据是 item.liked（后端按 token 算的），
+   不是 like_count——「有多少人赞过」和「我赞没赞」是两个不同的问题，
+   混用会让游客看到满屏红心。 */
+.hr__heart {
+  margin-right: 2px;
+  color: var(--fs-text-3);
+}
+
+.hr__heart.is-liked {
+  color: #f5552d;
 }
 
 .hr__more {

@@ -239,3 +239,81 @@ func TestRebuildSkipsDeletedArticles(t *testing.T) {
 		t.Fatalf("删掉的文章不该出现在榜上，实际 %+v", list)
 	}
 }
+
+// TestFillLikedMarksOnlyWhatTheViewerLiked 验证 liked 的主语是访问者本人。
+//
+// 两篇文章里，一篇是 viewer 自己赞的，另一篇只有别人赞过。
+// 如果实现成「这篇有没有人赞」，两篇都会是红的，榜单上等于没有信息；
+// 正确的判据只有「article_likes 里有没有 (viewer, article) 这一行」。
+func TestFillLikedMarksOnlyWhatTheViewerLiked(t *testing.T) {
+	f := newHotFixture(t)
+	ctx := context.Background()
+
+	viewer := f.User("viewer")
+	other := f.User("other")
+	othersPost := f.Article(f.author.ID, "别人赞过的文章")
+
+	if err := f.DB().Create(&model.ArticleLike{ArticleID: f.article.ID, UserID: viewer.ID}).Error; err != nil {
+		t.Fatalf("造 viewer 的赞失败: %v", err)
+	}
+	if err := f.DB().Create(&model.ArticleLike{ArticleID: othersPost.ID, UserID: other.ID}).Error; err != nil {
+		t.Fatalf("造别人的赞失败: %v", err)
+	}
+
+	list, err := f.svc.Top(ctx, 10)
+	if err != nil {
+		t.Fatalf("Top 失败: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("期望 2 篇上榜，实际 %d 篇", len(list))
+	}
+
+	if err := f.svc.FillLiked(ctx, list, viewer.ID); err != nil {
+		t.Fatalf("FillLiked 失败: %v", err)
+	}
+
+	got := make(map[uint]HotArticle, len(list))
+	for _, item := range list {
+		got[item.ArticleID] = item
+	}
+	if !got[f.article.ID].Liked {
+		t.Errorf("自己赞过的那篇 liked = false，期望 true")
+	}
+	if got[othersPost.ID].Liked {
+		t.Errorf("只有别人赞过的那篇 liked = true，说明判据取成了「有没有人赞」")
+	}
+	// 标记是附加信息，不该动计数：like_count 是所有人赞的总数。
+	if got[othersPost.ID].LikeCount != 1 {
+		t.Errorf("like_count = %d，期望 1（标记不该污染计数）", got[othersPost.ID].LikeCount)
+	}
+}
+
+// TestFillLikedGuestLeavesAllUnliked 验证游客（viewerID 为 0）不产生任何标记。
+//
+// 热榜是公开页，大多数访问没有登录态。游客没有可判断的身份，
+// 所有爱心都该是灰的；把「有人赞过」当成「我赞过」会让整页都是红的。
+func TestFillLikedGuestLeavesAllUnliked(t *testing.T) {
+	f := newHotFixture(t)
+	ctx := context.Background()
+
+	f.seedLikes(t, f.article.ID, 3)
+
+	list, err := f.svc.Top(ctx, 10)
+	if err != nil {
+		t.Fatalf("Top 失败: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("期望 1 篇上榜，实际 %d 篇", len(list))
+	}
+
+	if err := f.svc.FillLiked(ctx, list, 0); err != nil {
+		t.Fatalf("游客不该报错: %v", err)
+	}
+	if list[0].Liked {
+		t.Errorf("游客的 liked = true，期望 false")
+	}
+	// 计数照常返回：游客也要看到「多少人赞过」。
+	if list[0].LikeCount != 3 {
+		t.Errorf("like_count = %d，期望 3", list[0].LikeCount)
+	}
+}

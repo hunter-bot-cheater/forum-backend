@@ -7,12 +7,16 @@ package hot
 //
 // Score 是榜单排序依据，等于「点赞 × 3 + 浏览」；LikeCount 与 ViewCount
 // 是这两个原始计数。三个都留着：Score 解释排名，两个计数解释 Score 怎么来的。
+//
+// Liked 表示当前访问者有没有赞过这一篇，游客恒为 false。
+// 前端靠它决定爱心是红的还是灰的，所以字段名是「赞过没」而不是「点赞」。
 type HotArticleResp struct {
 	ArticleID uint    `json:"article_id"`
 	Score     float64 `json:"score"`
 	Title     string  `json:"title"`
 	LikeCount int64   `json:"like_count"`
 	ViewCount int64   `json:"view_count"`
+	Liked     bool    `json:"liked"`
 }
 
 // HotListResp 让响应始终带一个 list 字段，空榜输出 []。

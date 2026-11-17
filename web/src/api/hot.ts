@@ -17,6 +17,10 @@ export interface HotArticle {
   like_count: number
   // view_count 是原始浏览数，和 like_count 一样只用来说明分数是怎么来的。
   view_count: number
+  // liked 表示当前访问者赞过这一篇没，游客恒为 false。
+  // 主语是「我」而不是文章：同一条榜单，登录的人和游客拿到的值不同，
+  // 所以列表缓存要跟着身份走（见 store/modules/hot.ts）。
+  liked: boolean
 }
 
 export interface HotListResp {

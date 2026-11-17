@@ -316,7 +316,9 @@ func New(deps Deps) (*gin.Engine, error) {
 		// 定位失败最多是没滚动到那一条，不该让整页报错。
 		api.GET("/comments/:id/locate", commentHandler.Locate)
 		// 静态段 hot 与通配段 :id 同层，0.7 节实测静态优先。
-		api.GET("/articles/hot", likeHandler.Hot)
+		// 挂 optionalAuth 是为了回填每条的 liked：登录用户看到的爱心才是红的，
+		// 没带 token 时降级成游客，榜单照常返回。
+		api.GET("/articles/hot", optionalAuth, likeHandler.Hot)
 		// 用户主页公开：看别人的资料不需要登录。
 		// 静态段 me 与通配段 :id 同层，靠 gin 的静态优先规则区分。
 		// 同样挂 OptionalJWTAuth：要在公开可看的前提下多算一个「当前访问者是谁」，

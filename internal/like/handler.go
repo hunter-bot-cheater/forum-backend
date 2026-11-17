@@ -1,6 +1,7 @@
 package like
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -124,6 +125,16 @@ func (h *LikeHandler) Hot(c *gin.Context) {
 	if err != nil {
 		httputil.MapServiceError(c, "hot articles", err)
 		return
+	}
+
+	// 路由挂了 OptionalJWTAuth：带了有效 token 才取得到 userID，游客是 false。
+	// liked 是给「我赞过没」用的装饰，查询失败就整列灰着，
+	// 不应该让榜单接口 500——排名和计数已经拿到了。
+	if userID, ok := httputil.CurrentUserID(c); ok {
+		if err := h.hotSvc.FillLiked(c.Request.Context(), list, userID); err != nil {
+			slog.WarnContext(c.Request.Context(), "fill hot liked marks",
+				"user_id", userID, "error", err)
+		}
 	}
 
 	// 从空切片开始，空榜时序列化成 [] 而不是 null，前端可以直接遍历。

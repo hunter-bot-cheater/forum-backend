@@ -11,6 +11,8 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"forum-backend/internal/article"
+	"forum-backend/internal/hot"
+	"forum-backend/internal/model"
 	"forum-backend/internal/testutil"
 )
 
@@ -150,5 +152,82 @@ func TestLikeEndpointMissingArticle(t *testing.T) {
 	code, _ := doLike(t, h, 999999, reader.ID, http.MethodPut, true)
 	if code != http.StatusNotFound {
 		t.Fatalf("状态码 = %d，期望 404", code)
+	}
+}
+
+// TestHotEndpointMarksLikedPerViewer 验证热榜接口按访问者回填 liked。
+//
+// 同一条榜单，带 token 的读者应当看到自己赞过的那篇 liked=true，
+// 游客看到的是 false。路由挂的是 OptionalJWTAuth，
+// 这里用 asUser 模拟「token 解析成功」，不挂中间件模拟游客。
+func TestHotEndpointMarksLikedPerViewer(t *testing.T) {
+	db := testutil.NewDB(t)
+	rdb := testutil.NewRedis(t)
+
+	author := testutil.SeedUser(t, db, "hotlistauthor")
+	reader := testutil.SeedUser(t, db, "hotlistreader")
+	post := testutil.SeedArticle(t, db, author.ID, "热榜接口的文章")
+	if err := db.Create(&model.ArticleLike{ArticleID: post.ID, UserID: reader.ID}).Error; err != nil {
+		t.Fatalf("造赞失败: %v", err)
+	}
+
+	h := NewLikeHandler(
+		NewLikeService(db, rdb, article.NewArticleService(db, rdb, nil)),
+		hot.NewHotService(db, rdb),
+	)
+
+	// 只取断言要用的三个字段：整体结构不属于这个用例的职责。
+	type hotItem struct {
+		ArticleID uint  `json:"article_id"`
+		Liked     bool  `json:"liked"`
+		LikeCount int64 `json:"like_count"`
+	}
+
+	// call 发一次请求，loggedIn 决定挂不挂「已登录」这一层。
+	call := func(loggedIn bool) []hotItem {
+		t.Helper()
+
+		r := gin.New()
+		if loggedIn {
+			r.GET("/api/articles/hot", asUser(reader.ID), h.Hot)
+		} else {
+			r.GET("/api/articles/hot", h.Hot)
+		}
+
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/articles/hot", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("状态码 = %d，期望 200，body=%s", w.Code, w.Body.String())
+		}
+
+		var env struct {
+			Code int `json:"code"`
+			Data struct {
+				List []hotItem `json:"list"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+			t.Fatalf("响应不是合法 JSON: %v", err)
+		}
+		return env.Data.List
+	}
+
+	loggedIn := call(true)
+	if len(loggedIn) != 1 {
+		t.Fatalf("登录读者：期望 1 条，实际 %d 条", len(loggedIn))
+	}
+	if !loggedIn[0].Liked {
+		t.Errorf("登录读者赞过这一篇，liked 应当是 true，实际 %+v", loggedIn[0])
+	}
+	if loggedIn[0].LikeCount != 1 {
+		t.Errorf("like_count = %d，期望 1", loggedIn[0].LikeCount)
+	}
+
+	guest := call(false)
+	if len(guest) != 1 {
+		t.Fatalf("游客：期望 1 条，实际 %d 条", len(guest))
+	}
+	if guest[0].Liked {
+		t.Errorf("游客没有身份，liked 应当是 false，实际 %+v", guest[0])
 	}
 }

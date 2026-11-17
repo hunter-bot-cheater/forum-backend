@@ -271,6 +271,7 @@ import {
   type CommentResp,
 } from '@/api/comment'
 import { useArticleStore } from '@/store/modules/article'
+import { useHotStore } from '@/store/modules/hot'
 import { useUserStore } from '@/store/modules/user'
 import type { Brief } from '@/api/message'
 import type { ReportTarget } from '@/api/report'
@@ -290,6 +291,9 @@ const route = useRoute()
 const user = useUserStore()
 // 列表页的缓存要在发布、删除后失效，否则回到列表还是旧数据。
 const articleStore = useArticleStore()
+// 热榜里每一行的 liked 是「我赞过没」，这里点了赞它就过期了，
+// 不告诉热榜一声，回到榜单上那一行还是灰的。
+const hotStore = useHotStore()
 
 const articleId = computed(() => Number(props.id))
 
@@ -462,6 +466,9 @@ async function toggleLike() {
       article.value.liked = data.liked
       article.value.like_count = data.like_count
     }
+    // 榜单上的爱心跟着变：只让缓存过期，不在这里重拉，
+    // 用户可能根本不回榜单，没必要为一次点赞多打一个请求。
+    hotStore.invalidate()
   } catch {
     // 拦截器提示过了，按钮保持原状即可。
   } finally {

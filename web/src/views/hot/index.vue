@@ -23,7 +23,7 @@
         <span class="hot-row__title">{{ item.title }}</span>
         <span class="hot-row__view">{{ item.view_count }} 浏览</span>
         <span class="hot-row__like">
-          <span class="hot-row__heart">♥</span>
+          <span class="hot-row__heart" :class="{ 'is-liked': item.liked }">♥</span>
           {{ item.like_count }}
         </span>
       </router-link>
@@ -147,8 +147,14 @@ onMounted(() => {
   color: var(--fs-text-3);
 }
 
+/* 爱心默认灰，只有「我赞过」才变红。用 liked 而不是 like_count 判断：
+   赞的人再多也不是我赞的，游客看到一片红会以为登录态丢了。 */
 .hot-row__heart {
   margin-right: 2px;
+  color: var(--fs-text-3);
+}
+
+.hot-row__heart.is-liked {
   color: #f5552d;
 }
 
