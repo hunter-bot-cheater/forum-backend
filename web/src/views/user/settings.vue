@@ -36,7 +36,7 @@
                填进去十个有八个是防盗链地址，最后都变成「头像没生效」的困惑。 -->
             <div class="field__row">
               <el-button :loading="uploading" :disabled="saving" @click="pickFile">
-                上传图片
+                上传头像
               </el-button>
             </div>
             <!-- 隐藏的原生 file 控件：el-upload 会自带一套上传队列、进度条和文件列表，
@@ -263,7 +263,7 @@ const avatarHint = computed(() => {
   if (avatarBroken.value) {
     return '当前头像的图片打不开：可能是以前填的外链失效或被对方站点屏蔽了。重新上传一张就行。'
   }
-  return '点「上传图片」选本地文件，会自动压缩再保存；没设头像时用名字首字兜底。'
+  return '点「上传头像」选本地文件，会自动压缩再保存；没设头像时用名字首字兜底。'
 })
 
 const dirty = computed(() => {
