@@ -133,6 +133,83 @@ func (h *ArticleHandler) ListTags(c *gin.Context) {
 	response.OK(c, tagListResp{List: tags})
 }
 
+// ListTagsForAdmin godoc
+// @Summary      标签管理列表
+// @Description  管理员用：分页列出全部标签（含没人使用的），带 id 与文章数，可按名字模糊搜索
+// @Tags         admin
+// @Produce      json
+// @Param        keyword    query  string  false  "按名字模糊匹配"
+// @Param        page       query  int     false  "页码，从 1 开始"
+// @Param        page_size  query  int     false  "每页条数，1~50"
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=tagAdminListResp}
+// @Failure      400  {string}  string  "分页参数不合法"
+// @Failure      403  {string}  string  "不是管理员"
+// @Router       /admin/tags [get]
+// ListTagsForAdmin 处理 GET /api/admin/tags。
+//
+// 与公开的 /tags 分开：那个只回前 20 个热门标签、不带 id，
+// 而管理端要能翻到冷门标签、也要拿到 id 才能发起改名。
+func (h *ArticleHandler) ListTagsForAdmin(c *gin.Context) {
+	page, pageSize, err := httputil.ParsePage(c)
+	if err != nil {
+		// 分页参数错误也走 MapServiceError：它认识 ErrInvalidInput，
+		// 和 service 里被 paging.New 挡下的错误是同一个映射路径。
+		httputil.MapServiceError(c, "list tags for admin", err)
+		return
+	}
+
+	items, total, err := h.svc.ListTagsForAdmin(c.Request.Context(), c.Query("keyword"), page, pageSize)
+	if err != nil {
+		httputil.MapServiceError(c, "list tags for admin", err)
+		return
+	}
+	response.OK(c, tagAdminListResp{
+		List:     items,
+		Total:    total,
+		Page:     page,
+		PageSize: pageSize,
+	})
+}
+
+// RenameTag godoc
+// @Summary      标签改名或合并
+// @Description  管理员用：把标签改成新名字；若新名字已被占用，则把两个标签合并
+// @Tags         admin
+// @Accept       json
+// @Produce      json
+// @Param        id    path  int           true  "标签 ID"
+// @Param        body  body  renameTagReq  true  "新名字"
+// @Success      200   {object}  httputil.SwaggerEnvelope{data=TagRenameResult}
+// @Failure      400   {string}  string  "名字为空、超长，或 id 格式不正确"
+// @Failure      403   {string}  string  "不是管理员"
+// @Failure      404   {string}  string  "标签不存在"
+// @Router       /admin/tags/{id} [put]
+// RenameTag 处理 PUT /api/admin/tags/:id。
+//
+// 返回里的 merged 说明这次是改名还是合并，moved_articles 是受影响的文章数。
+// 两个数字都给管理员看：合并一个用了两年的标签会一次性改掉几千篇文章的分类，
+// 这不该是一个看不出后果的静默操作。
+func (h *ArticleHandler) RenameTag(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		response.Error(c, http.StatusBadRequest, "id 格式不正确")
+		return
+	}
+
+	var req renameTagReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.Error(c, http.StatusBadRequest, "请求体格式不正确")
+		return
+	}
+
+	result, err := h.svc.RenameTag(c.Request.Context(), uint(id), req.Name)
+	if err != nil {
+		httputil.MapServiceError(c, "rename tag", err)
+		return
+	}
+	response.OK(c, result)
+}
+
 // Detail godoc
 // @Summary      文章详情
 // @Tags         articles

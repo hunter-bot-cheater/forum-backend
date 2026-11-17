@@ -365,6 +365,11 @@ func New(deps Deps) (*gin.Engine, error) {
 				{
 					adminAPI.GET("/reports", reportHandler.List)
 					adminAPI.PUT("/reports/:id", reportHandler.Handle)
+
+					// 标签改名与合并只给管理员：一次操作会改掉成千上万篇文章的标签，
+					// 普通用户误点一下就得靠对账式的数据修复才能还原。
+					adminAPI.GET("/tags", articleHandler.ListTagsForAdmin)
+					adminAPI.PUT("/tags/:id", articleHandler.RenameTag)
 				}
 			}
 		}

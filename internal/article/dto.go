@@ -189,6 +189,15 @@ type tagSuggestReq struct {
 	Content string `json:"content"`
 }
 
+// renameTagReq 是管理端改标签名的请求体。
+//
+// 只有一个字段，没有「是否合并」的开关：目标名字已经被别的标签占用时，
+// 合并是唯一说得通的处理方式（想并就得先把它删掉，而外键不让删）。
+// 让客户端先查一遍再决定，只会多一次往返和一处可能与服务端不一致的判断。
+type renameTagReq struct {
+	Name string `json:"name"`
+}
+
 // tagSuggestResp 只回一个标签名。
 // 空串表示「这次没建议」（模型不可用、返回内容不可用），不是错误：
 // 前端据此不显示建议行即可，不该弹提示。

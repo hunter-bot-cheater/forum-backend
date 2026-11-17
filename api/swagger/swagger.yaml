@@ -1,11 +1,31 @@
 basePath: /api
 definitions:
+  article.TagAdminItem:
+    properties:
+      count:
+        type: integer
+      id:
+        type: integer
+      name:
+        type: string
+    type: object
   article.TagCount:
     properties:
       count:
         type: integer
       name:
         type: string
+    type: object
+  article.TagRenameResult:
+    properties:
+      merged:
+        type: boolean
+      moved_articles:
+        type: integer
+      name:
+        type: string
+      tag_id:
+        type: integer
     type: object
   article.articleDetailResp:
     properties:
@@ -114,6 +134,24 @@ definitions:
         type: array
       title:
         type: string
+    type: object
+  article.renameTagReq:
+    properties:
+      name:
+        type: string
+    type: object
+  article.tagAdminListResp:
+    properties:
+      list:
+        items:
+          $ref: '#/definitions/article.TagAdminItem'
+        type: array
+      page:
+        type: integer
+      page_size:
+        type: integer
+      total:
+        type: integer
     type: object
   article.tagListResp:
     properties:
@@ -322,6 +360,8 @@ definitions:
         type: number
       title:
         type: string
+      view_count:
+        type: integer
     type: object
   hot.HotListResp:
     properties:
@@ -803,6 +843,89 @@ paths:
           schema:
             type: string
       summary: 处置一条举报
+      tags:
+      - admin
+  /admin/tags:
+    get:
+      description: 管理员用：分页列出全部标签（含没人使用的），带 id 与文章数，可按名字模糊搜索
+      parameters:
+      - description: 按名字模糊匹配
+        in: query
+        name: keyword
+        type: string
+      - description: 页码，从 1 开始
+        in: query
+        name: page
+        type: integer
+      - description: 每页条数，1~50
+        in: query
+        name: page_size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/article.tagAdminListResp'
+              type: object
+        "400":
+          description: 分页参数不合法
+          schema:
+            type: string
+        "403":
+          description: 不是管理员
+          schema:
+            type: string
+      summary: 标签管理列表
+      tags:
+      - admin
+  /admin/tags/{id}:
+    put:
+      consumes:
+      - application/json
+      description: 管理员用：把标签改成新名字；若新名字已被占用，则把两个标签合并
+      parameters:
+      - description: 标签 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: 新名字
+        in: body
+        name: body
+        required: true
+        schema:
+          $ref: '#/definitions/article.renameTagReq'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/article.TagRenameResult'
+              type: object
+        "400":
+          description: 名字为空、超长，或 id 格式不正确
+          schema:
+            type: string
+        "403":
+          description: 不是管理员
+          schema:
+            type: string
+        "404":
+          description: 标签不存在
+          schema:
+            type: string
+      summary: 标签改名或合并
       tags:
       - admin
   /articles:

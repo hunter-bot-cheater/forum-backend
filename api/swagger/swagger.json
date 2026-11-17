@@ -138,6 +138,141 @@
                 }
             }
         },
+        "/admin/tags": {
+            "get": {
+                "description": "管理员用：分页列出全部标签（含没人使用的），带 id 与文章数，可按名字模糊搜索",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "标签管理列表",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "按名字模糊匹配",
+                        "name": "keyword",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "页码，从 1 开始",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "每页条数，1~50",
+                        "name": "page_size",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/article.tagAdminListResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "分页参数不合法",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "403": {
+                        "description": "不是管理员",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/admin/tags/{id}": {
+            "put": {
+                "description": "管理员用：把标签改成新名字；若新名字已被占用，则把两个标签合并",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "标签改名或合并",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "标签 ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "新名字",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/article.renameTagReq"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/article.TagRenameResult"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "名字为空、超长，或 id 格式不正确",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "403": {
+                        "description": "不是管理员",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "标签不存在",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/articles": {
             "get": {
                 "description": "可按作者、关键词或标签筛选；关键词同时匹配标题与正文，不区分大小写",
@@ -2344,6 +2479,20 @@
         }
     },
     "definitions": {
+        "article.TagAdminItem": {
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
         "article.TagCount": {
             "type": "object",
             "properties": {
@@ -2352,6 +2501,23 @@
                 },
                 "name": {
                     "type": "string"
+                }
+            }
+        },
+        "article.TagRenameResult": {
+            "type": "object",
+            "properties": {
+                "merged": {
+                    "type": "boolean"
+                },
+                "moved_articles": {
+                    "type": "integer"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "tag_id": {
+                    "type": "integer"
                 }
             }
         },
@@ -2487,6 +2653,34 @@
                 },
                 "title": {
                     "type": "string"
+                }
+            }
+        },
+        "article.renameTagReq": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string"
+                }
+            }
+        },
+        "article.tagAdminListResp": {
+            "type": "object",
+            "properties": {
+                "list": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/article.TagAdminItem"
+                    }
+                },
+                "page": {
+                    "type": "integer"
+                },
+                "page_size": {
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
                 }
             }
         },
@@ -2789,6 +2983,9 @@
                 },
                 "title": {
                     "type": "string"
+                },
+                "view_count": {
+                    "type": "integer"
                 }
             }
         },
