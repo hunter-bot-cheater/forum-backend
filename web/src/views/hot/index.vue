@@ -29,14 +29,6 @@
         </span>
       </router-link>
     </el-card>
-
-    <!-- 口径写在页脚而不是标题旁：榜单的可信度取决于读者知道它怎么算的，
-         但这句话不该抢标题的位置。
-         浏览只调整已在榜的文章这一条必须写出来：看过一篇没点赞的文章，
-         在榜上找不到它时，读者要能知道是规则如此，而不是数字出错了。 -->
-    <p class="hot__note">
-      点赞后立即更新；浏览只推进已在榜的文章，让新文章进榜的是每小时一次的全量重算。
-    </p>
   </div>
 </template>
 
@@ -165,13 +157,6 @@ onMounted(() => {
 .hot-row__heart {
   margin-right: 2px;
   color: #f5552d;
-}
-
-.hot__note {
-  margin-top: 12px;
-  padding: 0 2px;
-  font-size: 12px;
-  color: var(--fs-text-3);
 }
 
 @media (max-width: 720px) {

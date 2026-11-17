@@ -107,6 +107,15 @@ const routes: RouteRecordRaw[] = [
 const router = createRouter({
   history: createWebHistory(),
   routes,
+  // 后退 / 前进回到上次离开时的高度，打开新页面回顶部。
+  // 少了前半条，从详情页返回列表会被甩回列表最顶上，
+  // 远看就像整页重新加载了一次——用户说的「大框架也跳转」多半是这个。
+  scrollBehavior(_to, _from, savedPosition) {
+    if (savedPosition) {
+      return savedPosition
+    }
+    return { top: 0 }
+  },
 })
 
 // 路由守卫：没 token 且不是公开页 → 去登录；已登录还去登录/注册 → 回文章列表。

@@ -30,7 +30,7 @@
         </button>
       </div>
 
-      <div v-loading="store.loading" class="nt__list">
+      <div v-loading="store.loading" class="nt__list pin-scroll">
         <el-empty
           v-if="!store.loading && store.items.length === 0"
           :description="emptyText"
@@ -85,7 +85,7 @@
       </div>
 
       <!-- 只有一页时不摆分页器：点了没反应，还会让人以为后面还有内容。 -->
-      <div v-if="store.total > store.pageSize" class="nt__foot">
+      <div v-if="store.total > store.pageSize" ref="pager" class="nt__foot">
         <el-pagination
           background
           layout="prev, pager, next"
@@ -100,11 +100,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useNotificationStore } from '@/store/modules/notification'
 import { formatListTime, initials } from '@/utils/format'
+import { keepInPlace } from '@/utils/scroll'
 import type { NotificationKind, NotificationResp } from '@/api/notification'
 
 const router = useRouter()
@@ -121,6 +122,9 @@ const tabs: { label: string; kind: NotificationKind }[] = [
 
 // 顶部胶囊用全站未读，tab 用本分类未读，两个数字口径不同不能混用。
 const totalUnread = computed(() => store.summary.total || 0)
+
+// 分页器节点：翻页前后各测一次位置，把页面钉在原处（见 onPage）。
+const pager = ref<HTMLElement | null>(null)
 
 const emptyText = computed(() => {
   if (store.kind === '') {
@@ -279,7 +283,13 @@ function onSwitch(kind: NotificationKind) {
 }
 
 function onPage(next: number) {
-  void store.refresh(store.kind, next)
+  // 翻页时把分页器钉在原位：通知条数会变（最后一页只有两三条），
+  // 页面高度跟着变，不校正的话按钮会从手指底下溜走。
+  const restore = keepInPlace(pager.value)
+  void store.refresh(store.kind, next).then(async () => {
+    await nextTick()
+    restore()
+  })
 }
 </script>
 

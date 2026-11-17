@@ -60,6 +60,30 @@ onMounted(() => {
   padding: 20px 24px 48px;
 }
 
+/* 换页时让内容淡入一下。只做进入、不做离场：
+   离场动画要先播完才换内容（transition 的 out-in），中间会空一帧，
+   看起来反而更像整页跳转。
+   子组件只有一个根节点时会带上本组件的作用域属性，所以这条能选中页面本身。 */
+.shell__main > :deep(*) {
+  animation: page-in 0.16s ease-out;
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 系统里关掉了动画的人不该看到任何淡入。 */
+@media (prefers-reduced-motion: reduce) {
+  .shell__main > :deep(*) {
+    animation: none;
+  }
+}
+
 /* 沉浸式页面（私信）：去掉内边距并锁死高度，让聊天区自己滚。
    高度用 flex 拉满而不是指望页面写 height: 100%：
    子项的百分比高度要能解析，前提是父级高度是「确定值」，

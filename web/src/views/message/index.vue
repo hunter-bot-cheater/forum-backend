@@ -85,11 +85,11 @@
             </el-avatar>
             <div class="im-chat__who" @click="goUser(peer.id)">
               <div class="im-chat__name">{{ peer.nickname }}</div>
-              <!-- 连着的时候显示 @用户名；昵称本来就是用户名时不显示，
-                   否则「123456789 / @123456789」上下重复一遍，纯占地方。
+              <!-- 连着的时候显示用户名；昵称本来就是用户名时不显示，
+                   否则「123456789 / 123456789」上下重复一遍，纯占地方。
                    断线提示优先，它比「对方叫什么」重要。 -->
               <div class="im-chat__hint" :class="{ 'is-warn': connectionText }">
-                {{ connectionText || (peer.nickname === peer.username ? '' : '@' + peer.username) }}
+                {{ connectionText || (peer.nickname === peer.username ? '' : peer.username) }}
               </div>
             </div>
           </header>

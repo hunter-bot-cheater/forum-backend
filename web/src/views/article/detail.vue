@@ -95,7 +95,7 @@
           </div>
         </div>
 
-        <div v-loading="commentsLoading" class="dt-comments__body">
+        <div v-loading="commentsLoading" class="dt-comments__body pin-scroll">
           <p v-if="anchorGone" class="dt-anchor-hint">
             通知里那条评论已经被删除了，下面是最新的评论。
           </p>
@@ -206,7 +206,7 @@
           </div>
         </div>
 
-        <div v-if="commentTotal > commentPageSize" class="dt-foot">
+        <div v-if="commentTotal > commentPageSize" ref="commentPager" class="dt-foot">
           <el-pagination
             background
             layout="prev, pager, next"
@@ -254,6 +254,8 @@ import type { Brief } from '@/api/message'
 import type { ReportTarget } from '@/api/report'
 import ReportDialog from '@/components/ReportDialog.vue'
 import { formatCount, formatRelativeTime, initials } from '@/utils/format'
+import { goBack as goBackTo } from '@/utils/nav'
+import { keepInPlace } from '@/utils/scroll'
 
 // 路由给这个组件配了 props: true，所以 id 从 props 拿而不是从 route.params 取，
 // 少一次对 URL 结构的耦合。
@@ -279,6 +281,8 @@ const commentTotal = ref(0)
 const commentPage = ref(1)
 // 一页 20 条根评论。回复不算在分页里，跟着各自的根评论一起下发。
 const commentPageSize = 20
+// 评论区分页器的节点：翻页前后各测一次位置，把页面钉在原处（见 onCommentPage）。
+const commentPager = ref<HTMLElement | null>(null)
 const commentsLoading = ref(false)
 // anchorGone 表示通知带过来的那条评论已经不在了（被删除）。
 // 用评论区顶部的内联提示而不是弹窗：用户此刻正盯着评论区，
@@ -346,7 +350,13 @@ async function loadComments(p: number) {
 function onCommentPage(next: number) {
   // 换页时收起回复框：它属于上一页的某条评论，留着会指向看不到的内容。
   cancelReply()
-  void loadComments(next)
+  // 评论条数在最后一页会变少，页面高度跟着变，分页器会被推着跑。
+  // 和列表页同一处理：把它钉在视口里的原位。
+  const restore = keepInPlace(commentPager.value)
+  void loadComments(next).then(async () => {
+    await nextTick()
+    restore()
+  })
 }
 
 // initComments 决定首次进评论区落在第几页。
@@ -611,15 +621,8 @@ function canReport(target: CommentResp): boolean {
 function goBack() {
   // 用 back 而不是 push('/articles')：从列表第 3 页点进来时，
   // push 会把人送回第 1 页，丢失刚才翻页的位置。
-  //
-  // 直接打开分享链接时没有上一页，back 会直接离开站点（PWA 里就是白屏），
-  // history.state.back 为空正对应这种情况，此时退回列表。
-  const back = window.history.state ? window.history.state.back : null
-  if (typeof back === 'string' && back !== '') {
-    router.back()
-    return
-  }
-  void router.replace('/articles')
+  // 直接打开分享链接时没有上一页，此时退回列表。
+  goBackTo(router, '/articles')
 }
 
 const authorName = computed(() => {

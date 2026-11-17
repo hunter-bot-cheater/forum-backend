@@ -117,6 +117,7 @@ import { ElMessage, ElMessageBox, type InputInstance } from 'element-plus'
 import { createArticle, getArticle, suggestTag, updateArticle } from '@/api/article'
 import { useArticleStore } from '@/store/modules/article'
 import { useUserStore } from '@/store/modules/user'
+import { goBack as goBackTo } from '@/utils/nav'
 
 const route = useRoute()
 const router = useRouter()
@@ -439,16 +440,11 @@ async function submit() {
 // 直接打开编辑地址（没有上一页）时 back 会离开站点，这时改用 replace，
 // 退回对应的落地页：编辑态回详情，新建态回列表。
 function leave() {
-  const back = window.history.state ? window.history.state.back : null
-  if (typeof back === 'string' && back !== '') {
-    router.back()
-    return
-  }
   if (isEdit.value) {
-    void router.replace('/articles/' + String(articleId.value))
+    goBackTo(router, '/articles/' + String(articleId.value))
     return
   }
-  void router.replace('/articles')
+  goBackTo(router, '/articles')
 }
 </script>
 

@@ -67,12 +67,12 @@
         <el-button v-else type="primary" @click="goWrite">写第一篇</el-button>
       </el-empty>
 
-      <div v-else v-loading="store.loading" class="feed__list">
+      <div v-else v-loading="store.loading" class="feed__list pin-scroll">
         <ArticleCard v-for="item in store.list" :key="item.id" :item="item" />
       </div>
 
       <!-- 只有一页时不摆分页器：点了没反应，还会让人以为后面还有内容。 -->
-      <div v-if="store.total > store.pageSize" class="feed__pager">
+      <div v-if="store.total > store.pageSize" ref="pager" class="feed__pager">
         <el-pagination
           background
           layout="prev, pager, next"
@@ -108,7 +108,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Close, Search } from '@element-plus/icons-vue'
 import ArticleCard from '@/components/ArticleCard.vue'
@@ -117,6 +117,7 @@ import { useArticleStore } from '@/store/modules/article'
 import { useHotStore } from '@/store/modules/hot'
 import { useImStore } from '@/store/modules/im'
 import { useNotificationStore } from '@/store/modules/notification'
+import { keepInPlace } from '@/utils/scroll'
 
 const route = useRoute()
 const router = useRouter()
@@ -128,6 +129,9 @@ const notification = useNotificationStore()
 // draft 是输入框里的即时内容，store.keyword 是「已经生效的搜索词」。
 // 两者分开：边打字边发请求会让后端每敲一个字扫一次表。
 const draft = ref('')
+
+// 分页器节点：翻页前后各测一次它的位置，用来把页面钉在原处（见 onPage）。
+const pager = ref<HTMLElement | null>(null)
 
 // 空态文案按「先标签、后搜索」判断：标签是更窄的条件，
 // 同时有搜索词和标签时，用户更想知道的是「这个标签下有没有东西」。
@@ -211,20 +215,19 @@ function clearTag() {
 }
 
 function onPage(next: number) {
-  void store.load(next)
-  scrollToTop()
+  // 翻页不把页面滚回顶部：分页器就在手指下面，跳回顶部等于每翻一页都要重新滑下来。
+  // 记录它此刻在视口里的位置，数据回来、DOM 重排完再把它放回去——
+  // 这样最后一页只有三条、页面变短时，分页器也不会被内容推着上下跑。
+  const restore = keepInPlace(pager.value)
+  void store.load(next).then(async () => {
+    await nextTick()
+    restore()
+  })
 }
 
 // 空态的「写第一篇」与顶栏按钮走同一个地址，不复制一份跳转逻辑。
 function goWrite() {
   void router.push('/write')
-}
-
-// 翻页后回到顶部：一页十篇时当前视口可能已经滚到列表中部，
-// 不回去会让读者从第三条开始看，误以为列表没换。
-// 新版外壳下滚动容器是 body（主区域不自己滚），所以直接滚 window 就够。
-function scrollToTop() {
-  window.scrollTo({ top: 0, behavior: 'auto' })
 }
 </script>
 

@@ -39,7 +39,7 @@
       </div>
 
       <!-- ================= 举报处理 ================= -->
-      <div v-if="activePanel === 'reports'">
+      <div v-if="activePanel === 'reports'" class="pin-scroll">
         <div class="adm__bar">
           <div class="adm__seg">
             <button
@@ -116,7 +116,7 @@
             </div>
           </div>
 
-          <div v-if="reports.total > PAGE_SIZE" class="adm__pager">
+          <div v-if="reports.total > PAGE_SIZE" ref="reportPager" class="adm__pager">
             <el-pagination
               background
               layout="prev, pager, next"
@@ -130,7 +130,7 @@
       </div>
 
       <!-- ================= 标签管理 ================= -->
-      <div v-else>
+      <div v-else class="pin-scroll">
         <div class="adm__bar">
           <el-input
             v-model="tags.keyword"
@@ -192,7 +192,7 @@
             </tbody>
           </table>
 
-          <div v-if="tags.total > PAGE_SIZE" class="adm__pager">
+          <div v-if="tags.total > PAGE_SIZE" ref="tagPager" class="adm__pager">
             <el-pagination
               background
               layout="prev, pager, next"
@@ -216,11 +216,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useUserStore } from '@/store/modules/user'
 import { formatRelativeTime } from '@/utils/format'
+import { keepInPlace } from '@/utils/scroll'
 import {
   handleReport,
   listReports,
@@ -281,6 +282,10 @@ const tags = reactive({
   keyword: '',
   loading: false,
 })
+
+// 两个分页器的节点：翻页前后各测一次位置，把页面钉在原处。
+const reportPager = ref<HTMLElement | null>(null)
+const tagPager = ref<HTMLElement | null>(null)
 // editingId 非 0 时，那一行切换成输入框；同一时刻只允许一行处于编辑态，
 // 两行同时编辑容易把「保存」点成另一行的。
 const editingId = ref(0)
@@ -390,7 +395,13 @@ function switchReportStatus(status: ReportStatus) {
 
 function onReportPage(page: number) {
   reports.page = page
-  void loadReports()
+  // 翻页时把分页器钉在视口原位：最后一页只有两三条，页面变短后
+  // 按钮会从手指底下溜走，用户得重新滚下来才能继续翻。
+  const restore = keepInPlace(reportPager.value)
+  void loadReports().then(async () => {
+    await nextTick()
+    restore()
+  })
 }
 
 // act 是三种处置动作的共同出口：调接口 → 提示 → 重拉当前页。
@@ -478,7 +489,11 @@ function searchTags() {
 
 function onTagPage(page: number) {
   tags.page = page
-  void loadTags()
+  const restore = keepInPlace(tagPager.value)
+  void loadTags().then(async () => {
+    await nextTick()
+    restore()
+  })
 }
 
 function startEdit(item: AdminTagItem) {

@@ -19,17 +19,37 @@
       <section class="field">
         <div class="field__label">头像</div>
         <div class="field__body">
-          <!-- 预览跟着输入实时变：贴完地址就能看到效果，
-               不用先保存再回主页确认。 -->
-          <el-avatar :size="64" :src="previewAvatar" class="field__avatar">{{ initial }}</el-avatar>
+          <!-- 预览跟着 avatarURL 变：传完立刻换成新图，不用等保存。
+               监听 error 是必须的：el-avatar 加载失败时会把 img 整个摘掉、
+               静默改回首字兜底，页面上没有任何变化，用户只会以为「保存没生效」。
+               只剩历史遗留的外链会走到这条提示（对方站点开防盗链时带 Referer 直接 403）。 -->
+          <el-avatar
+            :size="64"
+            :src="previewAvatar"
+            class="field__avatar"
+            @error="onAvatarError"
+          >
+            {{ initial }}
+          </el-avatar>
           <div class="field__control">
-            <el-input
-              v-model="avatarURL"
-              placeholder="https://example.com/avatar.png"
-              clearable
-              :disabled="saving"
+            <!-- 只留上传：贴外链看着灵活，实际大多数人都没有可外链的图床，
+               填进去十个有八个是防盗链地址，最后都变成「头像没生效」的困惑。 -->
+            <div class="field__row">
+              <el-button :loading="uploading" :disabled="saving" @click="pickFile">
+                上传图片
+              </el-button>
+            </div>
+            <!-- 隐藏的原生 file 控件：el-upload 会自带一套上传队列、进度条和文件列表，
+                 这里只需要「选一个文件」，那套 UI 反而要一条条关掉。 -->
+            <input
+              ref="fileInput"
+              type="file"
+              accept="image/jpeg,image/png,image/gif,image/webp"
+              class="field__file"
+              @change="onFilePicked"
             />
-            <p class="field__hint" :class="{ 'is-error': avatarError }">
+            <p v-if="uploadNote" class="field__note">{{ uploadNote }}</p>
+            <p class="field__hint" :class="{ 'is-error': avatarBroken }">
               {{ avatarHint }}
             </p>
           </div>
@@ -56,7 +76,7 @@
         <div class="field__label">用户名</div>
         <div class="field__body">
           <div class="field__control">
-            <span class="field__readonly">@{{ username }}</span>
+            <span class="field__readonly">{{ username }}</span>
             <p class="field__hint">用户名是登录凭据，暂不支持修改。</p>
           </div>
         </div>
@@ -85,7 +105,7 @@
       <div class="settings__foot">
         <span class="settings__stat">{{ statusText }}</span>
         <div class="settings__ops">
-          <el-button :disabled="saving" @click="cancel">取消</el-button>
+          <el-button :disabled="saving || uploading" @click="cancel">取消</el-button>
           <el-button type="primary" :loading="saving" :disabled="!canSave" @click="save">
             保存
           </el-button>
@@ -96,14 +116,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { updateMe, type ProfilePatch, type UserProfile } from '@/api/user'
+import { uploadAvatar } from '@/api/upload'
 import { useUserStore } from '@/store/modules/user'
 import { initials } from '@/utils/format'
+import { goBack as goBackTo } from '@/utils/nav'
 
-// 编辑资料页：改昵称、头像地址、简介三样，用户名只读。
+// 编辑资料页：改头像、昵称、简介三样，用户名只读。
 // 只走一次 PUT /users/me，成功后用返回值回填本地与该页基线。
 const router = useRouter()
 const user = useUserStore()
@@ -130,16 +152,99 @@ const baseline = ref({ nickname: '', avatarURL: '', bio: '' })
 
 const saving = ref(false)
 
-// previewAvatar 只在地址像 http(s) 链接时才交给 el-avatar，
-// 其他情况（空串、刚敲了半截）返回 undefined 走首字兜底：
-// 否则每输入一个字符都会请求一次无效图片，头像区不断闪成破图。
+// previewAvatar 只在确实有地址时才交给 el-avatar，否则返回 undefined 走首字兜底：
+// 地址已经不由用户手输，只可能是空串（没设过头像）或服务端给的值。
 const previewAvatar = computed(() => {
   const v = avatarURL.value.trim()
-  if (isHTTPURL(v)) {
+  if (v !== '') {
     return v
   }
   return undefined
 })
+
+// avatarBroken 表示「这个地址的图真的加载不出来」。
+//
+// el-avatar 的失败处理是静默的：它把 <img> 摘掉、渲染回默认插槽里的首字，
+// 外观上和「本来就没设头像」完全一样。用户看到的就是「头像没变」。
+// 现在头像只能上传，能走到这里的只剩两种老数据：以前填的外链被对方站点封了，
+// 或者当年上传的文件被清理掉了。这一位就是给那种情况留一句人话。
+const avatarBroken = ref(false)
+
+// 地址一变就先清掉失败标记：上一次的失败不该一直挂着，
+// 也不能等新的加载结果——el-avatar 只在失败时发事件，成功不回调，
+// 不清的话重新上传成功后提示会一直留着。
+watch(previewAvatar, () => {
+  avatarBroken.value = false
+})
+
+function onAvatarError() {
+  avatarBroken.value = true
+}
+
+// ---------------- 上传 ----------------
+
+// uploading 期间禁用输入与保存：上传完会自动落库，
+// 这中间用户再点保存，会用还没更新的地址把刚上传的结果覆盖掉。
+const uploading = ref(false)
+
+// uploadNote 显示这次上传的压缩结果（原图多大、压完多大）。
+// 不显示的话，用户看到「头像变了」但不知道服务端动了手脚，
+// 下次传一张大图发现变小了，会以为是图坏了。
+const uploadNote = ref('')
+
+const fileInput = ref<HTMLInputElement | null>(null)
+
+// pickFile 只是转一下点击：原生 file 控件藏在页面上，样式不可控，
+// 用普通按钮触发，外观才能和其它按钮一致。
+function pickFile() {
+  fileInput.value?.click()
+}
+
+// onFilePicked 选完文件立刻上传并落库。
+//
+// 为什么不在上传后只填地址、让用户再点保存：
+// 用户的心智是「选一张图 → 头像变了」。中间多一次保存，
+// 他会以为上传没成功，然后在输入框里反复试。
+async function onFilePicked(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  // 立刻清空选择：不清的话，同一个文件第二次选不会触发 change 事件，
+  // 用户会以为按钮坏了。
+  input.value = ''
+  if (!file) {
+    return
+  }
+
+  uploading.value = true
+  uploadNote.value = ''
+  try {
+    const uploaded = await uploadAvatar(file)
+    const updated = await updateMe({ avatar_url: uploaded.url })
+    user.applyProfile(updated)
+    // 只改头像这一项，不调 fill()：页面上可能还有没保存的昵称，
+    // 整体回填会把用户正在敲的内容覆盖掉。
+    avatarURL.value = uploaded.url
+    baseline.value.avatarURL = uploaded.url
+    uploadNote.value = `已压缩：${formatBytes(uploaded.original_bytes)} → ${formatBytes(uploaded.bytes)}`
+    ElMessage.success('头像已更新')
+  } catch {
+    // 失败提示由请求拦截器统一弹出（413/415 都会带后端给的具体原因）。
+  } finally {
+    uploading.value = false
+  }
+}
+
+// formatBytes 把字节数换成好读的单位。
+// 只保留一位小数：这里要传达的是「小了一个数量级」，不是精确到字节。
+function formatBytes(n: number) {
+  if (n < 1024) {
+    return n + ' B'
+  }
+  if (n < 1024 * 1024) {
+    return (n / 1024).toFixed(0) + ' KB'
+  }
+  return (n / 1024 / 1024).toFixed(1) + ' MB'
+}
 
 const initial = computed(() => {
   const name = nickname.value.trim()
@@ -152,24 +257,13 @@ const initial = computed(() => {
   return '?'
 })
 
-const nicknamePlaceholder = computed(() => '不填则显示 @' + username.value)
-
-// 空地址是合法的（表示用首字兜底），非空但不是 http(s) 才算错。
-const avatarInvalid = computed(() => {
-  const v = avatarURL.value.trim()
-  if (v === '') {
-    return false
-  }
-  return !isHTTPURL(v)
-})
-
-const avatarError = computed(() => avatarInvalid.value)
+const nicknamePlaceholder = computed(() => '不填则显示 ' + username.value)
 
 const avatarHint = computed(() => {
-  if (avatarInvalid.value) {
-    return '要以 http:// 或 https:// 开头的图片地址'
+  if (avatarBroken.value) {
+    return '当前头像的图片打不开：可能是以前填的外链失效或被对方站点屏蔽了。重新上传一张就行。'
   }
-  return '填图片的 http/https 地址，留空则用名字首字。'
+  return '点「上传图片」选本地文件，会自动压缩再保存；没设头像时用名字首字兜底。'
 })
 
 const dirty = computed(() => {
@@ -182,27 +276,25 @@ const dirty = computed(() => {
   return bio.value !== baseline.value.bio
 })
 
-const canSave = computed(() => !saving.value && dirty.value && !avatarInvalid.value)
+// 上传过程中不允许保存：上传完成会自动落库，这期间点保存
+// 会用还没更新的地址把刚上传的结果覆盖回去。
+const canSave = computed(() => !saving.value && !uploading.value && dirty.value)
 
 const statusText = computed(() => {
+  if (uploading.value) {
+    return '正在上传…'
+  }
   if (saving.value) {
     return '正在保存…'
   }
-  if (avatarInvalid.value) {
-    return '头像地址不合法'
+  if (avatarBroken.value) {
+    return '头像图片打不开'
   }
   if (dirty.value) {
     return '有未保存的修改'
   }
   return '资料已是最新'
 })
-
-// isHTTPURL 是后端的简化版：只要求 scheme 与一个非空 host。
-// 前端不做完整 URL 解析——真正的校验在 normalizeAvatarURL，
-// 这里只拦「一眼就不对」的输入，避免用户点保存才被 400 打回来。
-function isHTTPURL(raw: string) {
-  return /^https?:\/\/[^\s/]+/i.test(raw)
-}
 
 // fill 用一份资料回填表单，并把基线一起更新。
 // 保存成功后也走这里：后端会 trim、可能改大小写，以库里的真值为准，
@@ -273,14 +365,13 @@ async function save() {
   }
 }
 
-// goBack 回自己的主页，而不是 router.back()：
-// 直接打开这个地址时没有上一页，back 会退出站点。
+// goBack 优先真的回上一页（从主页点进来就回主页，从文章列表点进来就回列表）；
+// 没有上一页（直接打开这个地址）才退回自己的主页。
+// 以前这里固定 push 自己的主页：主页的「返回」再 back 回来，
+// 两页就会一直互相弹——每点一次都往历史里压一条，看起来就是死循环。
 function goBack() {
-  if (user.userId > 0) {
-    void router.push('/users/' + String(user.userId))
-    return
-  }
-  void router.push('/articles')
+  const fallback = user.userId > 0 ? '/users/' + String(user.userId) : '/articles'
+  goBackTo(router, fallback)
 }
 
 // 取消 = 放弃这次修改：先把表单还原成基线，dirty 变 false 再离开，
@@ -405,6 +496,25 @@ onMounted(() => {
   color: var(--fs-text-3);
 }
 
+/* 按钮独占一行，高度与右侧其它输入框的首行对齐。 */
+.field__row {
+  display: flex;
+  gap: 8px;
+}
+
+/* 原生 file 控件完全藏起来，靠「上传图片」按钮触发它的 click。
+   display:none 不影响 input.click()，现代浏览器都允许。 */
+.field__file {
+  display: none;
+}
+
+/* 压缩结果比普通提示更重要，用主色让它从灰字里跳出来。 */
+.field__note {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--fs-primary);
+}
+
 /* 唯一需要提示「填错了」的地方，用点赞那支暖红。
    不做输入框标红：错误已经写在下面一行文字里，再描红边是重复。 */
 .field__hint.is-error {
@@ -441,7 +551,7 @@ onMounted(() => {
 }
 
 /* 窄屏：label 换到输入框上方，一行只放一个字段。
-   并排会把输入框压到 200px 出头，长地址和简介都看不清。 */
+   并排会把输入框压到 200px 出头，简介看不清。 */
 @media (max-width: 720px) {
   .settings__card {
     padding: 4px 16px 16px;

@@ -23,7 +23,11 @@
             <h1 class="up__name">{{ profile.nickname }}</h1>
             <span v-if="isSelf" class="up__self">这是你的主页</span>
           </div>
-          <div class="up__handle">@{{ profile.username }}</div>
+          <!-- 没设昵称时接口回的就是用户名，此时上面那行已经是它了，
+               再显示一遍等于把同一个名字印两次。 -->
+          <div v-if="profile.nickname !== profile.username" class="up__handle">
+            {{ profile.username }}
+          </div>
           <!-- 没填简介时整行不渲染：留一个空段落会让头部下方莫名多出一条空隙。 -->
           <p v-if="profile.bio" class="up__bio">{{ profile.bio }}</p>
 
@@ -87,11 +91,11 @@
           :image-size="88"
         />
 
-        <div v-else v-loading="articleLoading" class="up__list">
+        <div v-else v-loading="articleLoading" class="up__list pin-scroll">
           <ArticleCard v-for="item in articles" :key="item.id" :item="item" />
         </div>
 
-        <div v-if="articleTotal > articlePageSize" class="up__pager">
+        <div v-if="articleTotal > articlePageSize" ref="articlePager" class="up__pager">
           <el-pagination
             background
             layout="prev, pager, next"
@@ -105,7 +109,7 @@
 
       <!-- 关注 / 粉丝：同一个列表组件，只是点击按钮的语义不同。 -->
       <div v-else class="fs-card up__people">
-        <div v-loading="followLoading">
+        <div v-loading="followLoading" class="pin-scroll">
           <el-empty
             v-if="!followLoading && follows.length === 0"
             :description="emptyFollowText"
@@ -125,7 +129,7 @@
 
             <div class="person__body" @click="goUser(item.id)">
               <div class="person__name">{{ item.nickname }}</div>
-              <div class="person__meta">@{{ item.username }} · {{ formatRelativeTime(item.followed_at) }}关注</div>
+              <div class="person__meta">{{ item.username }} · {{ formatRelativeTime(item.followed_at) }}关注</div>
             </div>
 
             <div v-if="item.id !== user.userId" class="person__actions">
@@ -142,7 +146,7 @@
           </div>
         </div>
 
-        <div v-if="followTotal > followPageSize" class="up__pager up__pager--inner">
+        <div v-if="followTotal > followPageSize" ref="followPager" class="up__pager up__pager--inner">
           <el-pagination
             background
             layout="prev, pager, next"
@@ -158,7 +162,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import ArticleCard from '@/components/ArticleCard.vue'
 import { listArticles, type ArticleListItem } from '@/api/article'
@@ -173,6 +177,8 @@ import {
 } from '@/api/user'
 import { useUserStore } from '@/store/modules/user'
 import { formatRelativeTime, initials } from '@/utils/format'
+import { goBack as goBackTo } from '@/utils/nav'
+import { keepInPlace } from '@/utils/scroll'
 
 // 用户主页。三段内容（他的文章、他关注的人、他的粉丝）共用一个页面，
 // 靠 tab 切换而不是三个路由：切 tab 不该刷新整页，也不该在浏览器历史里堆三条记录。
@@ -224,6 +230,10 @@ let followSeq = 0
 const followBusy = ref(false)
 // 正在请求的那一行。用 id 而不是布尔值，避免所有行的按钮一起转圈。
 const busyId = ref(0)
+
+// 两个分页器的节点：翻页前测一次位置，渲染完把页面钉回原处（见 onArticlePage）。
+const articlePager = ref<HTMLElement | null>(null)
+const followPager = ref<HTMLElement | null>(null)
 
 const avatarURL = computed(() => {
   if (profile.value && profile.value.avatar_url) {
@@ -398,18 +408,20 @@ function onTab(kind: Tab) {
 }
 
 function onArticlePage(page: number) {
-  void loadArticles(page)
-  scrollTop()
+  // 与文章列表页同一处理：翻页后页面别动，分页器钉在原位，用户能连点下一页。
+  const restore = keepInPlace(articlePager.value)
+  void loadArticles(page).then(async () => {
+    await nextTick()
+    restore()
+  })
 }
 
 function onFollowPage(page: number) {
-  void loadFollows(page)
-  scrollTop()
-}
-
-// 翻页后回到顶部：与文章列表页同一处理，两页的翻页手感要一致。
-function scrollTop() {
-  window.scrollTo({ top: 0, behavior: 'auto' })
+  const restore = keepInPlace(followPager.value)
+  void loadFollows(page).then(async () => {
+    await nextTick()
+    restore()
+  })
 }
 
 // toggleFollow 关注 / 取关头部这个人。
@@ -502,8 +514,11 @@ function goSettings() {
   void router.push('/settings/profile')
 }
 
+// 返回上一层。上一页是「编辑资料」时不能 back：
+// 那一页的返回又指回本页，两页会互相弹，用户看到的就是死循环。
+// 这种情况直接回文章列表，属于「从哪来回哪去」的合理近似。
 function goBack() {
-  router.back()
+  goBackTo(router, '/articles', ['/settings'])
 }
 
 watch(userId, () => {
