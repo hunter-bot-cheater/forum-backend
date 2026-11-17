@@ -3,13 +3,16 @@ package article
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 
 	"forum-backend/internal/domain"
+	"forum-backend/internal/keys"
 	"forum-backend/internal/model"
 	"forum-backend/internal/testutil"
 )
@@ -757,4 +760,43 @@ func viewCountInDB(t *testing.T, db *gorm.DB, id uint) int64 {
 		t.Fatalf("读 view_count 失败: %v", err)
 	}
 	return n
+}
+
+// TestRecordViewBumpsHotScore 验证浏览在入库之后给热榜加一档权重。
+//
+// 热榜分数是「点赞 × 3 + 浏览」，浏览这条信号就靠这里接上。
+// 同时断言「不在榜的文章不会被浏览拉进 ZSET」：不带这个约束的话，
+// 每篇被打开过的文章都会在集合里留一条，几年后 ZSET 就成了全站文章的镜像。
+func TestRecordViewBumpsHotScore(t *testing.T) {
+	db := testutil.NewDB(t)
+	rdb := testutil.NewRedis(t)
+	svc := NewArticleService(db, rdb, nil)
+	author := testutil.SeedUser(t, db, "author")
+	post := testutil.SeedArticle(t, db, author.ID, "已在榜的文章")
+	ctx := context.Background()
+
+	member := strconv.FormatUint(uint64(post.ID), 10)
+	if err := rdb.ZAdd(ctx, keys.HotArticlesKey, redis.Z{Score: 9, Member: member}).Err(); err != nil {
+		t.Fatalf("预置榜单失败: %v", err)
+	}
+
+	if err := svc.RecordView(ctx, post.ID, "u:1"); err != nil {
+		t.Fatalf("记录浏览失败: %v", err)
+	}
+	score, err := rdb.ZScore(ctx, keys.HotArticlesKey, member).Result()
+	if err != nil {
+		t.Fatalf("读热榜分数失败: %v", err)
+	}
+	if score != 10 {
+		t.Errorf("浏览一次后热榜分数 = %v，期望 10（9 + 一次浏览）", score)
+	}
+
+	other := testutil.SeedArticle(t, db, author.ID, "还没上榜的文章")
+	if err := svc.RecordView(ctx, other.ID, "u:2"); err != nil {
+		t.Fatalf("记录第二篇的浏览失败: %v", err)
+	}
+	_, err = rdb.ZScore(ctx, keys.HotArticlesKey, strconv.FormatUint(uint64(other.ID), 10)).Result()
+	if !errors.Is(err, redis.Nil) {
+		t.Errorf("不在榜的文章不该被拉进 ZSET，实际 err = %v", err)
+	}
 }

@@ -77,20 +77,27 @@ const fallbackTop = 100
 const fallbackTTL = 5 * time.Second
 
 // HotArticle 是热榜里的一条，service 查好标题后返回给 handler。
-// Score 与 LikeCount 现在存的是同一个数（点赞数），分开是给以后换热度算法留位置：
-// 那时 Score 会是加权结果，LikeCount 仍是原始点赞数。
+//
+// Score 是排名依据，等于 ScoreOf(LikeCount, ViewCount)；
+// 两个原始数字单独留着，前端才能解释「它凭什么排在这里」。
 type HotArticle struct {
 	ArticleID uint    `json:"article_id"`
 	Score     float64 `json:"score"`
 	Title     string  `json:"title"`
 	LikeCount int64   `json:"like_count"`
+	ViewCount int64   `json:"view_count"`
 }
 
-// hotRow 是 MySQL 聚合查询的落点：一篇怎么排、得了多少分。
-// 列名用 gorm tag 指定，因为 COUNT(*) 的别名是 SQL 里写的 score，不是结构体字段名推导出来的。
+// hotRow 是 MySQL 聚合查询的落点：一篇怎么排、得了多少分、原始计数各是多少。
+// 列名用 gorm tag 指定，因为别名是 SQL 里写的，不是结构体字段名推导出来的。
+//
+// LikeCount 在两条路径上来源不同：重建时由 SQL 一次聚合出来，
+// 读 ZSET 时只能单独查一次（分数是合成值，反推不出点赞数）。
 type hotRow struct {
 	ArticleID uint  `gorm:"column:article_id"`
 	Score     int64 `gorm:"column:score"`
+	LikeCount int64 `gorm:"column:like_count"`
+	ViewCount int64 `gorm:"column:view_count"`
 }
 
 // HotService 热榜业务逻辑。
@@ -180,7 +187,7 @@ func (s *HotService) Top(ctx context.Context, n int) ([]HotArticle, error) {
 	// 省掉为每条再查一次 ZSCORE。
 	rows, err := s.topFromZSet(ctx, n)
 	if err != nil {
-		slog.WarnContext(ctx, "read hot zset", "error", err)
+		slog.WarnContext(ctx, "load hot ranking", "error", err)
 		return s.TopFromMySQL(ctx, n)
 	}
 
@@ -194,7 +201,7 @@ func (s *HotService) Top(ctx context.Context, n int) ([]HotArticle, error) {
 		}
 		rows, err = s.topFromZSet(ctx, n)
 		if err != nil {
-			slog.WarnContext(ctx, "read hot zset after self-heal", "error", err)
+			slog.WarnContext(ctx, "load hot ranking after self-heal", "error", err)
 			return s.TopFromMySQL(ctx, n)
 		}
 	}
@@ -254,7 +261,35 @@ func (s *HotService) topFromZSet(ctx context.Context, n int) ([]hotRow, error) {
 		}
 		rows = append(rows, hotRow{ArticleID: uint(id), Score: int64(p.Score)})
 	}
+
+	// ZSET 里只有合成分数，反推不出点赞数，这里补一次。
+	// 放在解析之后统一做，两条读取路径（正常读、自愈后重读）都能用到。
+	if err := s.fillLikeCounts(ctx, rows); err != nil {
+		return nil, err
+	}
 	return rows, nil
+}
+
+// fillLikeCounts 给来自 ZSET 的行补上点赞数。
+//
+// 榜单展示的「♥ N」是原始点赞数，不是分数。
+// 这个查询是读榜多出来的一次成本，换来的是数字不会被合成分数污染。
+func (s *HotService) fillLikeCounts(ctx context.Context, rows []hotRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	ids := make([]uint, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ArticleID)
+	}
+	counts, err := countLikesByIDs(ctx, s.db, ids)
+	if err != nil {
+		return err
+	}
+	for i := range rows {
+		rows[i].LikeCount = counts[rows[i].ArticleID]
+	}
+	return nil
 }
 
 // ensureHotZSet 把同一时刻发现「投影丢失」的请求合并成一次重建。
@@ -343,21 +378,16 @@ func (s *HotService) markCooldown(ctx context.Context) {
 // 只由 ensureHotZSet 调用，不对外暴露，也不再有脚本调用它。
 //
 // 三次改写留下的两条铁律：
-//  1. SQL 必须带 LIMIT。不带的话，点赞表涨到千万级，
-//     这条 GROUP BY 会扫穿整张表，MySQL 的 CPU 直接被打满。
+//  1. SQL 必须带 LIMIT。不带的话，articles 涨到百万级，
+//     这条带 JOIN 的 GROUP BY 会扫穿两张表，MySQL 的 CPU 直接被打满。
 //     聚合本身仍然要过一遍索引，LIMIT 省下的是结果集和后续的 ZADD 条数。
 //  2. 新榜必须落在临时 key 上，写完 RENAME 换过去。
 //     直接在正式 key 上 Del 再逐条 ZAdd，中途任何一次读都会拿到残缺的榜单，
 //     而重建期间的点赞也会被后面的全量覆盖冲掉。
 func (s *HotService) rebuild(ctx context.Context) error {
-	var rows []hotRow
-	if err := s.db.WithContext(ctx).Model(&model.ArticleLike{}).
-		Select("article_id, COUNT(*) AS score").
-		Group("article_id").
-		Order("score DESC, article_id ASC").
-		Limit(hotRebuildTop).
-		Scan(&rows).Error; err != nil {
-		return fmt.Errorf("load all like counts: %w", err)
+	rows, err := s.loadScoreRows(ctx, hotRebuildTop)
+	if err != nil {
+		return err
 	}
 
 	// 用事务管道把「清临时 key、写数据、RENAME、写 ready」打包成一次 EXEC。
@@ -394,27 +424,77 @@ func (s *HotService) rebuild(ctx context.Context) error {
 	return nil
 }
 
-// groupTop 直接按点赞表统计前 n 名，是 Top 的降级实现。
-// 与 rebuild 的区别只有 LIMIT 取调用方指定的条数（降级缓存固定取 fallbackTop），
-// 以及不写任何 Redis key。
-func (s *HotService) groupTop(ctx context.Context, n int) ([]hotRow, error) {
+// loadScoreRows 从唯一事实来源算前 limit 名：点赞数在 article_likes 里，
+// 浏览数在 articles.view_count 上，两者合起来才是热榜分数。
+//
+// 为什么排序交给数据库：在 Go 里算完再排，就得先把整张 articles 捞回来，
+// LIMIT 也就白写了。代价是 SQL 里要重写一遍 ScoreOf 的公式——
+// 权重常量取自本包，改公式时两处一起改，score.go 那里有说明。
+//
+// 为什么是 LEFT JOIN：没有点赞的文章也要能上榜。
+// 这正是不再只按点赞排序之后最主要的收益——只被大量阅读、
+// 没人点赞的文章以前根本进不了候选集。
+//
+// HAVING score > 0 把「一次没被打开、也没被赞过」的文章挡在外面：
+// 它们分数为 0，排到榜里只会是占位的空条目。
+func (s *HotService) loadScoreRows(ctx context.Context, limit int) ([]hotRow, error) {
+	scoreExpr := fmt.Sprintf("articles.view_count + COUNT(article_likes.id) * %d", scoreLikeWeight)
+
 	var rows []hotRow
-	err := s.db.WithContext(ctx).Model(&model.ArticleLike{}).
-		Select("article_id, COUNT(*) AS score").
-		Group("article_id").
-		Order("score DESC, article_id ASC").
-		Limit(n).
+	err := s.db.WithContext(ctx).Model(&model.Article{}).
+		Select("articles.id AS article_id, articles.view_count AS view_count, " +
+			"COUNT(article_likes.id) AS like_count, " + scoreExpr + " AS score").
+		Joins("LEFT JOIN article_likes ON article_likes.article_id = articles.id").
+		Group("articles.id, articles.view_count").
+		Having(scoreExpr + " > 0").
+		Order(scoreExpr + " DESC, articles.id ASC").
+		Limit(limit).
 		Scan(&rows).Error
 	if err != nil {
-		return nil, fmt.Errorf("group top articles: %w", err)
+		return nil, fmt.Errorf("group hot scores: %w", err)
 	}
 	return rows, nil
 }
 
-// loadByIDs 按 id 批量补标题，返回保持传入顺序的榜单。
+// groupTop 直接按库里的计数算前 n 名，是 Top 的降级实现。
+// 与 rebuild 的区别只有 LIMIT 取调用方指定的条数（降级缓存固定取 fallbackTop），
+// 以及不写任何 Redis key。
+func (s *HotService) groupTop(ctx context.Context, n int) ([]hotRow, error) {
+	return s.loadScoreRows(ctx, n)
+}
+
+// countLikesByIDs 一次取回这批文章的点赞数，给榜单展示用。
 //
-// ZSET 里只有 id 和分数，标题必须回 MySQL 取。
-// 用一次 IN 查询取完，避免每条一次 SELECT；
+// ZSET 里存的是点赞与浏览的合成分数，反推不出点赞数，只能单独查一次。
+// IN 走 uk_article_user 的最左前缀，每条只扫自己那段索引。
+// 这是每次读榜多出来的一次查询，换来的是「♥ 12」这个数字不会显示成合成分数。
+func countLikesByIDs(ctx context.Context, db *gorm.DB, ids []uint) (map[uint]int64, error) {
+	counts := make(map[uint]int64, len(ids))
+	if len(ids) == 0 {
+		return counts, nil
+	}
+	var rows []hotRow
+	err := db.WithContext(ctx).Model(&model.ArticleLike{}).
+		Select("article_id, COUNT(*) AS like_count").
+		Where("article_id IN ?", ids).
+		Group("article_id").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("count likes for %d articles: %w", len(ids), err)
+	}
+	for _, row := range rows {
+		counts[row.ArticleID] = row.LikeCount
+	}
+	return counts, nil
+}
+
+// loadByIDs 按 id 批量补标题与浏览数，返回保持传入顺序的榜单。
+//
+// 传进来的 rows 必须已经把 LikeCount 填好：重建与降级走 SQL 聚合时自带，
+// 读 ZSET 时由 fillLikeCounts 补。这里不再查点赞表——
+// 降级路径的结果是带缓存的，每读一次都回库数点赞等于把缓存废掉。
+//
+// 标题与浏览数回 articles 取，用一次 IN 查询取完，避免每条一次 SELECT；
 // 再按 map 回填，保证输出顺序跟排名一致，而不是数据库返回的顺序。
 // 文章被删后 ZSET 里可能还留着 id（对账的 Fix 会清理），
 // 这里查不到就留空标题，条目不丢，避免榜单长度忽多忽少。
@@ -444,7 +524,8 @@ func (s *HotService) loadByIDs(ctx context.Context, rows []hotRow) ([]HotArticle
 			ArticleID: r.ArticleID,
 			Score:     float64(r.Score),
 			Title:     a.Title,
-			LikeCount: r.Score,
+			LikeCount: r.LikeCount,
+			ViewCount: a.ViewCount,
 		})
 	}
 	return list, nil

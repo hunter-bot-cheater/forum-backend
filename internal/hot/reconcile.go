@@ -22,11 +22,11 @@ import (
 const reconcileTopN = 200
 
 // HotDrift 是一处热榜分数漂移。
-// InMySQL 为 0 表示数据库里已经没有点赞，Redis 还留着分数。
+// Expected 为 0 表示库里既没有点赞也没有浏览，Redis 还留着分数。
 type HotDrift struct {
 	ArticleID uint  `json:"article_id"`
 	InRedis   int64 `json:"in_redis"`
-	InMySQL   int64 `json:"in_mysql"`
+	Expected  int64 `json:"expected"`
 }
 
 // ReconcileReport 是一次对账的完整结果。
@@ -103,7 +103,7 @@ func (r *Reconciler) Check(ctx context.Context, topN int) (*ReconcileReport, err
 	// 保持 Redis 返回的顺序，后面 diffHot 才能输出稳定的报告，
 	// 测试与人工比对都不用再排序。
 	ids := make([]uint, 0, len(pairs))
-	redisCounts := make(map[uint]int64, len(pairs))
+	redisScores := make(map[uint]int64, len(pairs))
 	for _, p := range pairs {
 		member, ok := p.Member.(string)
 		if !ok {
@@ -118,20 +118,30 @@ func (r *Reconciler) Check(ctx context.Context, topN int) (*ReconcileReport, err
 		}
 		id := uint(id64)
 		ids = append(ids, id)
-		redisCounts[id] = int64(p.Score)
+		redisScores[id] = int64(p.Score)
 	}
 	rep.Checked = len(ids)
 
-	mysqlCounts, err := r.countLikes(ctx, ids)
+	likes, err := countLikesByIDs(ctx, r.db, ids)
 	if err != nil {
 		return nil, err
 	}
-	alive, err := r.aliveArticles(ctx, ids)
+	views, err := r.articleViews(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
 
-	rep.Drifts, rep.Zombies = diffHot(ids, redisCounts, mysqlCounts, alive)
+	// 期望分数必须按与 rebuild、点赞写入完全相同的公式算，
+	// 否则对账会把正确的成员全部报成漂移。
+	// 三个数字都来自 MySQL：点赞数、浏览数、文章是否还在。
+	alive := make(map[uint]bool, len(views))
+	expected := make(map[uint]int64, len(views))
+	for id, viewCount := range views {
+		alive[id] = true
+		expected[id] = ScoreOf(likes[id], viewCount)
+	}
+
+	rep.Drifts, rep.Zombies = diffHot(ids, redisScores, expected, alive)
 
 	// ZSET 为空时多查一次总点赞数，用来区分「真空榜」与「投影被删」。
 	// 只在罕见分支上付出这次 COUNT 的成本，正常压测与线上稳态都不会走到。
@@ -162,52 +172,43 @@ func projectionLost(zsetSize int64, readyMissing bool, totalLikes int64) bool {
 	return totalLikes > 0
 }
 
-// countLikes 用一次带 IN 的 GROUP BY 拿回这批文章的真实点赞数。
-// IN 走了 uk_article_user 的最左前缀，所以每条只扫自己那段索引。
-func (r *Reconciler) countLikes(ctx context.Context, ids []uint) (map[uint]int64, error) {
-	counts := make(map[uint]int64, len(ids))
-	if len(ids) == 0 {
-		return counts, nil
-	}
-	var rows []hotRow
-	err := r.db.WithContext(ctx).Model(&model.ArticleLike{}).
-		Select("article_id, COUNT(*) AS score").
-		Where("article_id IN ?", ids).
-		Group("article_id").
-		Scan(&rows).Error
-	if err != nil {
-		return nil, fmt.Errorf("count likes for %d articles: %w", len(ids), err)
-	}
-	for _, row := range rows {
-		counts[row.ArticleID] = row.Score
-	}
-	return counts, nil
-}
-
-// aliveArticles 查出这批 id 里哪些文章还在。
+// articleViews 查出这批 id 里哪些文章还在，以及在的那篇有多少浏览。
 // 不在集合里的就是僵尸成员：文章被删了，ZSET 里还留着分数。
 // 这种漂移没有人会触发自我修正（文章没了就不会再有点赞），只能靠对账清掉。
-func (r *Reconciler) aliveArticles(ctx context.Context, ids []uint) (map[uint]bool, error) {
-	alive := make(map[uint]bool, len(ids))
+//
+// 顺手把浏览数带回来，因为期望分数要用它。原来这里只查 id 判存活，
+// 多带一列不增加查询次数。
+func (r *Reconciler) articleViews(ctx context.Context, ids []uint) (map[uint]int64, error) {
+	views := make(map[uint]int64, len(ids))
 	if len(ids) == 0 {
-		return alive, nil
+		return views, nil
 	}
-	var found []uint
+
+	// 用结构体接两列：Pluck 一次只能取一列，而这里 id 与浏览数都要。
+	var rows []struct {
+		ID        uint  `gorm:"column:id"`
+		ViewCount int64 `gorm:"column:view_count"`
+	}
 	err := r.db.WithContext(ctx).Model(&model.Article{}).
+		Select("id, view_count").
 		Where("id IN ?", ids).
-		Pluck("id", &found).Error
+		Scan(&rows).Error
 	if err != nil {
-		return nil, fmt.Errorf("load alive articles: %w", err)
+		return nil, fmt.Errorf("load article views: %w", err)
 	}
-	for _, id := range found {
-		alive[id] = true
+	for _, row := range rows {
+		views[row.ID] = row.ViewCount
 	}
-	return alive, nil
+	return views, nil
 }
 
 // diffHot 是纯函数，把「该修什么」的判断从 IO 里剥出来，方便单测。
 // ids 的顺序决定输出顺序，调用方传的是 Redis 排名顺序。
-func diffHot(ids []uint, redisCounts, mysqlCounts map[uint]int64, alive map[uint]bool) ([]HotDrift, []uint) {
+//
+// expected 是「按 MySQL 现况应当是多少分」，已经由 ScoreOf 合成了点赞与浏览，
+// 这里只做比较。把合成留在外面，这个函数就不必知道权重，
+// 测它的判定逻辑时也不用跟着改数字。
+func diffHot(ids []uint, redisScores, expected map[uint]int64, alive map[uint]bool) ([]HotDrift, []uint) {
 	drifts := make([]HotDrift, 0)
 	zombies := make([]uint, 0)
 	for _, id := range ids {
@@ -215,11 +216,11 @@ func diffHot(ids []uint, redisCounts, mysqlCounts map[uint]int64, alive map[uint
 			zombies = append(zombies, id)
 			continue
 		}
-		if redisCounts[id] != mysqlCounts[id] {
+		if redisScores[id] != expected[id] {
 			drifts = append(drifts, HotDrift{
 				ArticleID: id,
-				InRedis:   redisCounts[id],
-				InMySQL:   mysqlCounts[id],
+				InRedis:   redisScores[id],
+				Expected:  expected[id],
 			})
 		}
 	}
@@ -299,14 +300,14 @@ func (r *Reconciler) Fix(ctx context.Context, rep *ReconcileReport) (int, error)
 
 	for _, d := range rep.Drifts {
 		member := strconv.FormatUint(uint64(d.ArticleID), 10)
-		if d.InMySQL <= 0 {
-			// 真实点赞已经归零，成员留着会让榜单出现一个 0 分的空壳。
+		if d.Expected <= 0 {
+			// 期望分数归零（既没赞也没浏览），成员留着会让榜单出现一个 0 分的空壳。
 			if err := r.rdb.ZRem(ctx, keys.HotArticlesKey, member).Err(); err != nil {
 				return fixed, fmt.Errorf("remove empty member %s: %w", member, err)
 			}
 		} else {
 			err := r.rdb.ZAdd(ctx, keys.HotArticlesKey, redis.Z{
-				Score:  float64(d.InMySQL),
+				Score:  float64(d.Expected),
 				Member: member,
 			}).Err()
 			if err != nil {

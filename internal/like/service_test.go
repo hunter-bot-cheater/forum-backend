@@ -90,8 +90,11 @@ func TestLikeCreatesRelationAndProjections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("查热榜分数失败: %v", err)
 	}
-	if score != 1 {
-		t.Errorf("热榜分数 = %v，期望 1", score)
+	// 分数是「点赞 × 3 + 浏览」，这篇刚建出来浏览数为 0，所以一个赞值 3 分。
+	// 断言写死 3 而不是调用 hot.ScoreOf：这里要钉住的就是口径本身，
+	// 用被测代码算期望值的话，权重改错了这条用例照样绿。
+	if score != 3 {
+		t.Errorf("热榜分数 = %v，期望 3（1 个赞 × 3）", score)
 	}
 
 	// 点赞必须发出一条领域事件，作者的通知靠它产生。

@@ -171,3 +171,71 @@ func TestTopFromMySQLTruncatesToLimit(t *testing.T) {
 		t.Fatalf("请求 2 条，实际返回 %d 条", len(list))
 	}
 }
+
+// TestRebuildRanksByLikesAndViews 验证重建把浏览数算进分数，
+// 并且「没人点赞、只有人读」的文章也能上榜。
+//
+// 旧口径只按点赞排时，这篇被读了 120 次的文章根本进不了候选集，
+// 榜单上全是「有个把赞」的文章——这是热榜最典型的失真：
+// 有用但不让人激动的文章永远看不见。
+func TestRebuildRanksByLikesAndViews(t *testing.T) {
+	f := newHotFixture(t)
+	ctx := context.Background()
+
+	// 基准文章 3 个赞、0 浏览 → 9 分。
+	f.seedLikes(t, f.article.ID, 3)
+
+	// 第二篇没人点赞，但被读了 120 次 → 120 分。
+	read := f.Article(f.author.ID, "被读爆但没人赞")
+	if err := f.DB().Model(&model.Article{}).Where("id = ?", read.ID).
+		UpdateColumn("view_count", 120).Error; err != nil {
+		t.Fatalf("设置浏览数失败: %v", err)
+	}
+
+	// 第三篇既没赞也没被打开过，分数为 0，不该占榜位。
+	f.Article(f.author.ID, "没人打开过的文章")
+
+	list, err := f.svc.Top(ctx, 10)
+	if err != nil {
+		t.Fatalf("Top 失败: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("榜单应当有 2 条（0 分文章不进榜），实际 %d 条: %+v", len(list), list)
+	}
+	if list[0].ArticleID != read.ID {
+		t.Errorf("第一名应当是浏览最多的文章 %d，实际 %d", read.ID, list[0].ArticleID)
+	}
+	if list[0].Score != 120 || list[0].LikeCount != 0 || list[0].ViewCount != 120 {
+		t.Errorf("第一名 = %+v，期望 score=120 like_count=0 view_count=120", list[0])
+	}
+	if list[1].Score != 9 || list[1].LikeCount != 3 || list[1].ViewCount != 0 {
+		t.Errorf("第二名 = %+v，期望 score=9 like_count=3 view_count=0", list[1])
+	}
+}
+
+// TestRebuildSkipsDeletedArticles 验证软删除的文章不会被重建带回榜单。
+//
+// 重建走的是另一条 SQL，不复用详情查询的过滤条件。
+// 这里漏掉 deleted_at 判断的话，删掉的文章会在下一次重建后重新出现在榜上，
+// 点进去 404——读路径又不会拦，因为 ZSET 里只认 id。
+func TestRebuildSkipsDeletedArticles(t *testing.T) {
+	f := newHotFixture(t)
+	ctx := context.Background()
+
+	gone := f.Article(f.author.ID, "删掉的文章")
+	if err := f.DB().Model(&model.Article{}).Where("id = ?", gone.ID).
+		UpdateColumn("view_count", 500).Error; err != nil {
+		t.Fatalf("设置浏览数失败: %v", err)
+	}
+	if err := f.DB().Delete(&model.Article{}, gone.ID).Error; err != nil {
+		t.Fatalf("软删除失败: %v", err)
+	}
+
+	list, err := f.svc.Top(ctx, 10)
+	if err != nil {
+		t.Fatalf("Top 失败: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("删掉的文章不该出现在榜上，实际 %+v", list)
+	}
+}

@@ -10,12 +10,13 @@ export interface HotArticle {
   // article_id 而不是 id：这个结构体的主语是文章，字段名带上主体更清楚，
   // 也和后端保持一致，避免两边各叫一个名字。
   article_id: number
-  // score 是排序依据，当前等于点赞数。
-  // 以后换成加权热度算法时它会和 like_count 分叉，所以展示「多少人赞过」要用 like_count，
-  // 不要拿 score 当点赞数显示。
+  // score 是排序依据，等于「点赞 × 3 + 浏览」。
+  // 展示「多少人赞过」要用 like_count，不要拿 score 当点赞数显示。
   score: number
   title: string
   like_count: number
+  // view_count 是原始浏览数，和 like_count 一样只用来说明分数是怎么来的。
+  view_count: number
 }
 
 export interface HotListResp {

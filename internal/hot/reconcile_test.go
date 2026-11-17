@@ -37,7 +37,7 @@ func TestDiffHotScoreMismatch(t *testing.T) {
 	if len(drifts) != 1 {
 		t.Fatalf("drifts len = %d, want 1", len(drifts))
 	}
-	if drifts[0].ArticleID != 7 || drifts[0].InRedis != 2 || drifts[0].InMySQL != 3 {
+	if drifts[0].ArticleID != 7 || drifts[0].InRedis != 2 || drifts[0].Expected != 3 {
 		t.Fatalf("drift = %+v, want {7 2 3}", drifts[0])
 	}
 }
@@ -74,8 +74,8 @@ func TestDiffHotZeroCountIsDrift(t *testing.T) {
 	if len(drifts) != 1 {
 		t.Fatalf("drifts len = %d, want 1", len(drifts))
 	}
-	if drifts[0].InMySQL != 0 {
-		t.Fatalf("InMySQL = %d, want 0", drifts[0].InMySQL)
+	if drifts[0].Expected != 0 {
+		t.Fatalf("Expected = %d, want 0", drifts[0].Expected)
 	}
 }
 
@@ -121,7 +121,7 @@ func TestHasProblemIgnoresBacklog(t *testing.T) {
 }
 
 func TestHasProblemOnDriftAndZombie(t *testing.T) {
-	drift := &ReconcileReport{Drifts: []HotDrift{{ArticleID: 7, InRedis: 2, InMySQL: 3}}}
+	drift := &ReconcileReport{Drifts: []HotDrift{{ArticleID: 7, InRedis: 2, Expected: 3}}}
 	if !drift.HasProblem() {
 		t.Fatal("drift must be treated as problem")
 	}

@@ -21,6 +21,7 @@ import (
 
 	"forum-backend/internal/cache"
 	"forum-backend/internal/domain"
+	"forum-backend/internal/hot"
 	"forum-backend/internal/keys"
 	"forum-backend/internal/metrics"
 	"forum-backend/internal/model"
@@ -504,6 +505,17 @@ func (s *ArticleService) RecordView(ctx context.Context, id uint, viewer string)
 		return fmt.Errorf("record view for article %d: %w", id, res.Error)
 	}
 	// 影响行数为 0 说明文章在这一瞬间被删了。不是错误，只是这次浏览没有落点。
+	// 这种情况不能再动热榜，否则会给一个已经删掉的 id 加分数。
+	if res.RowsAffected == 0 {
+		return nil
+	}
+
+	// 库里的浏览数已经加上去了，顺手把热榜的分数也推一格。
+	// 这一步失败不影响接口：榜单是投影，每小时重建会按 view_count 重算。
+	// 只调整已经在榜的文章（见 hot.AddViewScore 的说明）。
+	if err := hot.AddViewScore(ctx, s.rdb, id); err != nil {
+		slog.WarnContext(ctx, "add view score", "article_id", id, "error", err)
+	}
 	return nil
 }
 

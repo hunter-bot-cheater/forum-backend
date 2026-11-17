@@ -10,7 +10,7 @@
       <el-skeleton :rows="3" animated />
     </div>
 
-    <div v-else-if="items.length === 0" class="hr__empty">还没有人点赞</div>
+    <div v-else-if="items.length === 0" class="hr__empty">榜单还是空的</div>
 
     <ol v-else class="hr__list">
       <li v-for="(item, index) in shown" :key="item.article_id" class="hr__item">

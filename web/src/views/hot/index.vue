@@ -2,14 +2,14 @@
   <div class="fs-container hot">
     <div class="hot__head">
       <h1 class="hot__title">热榜</h1>
-      <span class="hot__hint">按点赞数排序 · 前 {{ TOP_N }} 篇</span>
+      <span class="hot__hint">点赞 × 3 + 浏览 · 前 {{ TOP_N }} 篇</span>
     </div>
 
     <!-- 整张榜单装进一张卡片：条目之间用细分隔线，而不是每条一张卡。
          榜单是「同一件事的排序」，拆成十张卡会让人以为是十条独立内容。 -->
     <el-card shadow="never" class="hot__card" :body-style="{ padding: '4px 0' }">
       <div v-if="!store.loading && store.list.length === 0" class="hot__empty">
-        <el-empty description="还没有人点赞，榜单是空的" :image-size="88" />
+        <el-empty description="还没有文章被打开或点赞，榜单是空的" :image-size="88" />
       </div>
 
       <el-skeleton v-else-if="store.list.length === 0" class="hot__skeleton" :rows="5" animated />
@@ -22,6 +22,7 @@
       >
         <span class="hot-row__rank" :class="{ 'is-top': index < 3 }">{{ index + 1 }}</span>
         <span class="hot-row__title">{{ item.title }}</span>
+        <span class="hot-row__view">{{ item.view_count }} 浏览</span>
         <span class="hot-row__like">
           <span class="hot-row__heart">♥</span>
           {{ item.like_count }}
@@ -30,8 +31,12 @@
     </el-card>
 
     <!-- 口径写在页脚而不是标题旁：榜单的可信度取决于读者知道它怎么算的，
-         但这句话不该抢标题的位置。 -->
-    <p class="hot__note">每次点赞后立即更新，每小时按全站点赞重新计算一次排名。</p>
+         但这句话不该抢标题的位置。
+         浏览只调整已在榜的文章这一条必须写出来：看过一篇没点赞的文章，
+         在榜上找不到它时，读者要能知道是规则如此，而不是数字出错了。 -->
+    <p class="hot__note">
+      点赞后立即更新；浏览只推进已在榜的文章，让新文章进榜的是每小时一次的全量重算。
+    </p>
   </div>
 </template>
 
@@ -138,8 +143,21 @@ onMounted(() => {
   color: var(--fs-primary);
 }
 
+/* 两个计数各自定宽并右对齐：浏览数会从 1 位涨到 5 位，
+   不定宽的话每一行的「♥ N」会被前面的数字推着左右漂，
+   一列数字看起来歪歪扭扭。 */
+.hot-row__view {
+  flex: none;
+  min-width: 58px;
+  text-align: right;
+  font-size: 13px;
+  color: var(--fs-text-3);
+}
+
 .hot-row__like {
   flex: none;
+  min-width: 42px;
+  text-align: right;
   font-size: 13px;
   color: var(--fs-text-3);
 }

@@ -5,13 +5,14 @@ package hot
 
 // HotArticleResp 是热榜里一条记录的对外形状。
 //
-// Score 是榜单排序依据，当前等于点赞数；以后换成加权热度算法时它会和 LikeCount 分叉，
-// 所以两个字段都保留：Score 用来解释排名，LikeCount 用来展示「多少人赞过」。
+// Score 是榜单排序依据，等于「点赞 × 3 + 浏览」；LikeCount 与 ViewCount
+// 是这两个原始计数。三个都留着：Score 解释排名，两个计数解释 Score 怎么来的。
 type HotArticleResp struct {
 	ArticleID uint    `json:"article_id"`
 	Score     float64 `json:"score"`
 	Title     string  `json:"title"`
 	LikeCount int64   `json:"like_count"`
+	ViewCount int64   `json:"view_count"`
 }
 
 // HotListResp 让响应始终带一个 list 字段，空榜输出 []。

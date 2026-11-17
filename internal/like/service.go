@@ -3,7 +3,8 @@
 // 一次点赞要动三处状态，它们的分工是：
 //   - MySQL 的 article_likes 表：唯一真相，进程重启也不丢
 //   - Redis 的 SET（keys.LikeSetKey）：记录「谁点过这篇」，查是否点过走它
-//   - Redis 的 ZSET（keys.HotArticlesKey）：热榜榜单，分数就是点赞数
+//   - Redis 的 ZSET（keys.HotArticlesKey）：热榜榜单，分数是点赞与浏览的合成值，
+//     口径见 internal/hot/score.go 的 ScoreOf
 //
 // 更新顺序固定为「先写数据库，再动缓存」：数据库失败要整体失败并把错误返回给客户端，
 // 缓存失败只记日志，因为榜单和集合都能靠回源或重建补回来。
@@ -22,6 +23,7 @@ import (
 	"forum-backend/internal/article"
 	"forum-backend/internal/domain"
 	"forum-backend/internal/event"
+	"forum-backend/internal/hot"
 	"forum-backend/internal/keys"
 	"forum-backend/internal/model"
 )
@@ -245,19 +247,33 @@ func (s *LikeService) HasLiked(ctx context.Context, articleID, userID uint) (boo
 
 // syncHotScore 把热榜里这篇文章的分数覆盖成绝对值。
 //
+// 分数是「点赞 × 3 + 浏览」，所以要先读一次这篇文章的浏览数。
+// 读不到就放弃这次同步：写一个不含浏览数的分数会让排名悄悄偏低，
+// 而榜单只是投影，下一轮重建会按库里的真实计数纠正。
+// 宁可不更新，也不要写进一个静悄悄算错的值。
+//
 // count 来自 MySQL，所以重复调用、Redis 清空、之前算错的分都会在下一次写入时被纠正。
-// count 为 0 时直接删掉这一个成员，不做整榜扫描。
+// 期望分数为 0（没有赞、也从未被打开）时删掉成员，不做整榜扫描。
+// 注意取消点赞不再必然删成员：浏览数还在的文章应当凭浏览继续留在榜上。
 //
 // 写绝对值还顺带补住了 rebuild 的一个窄缝：重建从 SQL 读完到 RENAME 换榜之间，
-// 落在这段间隙里的 ZINCRBY 会被新榜覆盖掉。这段间隙通常是毫秒级，
+// 落在这段间隙里的浏览增量会被新榜覆盖掉。这段间隙通常是毫秒级，
 // 而它造成的偏差会在该文章下一次被点赞时，用 MySQL 的真实计数覆盖回来。
 // 如果这里改成 ZINCRBY 增量累加，这条自我修正的路径就断了。
 func (s *LikeService) syncHotScore(ctx context.Context, articleID uint, count int64) {
-	member := strconv.FormatUint(uint64(articleID), 10)
+	var viewCount int64
+	err := s.db.WithContext(ctx).Model(&model.Article{}).
+		Where("id = ?", articleID).
+		Pluck("view_count", &viewCount).Error
+	if err != nil {
+		slog.WarnContext(ctx, "read view count for hot score", "article_id", articleID, "error", err)
+		return
+	}
 
-	var err error
-	if count > 0 {
-		err = s.rdb.ZAdd(ctx, keys.HotArticlesKey, redis.Z{Score: float64(count), Member: member}).Err()
+	member := strconv.FormatUint(uint64(articleID), 10)
+	score := hot.ScoreOf(count, viewCount)
+	if score > 0 {
+		err = s.rdb.ZAdd(ctx, keys.HotArticlesKey, redis.Z{Score: float64(score), Member: member}).Err()
 	} else {
 		err = s.rdb.ZRem(ctx, keys.HotArticlesKey, member).Err()
 	}
