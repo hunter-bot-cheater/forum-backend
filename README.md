@@ -17,6 +17,7 @@
 - `go.mod` 声明 `go 1.26.0`，本机实测 `go1.27.3`。先运行 `go version` 确认本机版本满足要求。旧版 README 写的 1.25.0 已作废。
 - `go build ./...` 与 `go test ./...` 当前可通过，测试文件以工作树里的 `*_test.go` 为准（03a 章有 `internal/service/article_cache_test.go`，04 章 4.10 会新增 `internal/handler/dto_test.go`）。仓库里多处源码尚未 `gofmt`，用 `gofmt -l ./cmd ./internal ./pkg` 查差异，落地后对本次改过的文件跑 `gofmt -w`。
 - 测试地基已落地：`internal/testutil` 提供真实 MySQL（`TEST_MYSQL_DSN` 开关）与 miniredis 两套夹具，`internal/comment` 已作为示范补齐 service 与 handler 测试，包覆盖率从 0% 到 81%（总覆盖率 21.7% → 24.4%）。CI 增加了 MySQL service 与 `-race`。用法见「测试」一节。
+- 前端也有用例了：vitest + `@vue/test-utils`（jsdom），`cd web && npm test`，4 个文件 45 条。锁的是管理后台的权限分支与终态不可操作、用户 store 的加载态与登出顺序、热榜卡片的条数与截断条件，不是排版。详见「测试」一节的「前端」小节。
 - 关注数已进 Redis 缓存：key 是 `user:follow:stats:v1:{user_id}`，TTL 5 分钟（叠加 0~1 分钟随机抖动防雪崩），关注/取关时删掉双方（关注者、被关注者）的 key。未命中时按用户 ID 做 singleflight 合并回源，热点主页同时过期不会把两次 COUNT 打成一片。读不到或 Redis 故障时直接回源 MySQL，接口不报错。公共读写工具在 `internal/cache`，Redis 单次操作限时 100ms。
 - Redis 故障时的延迟预算是分层的，任何一层都不允许退回到客户端的 500ms：连接池 `PoolTimeout` 100ms（拿不到连接就降级）、限流 50ms（它在链路最前面，站住就是整站变慢）、缓存读写 100ms（`cache.WithTimeout`，文章详情和关注数共用）。`MaxRetries` 关闭（-1）：所有 Redis 用途都可降级，重试三次只会把一次故障放大成三倍延迟。实测 `CLIENT PAUSE 3000` 期间，主页 0.62s → 0.25s，文章详情 1.55s → 0.35s，正常路径均为 2~3ms。
 - 私信已落地，一对一会话：`conversations` 用归一化的 `pair_key`（小 id 在前）保证两个人只有一条记录，未读数是会话行上的两列计数，与消息写入同事务。接口全部按「对方 user_id」寻址（`/conversations/with/{user_id}/...`），所以从某人主页点私信可以直接进聊天页，不需要先创建会话；消息列表响应里带 `peer`，首屏一个请求就能画出顶栏和消息。
@@ -66,6 +67,7 @@
 - 处置的并发语义：先条件更新抢占 `WHERE id = ? AND status = 'pending'`，抢到才执行副作用，副作用失败再把状态退回 `pending`。反过来的顺序（先下架再改状态）在两位管理员同时点「驳回」与「封禁」时会自相矛盾——记录写着驳回，内容却已经被删、人也已经被封。`Handle` 里特意不先判断读出来的 `status`：那次判断挡不住并发，留着还会让「重复处置」的用例以为覆盖了条件更新，其实压的是预检（变异测试确认过）。
 - 下架复用 `article` / `comment` 已有的 `Delete`，以举报记录里的作者 id 调用：那边用 `WHERE id = ? AND user_id = ?` 一次判断归属并软删，缓存失效、清点赞集合、移出热榜也跟着走，举报模块不必再实现一遍。内容已被作者自删或另一位管理员下架时删不到行，`ErrNotFound` 在这里被忽略——管理员要的结果已经达成。
 - 封禁落在 `users.banned_until`（NULL 表示没封）与只给管理员看的 `ban_reason`。解封不需要定时任务：每次判断拿当前时间比一次，到期自然失效。拦截挂在写接口组上（`middleware.RequireActive`），读接口不拦——封禁的目的是不让人继续制造内容，不是让他连自己发过的东西都看不了。管理端接口单独成组、不挂这个中间件：管理员被封了就没法撤销误判。返回 403 + `error_code: banned`，文案里带解除时间，因为用户最想知道的就是「什么时候能再发」。查封禁状态不走缓存：封禁极低频，缓存的收益抵不上「已解封但缓存还没过期」的一致性成本，而按主键取一列是微秒级。
+- 管理后台前端在 `/admin`（`web/src/views/admin/index.vue`），两个面板：举报处置按状态筛选（待处理 / 已驳回 / 已下架 / 已封禁），每条把举报人、作者、文章标题、评论摘要与补充说明一次摆全，避免管理员为了一条举报连开三个页面；标签整理可以按名字搜、行内改名，重名自动合并并回报「改挂了多少篇文章」。入口在用户菜单里，是否显示由 `GET /users/me` 新增的 `is_admin` 决定——这个字段的主语是「当前查看者」，所以只挂在 `/users/me` 上，公开主页的 `profileResp` 故意不带（`TestPublicProfileHasNoAdminFlag` 守着），否则看别人主页时会被读成「这个人是管理员」。判定函数 `middleware.AdminChecker` 与路由上的 `RequireAdmin` 共用同一份名单，不会出现「菜单里有入口、点进去 403」。前端这层只是入口开关：真正的边界在后端，把本地状态改成 true 也调不动任何管理接口。封禁天数用输入框而不是固定档位（1~3650 与后端一致，3650 约等于十年而不是「永久」），下架与封禁都要二次确认，驳回不要——驳回不处罚任何人，误点只是这条举报回到待处理。
 
 ## 计划实现的功能
 
@@ -181,6 +183,32 @@ go test -p 1 -count=1 ./...
 go test -cover ./...                                                      # 各包一行
 go test -coverprofile=c.out ./... && go tool cover -func=c.out | tail -1   # 只看总计
 ```
+
+### 前端
+
+前端用例用 vitest + `@vue/test-utils`，跑在 jsdom 里，不需要后端、MySQL 或 Redis：
+
+```bash
+cd web
+npm test        # vitest run
+```
+
+目前 4 个文件 45 条，覆盖的是「写错了不会报错」的那类判断，不是排版：
+
+| 文件 | 锁住的行为 |
+|---|---|
+| `src/views/admin/index.spec.ts` | 普通用户看不到面板且不发任何管理请求；资料没拉到时只有骨架屏；拉失败时给重试而不是说没权限；终态举报不出按钮；内容已删时禁用「下架」；切筛选回第 1 页；标签同名不请求、清空名不发请求、重名合并的提示带影响条数 |
+| `src/store/modules/user.spec.ts` | 登录后顶栏立刻有名字、双 token 都落盘；`is_admin` 只认字段本身（不看 id/用户名）；`fetchMe` 失败也要置 `profileLoaded`，否则页面永远停在骨架屏；登出先撤销 refresh 再清本地 |
+| `src/components/HotRankCard.spec.ts` | 默认 5 条、`limit` 可改；条目等于 `limit` 时不给「查看完整榜单」；前三名高亮；空态与骨架屏的优先级（有旧数据刷新时不塌成骨架） |
+| `src/utils/format.spec.ts` | 计数、相对时间、首字的纯函数边界 |
+
+两个本机限制，都不是项目本身的问题：
+
+- 直接 `npm test` 可以跑；但 `npm i` 这类安装命令要先 `NODE_OPTIONS= npm i`，注入的 node shim 会把安装进程拖崩（堆才用几十 MB 就 `EnsureCurrentCapacity`）。
+- `vitest.config.ts` 固定 `pool: 'forks'` + `singleFork`。默认的 worker_threads 池在本机被子线程清理逻辑杀掉，报 `Worker exited unexpectedly`，与用例无关。
+
+断言别写在假实现的回调里：被测函数自己包着 `try/catch` 时（例如登出），断言抛出的错误会被当成业务失败吞掉，用例照样绿。先记录当时的状态，出了函数再断言。
+
 
 ## 代码检查与 CI
 
@@ -442,7 +470,7 @@ curl.exe -X POST http://localhost:8080/api/articles `
 
 ## 安全与配置
 
-`config/config.yaml` 不在 Git 里（`.gitignore` 已忽略），仓库只跟踪 `config/config.example.yaml` 与 `config/config.production.yaml` 两个模板，两者都不含真实凭据。本机配置里的 MySQL 密码、JWT secret、`llm.api_key` 都属于机密，只能写在这份未跟踪的文件里，或者用环境变量给。管理类接口走 `admin.user_ids` 白名单（创建抢楼活动的 `POST /api/floor-events`，以及举报处置的 `GET /api/admin/reports`、`PUT /api/admin/reports/:id`），填的是用户自增 id；留空表示没人能调，这是刻意的安全默认。加载器支持 `CONFIG_PATH`、`JWT_SECRET`、`MYSQL_PASSWORD`、`REDIS_PASSWORD`、`LLM_API_KEY` 等环境变量（viper 把 `llm.api_key` 映射成 `LLM_API_KEY`）。提交前再确认一遍没有真实凭据。PowerShell 接口示例使用 `curl.exe`，避免命中 `curl` 别名。Windows 下把内联 JSON 传给原生程序时，单引号里的双引号会被命令行解析吃掉，所以本页写成 `\"`，实测能保住完整 JSON；也可以把 JSON 存成文件后用 `-d @body.json`。Git Bash 里不需要转义，02 章的 bash 示例保持单引号写法。
+`config/config.yaml` 不在 Git 里（`.gitignore` 已忽略），仓库只跟踪 `config/config.example.yaml` 与 `config/config.production.yaml` 两个模板，两者都不含真实凭据。本机配置里的 MySQL 密码、JWT secret、`llm.api_key` 都属于机密，只能写在这份未跟踪的文件里，或者用环境变量给。管理类接口走 `admin.user_ids` 白名单（创建抢楼活动的 `POST /api/floor-events`，举报处置的 `GET /api/admin/reports` 与 `PUT /api/admin/reports/:id`、标签改名合并的 `GET /api/admin/tags` 与 `PUT /api/admin/tags/:id`），填的是用户自增 id；同一份名单还决定 `/users/me` 返回的 `is_admin`，前端靠它决定菜单里出不出现管理入口；留空表示没人能调，这是刻意的安全默认。加载器支持 `CONFIG_PATH`、`JWT_SECRET`、`MYSQL_PASSWORD`、`REDIS_PASSWORD`、`LLM_API_KEY` 等环境变量（viper 把 `llm.api_key` 映射成 `LLM_API_KEY`）。提交前再确认一遍没有真实凭据。PowerShell 接口示例使用 `curl.exe`，避免命中 `curl` 别名。Windows 下把内联 JSON 传给原生程序时，单引号里的双引号会被命令行解析吃掉，所以本页写成 `\"`，实测能保住完整 JSON；也可以把 JSON 存成文件后用 `-d @body.json`。Git Bash 里不需要转义，02 章的 bash 示例保持单引号写法。
 
 ## 学习路线
 
