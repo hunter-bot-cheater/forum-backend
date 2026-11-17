@@ -44,7 +44,10 @@ const (
 	ErrCodeFloorNotActive   = "floor_not_active"
 	ErrCodeFloorTaken       = "floor_taken"
 	ErrCodeRateLimited      = "rate_limited"
-	ErrCodeInternal         = "internal_error"
+	// ErrCodeBanned 表示账号被封禁中。与普通 forbidden 分开：
+	// 前端看到它要把「发布」按钮置灰并显示解除时间，而不是弹一句「没有权限」。
+	ErrCodeBanned   = "banned"
+	ErrCodeInternal = "internal_error"
 )
 
 // JSON 输出统一成功响应。

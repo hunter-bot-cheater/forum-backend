@@ -70,7 +70,7 @@ func Migrate(db *gorm.DB) error {
 	// 新增模型时要记得补进这个列表，否则表不会建出来。
 	// Tag 与 ArticleTag 有先后依赖：关联表上的外键指向 articles 与 tags，
 	// AutoMigrate 按参数顺序建表，所以 tags 必须排在 article_tags 前面。
-	if err := db.AutoMigrate(&model.User{}, &model.Article{}, &model.Tag{}, &model.ArticleTag{}, &model.Comment{}, &model.ArticleLike{}, &model.OutboxEvent{}, &model.Notification{}, &model.FloorEvent{}, &model.FloorPrize{}, &model.Follow{}, &model.Conversation{}, &model.Message{}); err != nil {
+	if err := db.AutoMigrate(&model.User{}, &model.Article{}, &model.Tag{}, &model.ArticleTag{}, &model.Comment{}, &model.ArticleLike{}, &model.OutboxEvent{}, &model.Notification{}, &model.FloorEvent{}, &model.FloorPrize{}, &model.Follow{}, &model.Conversation{}, &model.Message{}, &model.Report{}); err != nil {
 		return fmt.Errorf("auto-migrate database: %w", err)
 	}
 	return nil

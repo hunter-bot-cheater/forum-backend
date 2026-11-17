@@ -56,6 +56,12 @@
         <button v-if="isAuthor" class="dt-delete" :disabled="deleting" @click="removeArticle">
           {{ deleting ? '删除中…' : '删除' }}
         </button>
+
+        <!-- 举报只对「登录了且不是作者」显示：举报自己没有意义，后端也会拦；
+             游客点了必然 401，不如不出现。 -->
+        <button v-if="canReportArticle" class="dt-report" @click="openReport('article', articleId)">
+          举报
+        </button>
       </div>
 
       <section class="dt-comments">
@@ -114,6 +120,9 @@
               <div class="dt-item__ops">
                 <button class="dt-op" @click="startReply(root.id)">回复</button>
                 <button v-if="isMine(root)" class="dt-op" @click="removeComment(root)">删除</button>
+                <button v-if="canReport(root)" class="dt-op" @click="openReport('comment', root.id)">
+                  举报
+                </button>
               </div>
 
               <div v-if="replyTargetId === root.id" class="dt-reply-box">
@@ -158,6 +167,9 @@
                     <div class="dt-item__ops">
                       <button class="dt-op" @click="startReply(reply.id)">回复</button>
                       <button v-if="isMine(reply)" class="dt-op" @click="removeComment(reply)">删除</button>
+                      <button v-if="canReport(reply)" class="dt-op" @click="openReport('comment', reply.id)">
+                        举报
+                      </button>
                     </div>
 
                     <div v-if="replyTargetId === reply.id" class="dt-reply-box">
@@ -206,6 +218,14 @@
         </div>
       </section>
     </template>
+
+    <!-- 举报弹窗放在 v-if 之外：文章加载失败时它也挂载着（不显示），
+         这样文章详情与评论两处入口共用同一个实例，不用各挂一个。 -->
+    <ReportDialog
+      v-model="reportOpen"
+      :target-type="reportTarget.type"
+      :target-id="reportTarget.id"
+    />
   </div>
 </template>
 
@@ -231,6 +251,8 @@ import {
 import { useArticleStore } from '@/store/modules/article'
 import { useUserStore } from '@/store/modules/user'
 import type { Brief } from '@/api/message'
+import type { ReportTarget } from '@/api/report'
+import ReportDialog from '@/components/ReportDialog.vue'
 import { formatCount, formatRelativeTime, initials } from '@/utils/format'
 
 // 路由给这个组件配了 props: true，所以 id 从 props 拿而不是从 route.params 取，
@@ -426,6 +448,23 @@ const isAuthor = computed(() => {
 
 const deleting = ref(false)
 
+// 举报弹窗的状态。target 用对象存而不是两个独立 ref：
+// 文章与评论两处入口共用同一个弹窗，type 与 id 必须一起换，
+// 分开存的话中间会出现「类型还是 article、id 已经是评论 id」的瞬间。
+const reportOpen = ref(false)
+const reportTarget = ref<{ type: ReportTarget; id: number }>({ type: 'article', id: 0 })
+
+// openReport 打开举报弹窗并记住举报对象。
+function openReport(type: ReportTarget, id: number) {
+  reportTarget.value = { type, id }
+  reportOpen.value = true
+}
+
+// canReportArticle 判断文章右上角要不要出「举报」。
+// 游客不给：点了必然 401，显示出来只会让人以为自己没登录。
+// 作者自己也不给：后端会拦「不能举报自己的内容」，这是同一个判断的第二道。
+const canReportArticle = computed(() => user.token !== '' && !isAuthor.value)
+
 // goEdit 跳到编辑页。用 push 而不是 replace：
 // 用户改完想回来看详情，浏览器返回应该还在原来这一篇。
 function goEdit() {
@@ -561,6 +600,12 @@ function isMine(target: CommentResp): boolean {
     return false
   }
   return target.author.id === user.userId
+}
+
+// canReport 判断这条评论要不要出「举报」：登录了且不是自己写的。
+// 与 canReportArticle 同一条标准，只是评论没有「作者」这个概念需要额外判断。
+function canReport(target: CommentResp): boolean {
+  return user.token !== '' && !isMine(target)
 }
 
 function goBack() {
@@ -832,6 +877,29 @@ function goTag(name: string) {
   opacity: 0.6;
 }
 
+/* 举报按钮：与编辑同一套尺寸，但推到最右侧。
+   靠 margin-left:auto 而不是给容器加 space-between——
+   作者看到的是「编辑 删除」，非作者看到的是「举报」，
+   两种情况各自占满一行，位置都在右端。 */
+.dt-report {
+  margin-left: auto;
+  padding: 7px 10px;
+  border: none;
+  border-radius: var(--fs-radius-sm);
+  background: none;
+  color: var(--dt-text-weak);
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.15s, background-color 0.15s;
+}
+
+/* hover 用浅红：举报是破坏性动作，和点赞同一个色系，
+   但只有悬停时才上色，不悬停时与正文同灰，不抢注意力。 */
+.dt-report:hover {
+  background: var(--fs-like-weak);
+  color: var(--fs-like);
+}
+
 .dt-like__icon {
   font-size: 15px;
   line-height: 1;
@@ -950,15 +1018,19 @@ function goTag(name: string) {
   word-break: break-word;
 }
 
+/* 三个按钮之间留 6px，加上各自 4px 的左右内边距，文字间距仍是原来的 14px。
+   间距收窄是为了让热区连起来：原来是 14px 的死区，鼠标落在两个词中间点不中任何一个。 */
 .dt-item__ops {
   display: flex;
-  gap: 14px;
+  gap: 6px;
 }
 
-/* 回复/删除做成纯文字按钮：它们是次级动作，
-   做成 el-button 会让一屏十几个按钮，喧宾夺主。 */
+/* 回复/删除/举报做成纯文字按钮：它们是次级动作，
+   做成 el-button 会让一屏十几个按钮，喧宾夺主。
+   内边距用负外边距抵消，文字位置不变，热区四周各多出几像素。 */
 .dt-op {
-  padding: 0;
+  margin: -5px -4px;
+  padding: 5px 4px;
   border: none;
   background: none;
   color: var(--dt-text-weak);

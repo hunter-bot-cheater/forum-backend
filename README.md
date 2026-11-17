@@ -55,7 +55,12 @@
 - `GET /api/tags` 返回按文章数倒序的前 20 个标签（平手按 `tags.id` 稳定排序），公开接口。列表页的标签云与写作页的下拉候选都已撤掉（标签一多会撑成好几排，下拉还会挡住正文），这个接口暂时没有前端调用方，留着是为了以后的「全部标签」页。当前没有标签管理（改名、合并、删除）。
 - 前端两处入口：文章卡片标题右侧的标签（紧跟标题，点击进 `?tag=`）、详情页 meta 下方标签（同样进筛选）。筛选态和搜索词一样放在地址栏（`?tag=`），进入页面、前进后退、粘链接都从 query 还原；换标签回第 1 页，清标签保留搜索词。列表页只在真的筛着的时候显示一条「标签 xxx ×」的提示，点掉即取消——标签云没了之后，没有这条提示就没人知道列表为什么变短了。
 - 写作页的标签是裸输入框：回车或中英文逗号确认，胶囊右侧 `×` 删除，限 3 个并显示 `n/3`。输入法组词中的回车不算确认（`isComposing`），否则中文用户永远打不出词。
-- **没填标签会自动生成一个**：发布时 `tags` 为空 → 调大模型（`internal/llm`，OpenAI 兼容的 `/chat/completions`）要一个 2~6 字的分类，返回后同样过 `normalizeTags` 清洗再落库。开关与密钥在 `config.yaml` 的 `llm` 段（`enabled` + `api_key` 都成立才生效）。任何失败（超时、401、内容审核拒绝）只记一条 warn，文章照常发布——标签是附加信息，不该让「起不出名字」变成「发不出去」。编辑接口**不做**这件事：编辑时把标签全删是用户的明确动作，自动补一个等于删不掉。单测用假实现覆盖了「补标签 / 手填不调模型 / 失败不影响发布 / 编辑不补」四条。
+- **没填标签会在后台自动补一个**：发布时 `tags` 为空 → 只往 `article:tags:v1` 投一条事件就返回，`TagWorker` 消费后调大模型（`internal/llm`，OpenAI 兼容的 `/chat/completions`）要一个 2~6 字的分类，返回后同样过 `normalizeTags` 清洗再落库。发布链路因此不再等模型：之前最慢的一次要 8 秒，现在响应时间与「填了标签」一样。`XADD` 带 `MaxLen: 1000, Approx`，Stream 不会自己回收已 ACK 的消息，不设上限就是常驻内存的泄漏。开关与密钥在 `config.yaml` 的 `llm` 段（`enabled` + `api_key` 都成立才生效）。任何失败（超时、401、内容审核拒绝）只记一条 warn 且不重试——重试会让消息永远挂在 PEL 里每轮失败一次，而标签是附加信息，不该让「起不出名字」变成「发不出去」。worker 写库前在同一个事务里再数一次标签，非空就放弃：模型思考的这 0.5~8 秒里，作者可能已经手动补了标签，不二次确认会覆盖用户的选择（`TestTagWorkerDoesNotOverwrite` 守着，删掉那段判断用例真失败）。编辑接口**不做**这件事：编辑时把标签全删是用户的明确动作，自动补一个等于删不掉。
+- 写作页会在你写的时候就问一次标签：标题非空且正文 ≥20 字时防抖 1.2 秒调 `POST /articles/tag-suggest`，把模型的冷启动挪出发布链路。接口只返回建议、不落库，采用与否由作者点「采用」决定（走的是与手输同一套去重和 3 个上限）。单用户每小时 20 次配额（Redis `INCR` + 首次设过期），标题正文都空时直接返回空串不烧额度——那时模型只会随手编一个词。
+- 举报与处置：`POST /api/reports` 举报文章或评论，`report` 表用 `target_type + target_id` 表达多态目标（文章和评论分属两张表，一个列没法同时指向），并冗余 `target_user_id` 与 `article_id` 供处置时直接用。同一个人对同一条内容只保留一条 `pending` 举报，处置完可以再报（内容可能被恢复后重新违规）；不能举报自己的内容。管理端两条接口挂在 `admin` 组：`GET /admin/reports`（默认只列 `pending`，一次批量补齐举报人、作者、文章标题与评论摘要，三张表各查一次而不是 2N+1 次）、`PUT /admin/reports/:id`（`dismiss` 驳回 / `remove` 下架 / `ban` 下架并封禁）。
+- 处置的并发语义：先条件更新抢占 `WHERE id = ? AND status = 'pending'`，抢到才执行副作用，副作用失败再把状态退回 `pending`。反过来的顺序（先下架再改状态）在两位管理员同时点「驳回」与「封禁」时会自相矛盾——记录写着驳回，内容却已经被删、人也已经被封。`Handle` 里特意不先判断读出来的 `status`：那次判断挡不住并发，留着还会让「重复处置」的用例以为覆盖了条件更新，其实压的是预检（变异测试确认过）。
+- 下架复用 `article` / `comment` 已有的 `Delete`，以举报记录里的作者 id 调用：那边用 `WHERE id = ? AND user_id = ?` 一次判断归属并软删，缓存失效、清点赞集合、移出热榜也跟着走，举报模块不必再实现一遍。内容已被作者自删或另一位管理员下架时删不到行，`ErrNotFound` 在这里被忽略——管理员要的结果已经达成。
+- 封禁落在 `users.banned_until`（NULL 表示没封）与只给管理员看的 `ban_reason`。解封不需要定时任务：每次判断拿当前时间比一次，到期自然失效。拦截挂在写接口组上（`middleware.RequireActive`），读接口不拦——封禁的目的是不让人继续制造内容，不是让他连自己发过的东西都看不了。管理端接口单独成组、不挂这个中间件：管理员被封了就没法撤销误判。返回 403 + `error_code: banned`，文案里带解除时间，因为用户最想知道的就是「什么时候能再发」。查封禁状态不走缓存：封禁极低频，缓存的收益抵不上「已解封但缓存还没过期」的一致性成本，而按主键取一列是微秒级。
 
 ## 计划实现的功能
 
@@ -432,7 +437,7 @@ curl.exe -X POST http://localhost:8080/api/articles `
 
 ## 安全与配置
 
-`config/config.yaml` 不在 Git 里（`.gitignore` 已忽略），仓库只跟踪 `config/config.example.yaml` 与 `config/config.production.yaml` 两个模板，两者都不含真实凭据。本机配置里的 MySQL 密码、JWT secret、`llm.api_key` 都属于机密，只能写在这份未跟踪的文件里，或者用环境变量给。管理类接口走 `admin.user_ids` 白名单（目前只有创建抢楼活动的 `POST /api/floor-events`），填的是用户自增 id；留空表示没人能调，这是刻意的安全默认。加载器支持 `CONFIG_PATH`、`JWT_SECRET`、`MYSQL_PASSWORD`、`REDIS_PASSWORD`、`LLM_API_KEY` 等环境变量（viper 把 `llm.api_key` 映射成 `LLM_API_KEY`）。提交前再确认一遍没有真实凭据。PowerShell 接口示例使用 `curl.exe`，避免命中 `curl` 别名。Windows 下把内联 JSON 传给原生程序时，单引号里的双引号会被命令行解析吃掉，所以本页写成 `\"`，实测能保住完整 JSON；也可以把 JSON 存成文件后用 `-d @body.json`。Git Bash 里不需要转义，02 章的 bash 示例保持单引号写法。
+`config/config.yaml` 不在 Git 里（`.gitignore` 已忽略），仓库只跟踪 `config/config.example.yaml` 与 `config/config.production.yaml` 两个模板，两者都不含真实凭据。本机配置里的 MySQL 密码、JWT secret、`llm.api_key` 都属于机密，只能写在这份未跟踪的文件里，或者用环境变量给。管理类接口走 `admin.user_ids` 白名单（创建抢楼活动的 `POST /api/floor-events`，以及举报处置的 `GET /api/admin/reports`、`PUT /api/admin/reports/:id`），填的是用户自增 id；留空表示没人能调，这是刻意的安全默认。加载器支持 `CONFIG_PATH`、`JWT_SECRET`、`MYSQL_PASSWORD`、`REDIS_PASSWORD`、`LLM_API_KEY` 等环境变量（viper 把 `llm.api_key` 映射成 `LLM_API_KEY`）。提交前再确认一遍没有真实凭据。PowerShell 接口示例使用 `curl.exe`，避免命中 `curl` 别名。Windows 下把内联 JSON 传给原生程序时，单引号里的双引号会被命令行解析吃掉，所以本页写成 `\"`，实测能保住完整 JSON；也可以把 JSON 存成文件后用 `-d @body.json`。Git Bash 里不需要转义，02 章的 bash 示例保持单引号写法。
 
 ## 学习路线
 

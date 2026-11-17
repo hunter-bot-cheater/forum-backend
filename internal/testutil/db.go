@@ -44,6 +44,9 @@ var testTables = []string{
 	"floor_prizes",
 	"floor_events",
 	"follows",
+	// reports 没有任何外键（目标用 target_type + target_id 表达多态），
+	// 放在 users 前面只是为了保持「业务表在前、用户表在后」的既有顺序。
+	"reports",
 	"articles",
 	"users",
 }
@@ -184,6 +187,7 @@ func connectAndMigrate(dsn string) (*gorm.DB, error) {
 		&model.Follow{},
 		&model.Conversation{},
 		&model.Message{},
+		&model.Report{},
 	); err != nil {
 		return nil, fmt.Errorf("迁移测试库失败: %w", err)
 	}

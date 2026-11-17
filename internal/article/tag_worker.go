@@ -108,6 +108,10 @@ func (w *TagWorker) handle(ctx context.Context, msg redis.XMessage) error {
 		return nil
 	}
 
+	// written 记录这次事务有没有真的写进标签。
+	// 事务内二次确认发现作者已经自己填了标签时会直接返回，那时不该清缓存，
+	// 也不该打「已保存」的日志——否则日志里会出现一堆没写过的「成功」。
+	written := false
 	if err := w.svc.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 事务内再确认一次标签表还是空的。外面那次检查在模型调用之前，
 		// 而模型最慢要 8 秒，这 8 秒里作者完全可能在编辑页自己补了标签。
@@ -119,9 +123,19 @@ func (w *TagWorker) handle(ctx context.Context, msg redis.XMessage) error {
 		if count > 0 {
 			return nil
 		}
-		return replaceArticleTags(tx, articleID, tags)
+		if err := replaceArticleTags(tx, articleID, tags); err != nil {
+			return err
+		}
+		written = true
+		return nil
 	}); err != nil {
 		return fmt.Errorf("save suggested tags of article %d: %w", articleID, err)
+	}
+	if !written {
+		// 作者在这几秒里自己补了标签，模型的建议作废。
+		// 这是正常的分支（不是错误），只记一条 info 方便解释「为什么这篇没有自动标签」。
+		slog.InfoContext(ctx, "tag job skipped: article already has tags", "article_id", articleID)
+		return nil
 	}
 
 	// 必须清详情缓存：异步补标签发生在文章发布之后，

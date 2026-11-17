@@ -48,6 +48,12 @@ func MapServiceError(c *gin.Context, operation string, err error) {
 		response.ErrorWithCode(c, http.StatusConflict, response.ErrCodeAlreadyExists, "刚刚发过一模一样的内容，改一下再发吧")
 	case errors.Is(err, domain.ErrRateLimited):
 		response.ErrorWithCode(c, http.StatusTooManyRequests, response.ErrCodeRateLimited, "操作太频繁，请稍后再试")
+	// 重复举报和重复处置都是 409，但原因完全不同：前者要用户等着，
+	// 后者要管理员刷新列表看别人的处理结果，所以文案必须分开。
+	case errors.Is(err, domain.ErrAlreadyReported):
+		response.ErrorWithCode(c, http.StatusConflict, response.ErrCodeAlreadyExists, "你已经举报过这条内容，正在等待处理")
+	case errors.Is(err, domain.ErrReportHandled):
+		response.ErrorWithCode(c, http.StatusConflict, response.ErrCodeConflict, "这条举报已经被处理过了")
 	case errors.Is(err, gorm.ErrDuplicatedKey):
 		response.ErrorWithCode(c, http.StatusConflict, response.ErrCodeAlreadyExists, "资源已存在")
 	default:

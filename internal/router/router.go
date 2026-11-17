@@ -16,6 +16,7 @@ import (
 
 	_ "forum-backend/api/swagger"
 	"forum-backend/internal/article"
+	"forum-backend/internal/ban"
 	"forum-backend/internal/comment"
 	"forum-backend/internal/config"
 	"forum-backend/internal/floor"
@@ -28,6 +29,7 @@ import (
 	"forum-backend/internal/middleware"
 	"forum-backend/internal/notification"
 	"forum-backend/internal/realtime"
+	"forum-backend/internal/report"
 	"forum-backend/internal/session"
 	"forum-backend/internal/user"
 	"forum-backend/internal/ws"
@@ -197,6 +199,14 @@ func New(deps Deps) (*gin.Engine, error) {
 	messageSvc := message.NewService(deps.DB, userSvc)
 	messageHandler := message.NewHandler(messageSvc)
 
+	// 封禁状态按主键读 users 表的一列，不做缓存：解封后必须立刻生效，
+	// 缓存的收益抵不上「已解封但缓存还没过期」带来的困扰。
+	banStore := ban.NewStore(deps.DB)
+	// 举报处置要下架内容并封人：下架复用 article / comment 已有的 Delete，
+	// 封禁走 banStore，管理端列表补作者资料走 userSvc。
+	reportSvc := report.NewService(deps.DB, banStore, articleSvc, commentSvc, userSvc)
+	reportHandler := report.NewHandler(reportSvc)
+
 	// 抢楼活动的发号器（下一个空楼层）就存在 Redis 里，所以要传 redis 客户端。
 	floorSvc := floor.NewService(deps.DB, deps.Redis)
 	floorHandler := floor.NewHandler(floorSvc)
@@ -272,35 +282,15 @@ func New(deps Deps) (*gin.Engine, error) {
 		// 挂在这个组上的接口，handler 里一定能取到 userID；上面公开组的接口则取不到。
 		auth := api.Group("", middleware.JWTAuth(deps.JWT))
 		{
+			// ——读接口—— 封禁只限制「制造内容」，不限制看内容：
+			// 把人也一并挡在外面，等于让他连自己以前发的东西都翻不到。
+			//
 			// 自己看自己走 me，与看别人走 :id 是两条独立路径：
-			// 以后个人中心要带「我的未读数」「我是否关注了 TA」这类只有登录态才有的字段，
+			// 个人中心要带「我的未读数」这类只有登录态才有的字段，
 			// 混用一个接口会让公开路径也得处理登录与否两种分支。
 			auth.GET("/users/me", userHandler.Me)
-			auth.PUT("/users/me", userHandler.UpdateMe)
-
-			// 关注与取关都挂在登录组里：只有登录用户能建立关系。
-			// 用 PUT + DELETE 而不是 POST：这是一份可以被反复覆盖的「关系状态」，
-			// 重复 PUT 结果一致，符合幂等语义。
-			auth.PUT("/users/:id/follow", followHandler.Follow)
-			auth.DELETE("/users/:id/follow", followHandler.Unfollow)
-
-			auth.POST("/articles", articleHandler.Create)
-			// 标签建议放在发布之前调：写作页边写边问，把模型冷启动挪出发布链路。
-			// 路径是静态段，与下面的 /articles/:id 不冲突（gin 静态优先）。
-			auth.POST("/articles/tag-suggest", articleHandler.SuggestTag)
-			// 编辑用 PUT 而不是 PATCH：标题与正文都是必填的全量字段，
-			// 没有「只改一项」的语义，完整的资源替换更好理解。
-			auth.PUT("/articles/:id", articleHandler.Update)
-			auth.DELETE("/articles/:id", articleHandler.Delete)
-			auth.POST("/articles/:id/comments", commentHandler.Create)
-			auth.DELETE("/comments/:id", commentHandler.Delete)
-			auth.PUT("/articles/:id/like", likeHandler.Like)
-			auth.DELETE("/articles/:id/like", likeHandler.Unlike)
 			auth.GET("/notifications", notificationHandler.List)
 			auth.GET("/notifications/summary", notificationHandler.Summary)
-			auth.PUT("/notifications/read-all", notificationHandler.ReadAll)
-			// 单条已读：路径比 read-all 多一段，静态段与通配段同层由 gin 的静态优先规则区分。
-			auth.PUT("/notifications/:id/read", notificationHandler.MarkRead)
 
 			// 私信全部需要登录，没有公开可读的部分。
 			// 路径用 with/{user_id} 而不是 {conversation_id}：前端从用户主页点「私信」
@@ -310,14 +300,73 @@ func New(deps Deps) (*gin.Engine, error) {
 			// 静态段 unread 与 with/ 前缀不同层，不会和下面的通配段抢匹配。
 			auth.GET("/conversations/unread", messageHandler.Unread)
 			auth.GET("/conversations/with/:user_id/messages", messageHandler.Messages)
-			auth.POST("/conversations/with/:user_id/messages", messageHandler.Send)
-			auth.PUT("/conversations/with/:user_id/read", messageHandler.MarkRead)
-			// 创建活动是运营动作，不是普通用户能做的事：一个假活动会让抢楼模块
-			// 白白占住 Redis 发号器和一批奖品名额，还会把首页塞满无效入口。
-			// 白名单为空时这条路由对所有人都是 403，装配期会打一条 warn 提示。
-			auth.POST("/floor-events", middleware.RequireAdmin(deps.Admin.UserIDs), floorHandler.Create)
-			auth.POST("/floor-events/:id/grab", floorHandler.Grab)
 			auth.GET("/floor-events/:id/mine", floorHandler.Mine)
+
+			// 三个「标记已读」虽然也写库，但改的是自己名下的已读标记，
+			// 不产出任何别人能看到的内容，所以留在读组：
+			// 封禁期间连红点都清不掉，只会让人以为通知也坏了。
+			auth.PUT("/notifications/read-all", notificationHandler.ReadAll)
+			// 单条已读：路径比 read-all 多一段，静态段与通配段同层由 gin 的静态优先规则区分。
+			auth.PUT("/notifications/:id/read", notificationHandler.MarkRead)
+			auth.PUT("/conversations/with/:user_id/read", messageHandler.MarkRead)
+
+			// ——写接口—— 统一挂在封禁组上：被限制发言的人发不了文章、评论、私信，
+			// 也点不了赞、关注不了人、改不了资料。
+			//
+			// 单独建一个子组而不是逐条路由加中间件：漏挂一条就是「被封了还能发」，
+			// 而漏挂很难在测试里发现。分组之后，新加的写路由只要写进这个块就自动带上检查。
+			write := auth.Group("", middleware.RequireActive(banStore))
+			{
+				write.PUT("/users/me", userHandler.UpdateMe)
+
+				// 关注与取关是写操作：只有登录且未被封禁的用户能建立关系。
+				// 用 PUT + DELETE 而不是 POST：这是一份可以被反复覆盖的「关系状态」，
+				// 重复 PUT 结果一致，符合幂等语义。
+				write.PUT("/users/:id/follow", followHandler.Follow)
+				write.DELETE("/users/:id/follow", followHandler.Unfollow)
+
+				write.POST("/articles", articleHandler.Create)
+				// 标签建议放在发布之前调：写作页边写边问，把模型冷启动挪出发布链路。
+				// 路径是静态段，与下面的 /articles/:id 不冲突（gin 静态优先）。
+				// 它每次都要花一次模型额度，所以也在写组里：被封禁的账号不该继续消耗额度。
+				write.POST("/articles/tag-suggest", articleHandler.SuggestTag)
+				// 编辑用 PUT 而不是 PATCH：标题与正文都是必填的全量字段，
+				// 没有「只改一项」的语义，完整的资源替换更好理解。
+				write.PUT("/articles/:id", articleHandler.Update)
+				write.DELETE("/articles/:id", articleHandler.Delete)
+				write.POST("/articles/:id/comments", commentHandler.Create)
+				write.DELETE("/comments/:id", commentHandler.Delete)
+				write.PUT("/articles/:id/like", likeHandler.Like)
+				write.DELETE("/articles/:id/like", likeHandler.Unlike)
+
+				write.POST("/conversations/with/:user_id/messages", messageHandler.Send)
+
+				// 举报也算写操作：被封禁期间这个账号不再产生任何新记录，
+				// 管理端不必区分「哪种写要拦、哪种不拦」。
+				write.POST("/reports", reportHandler.Submit)
+
+				// 创建活动是运营动作，放在下面的 admin 组；抢楼是普通用户行为，
+				// 跟着写组走：被封禁期间同样不能参与。
+				write.POST("/floor-events/:id/grab", floorHandler.Grab)
+			}
+
+			// 管理端接口单独成组：管理员自己不该被封禁拦住——
+			// 处置动作是他维持秩序的手段，被封了就没法撤销误判。
+			// 所以这一组只挂 RequireAdmin，不进上面的 write 组；
+			// 路径前缀也不统一到这里，运营类接口（/floor-events）与管理后台（/admin）各用各的路径。
+			admin := auth.Group("", middleware.RequireAdmin(deps.Admin.UserIDs))
+			{
+				// 创建活动是运营动作：一个假活动会让抢楼模块白白占住 Redis 发号器
+				// 和一批奖品名额，还会把首页塞满无效入口。
+				// 白名单为空时这条路由对所有人都是 403，装配期会打一条 warn 提示。
+				admin.POST("/floor-events", floorHandler.Create)
+
+				adminAPI := admin.Group("/admin")
+				{
+					adminAPI.GET("/reports", reportHandler.List)
+					adminAPI.PUT("/reports/:id", reportHandler.Handle)
+				}
+			}
 		}
 	}
 

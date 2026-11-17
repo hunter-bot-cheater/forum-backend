@@ -17,6 +17,17 @@ const (
 	relayInterval      = 200 * time.Millisecond // 轮询间隔，越短延迟越低、空扫越多
 	relayBatchSize     = 100                    // 每次最多搬多少条，防止一轮占满 MySQL 和 Redis
 	maxPublishAttempts = 5                      // 投递失败超过这个次数就置 failed，交给人工
+
+	// relayStreamMaxLen 是事件 Stream 的保留上限。
+	//
+	// Stream 不会自己回收已 ACK 的消息：点赞、评论、关注每发生一次就留一条，
+	// 不设上限的话 Redis 内存只增不减，一两年后就是几十万条常驻记录。
+	// Approx 允许 Redis 按整节点裁剪，比精确 MAXLEN 便宜。
+	//
+	// 10000 条远大于正常积压（消费端每秒能处理上百条），
+	// 只有消费端长时间停摆时才会裁到还没处理的消息。那时丢的是「几天前的通知」，
+	// 比 Redis 被写满、所有缓存一起失效更可接受。
+	relayStreamMaxLen = 10000
 )
 
 // Relay 把 outbox 里 pending 的事件投进 Redis Stream。
@@ -68,7 +79,10 @@ func (r *Relay) PublishBatch(ctx context.Context) error {
 		// 一条事件对应一次 XADD，Redis 消息体只放 event_id / type / payload 三个字段。
 		_, err := r.rdb.XAdd(ctx, &redis.XAddArgs{
 			Stream: event.StreamKey,
-			Values: map[string]interface{}{
+			// 每次投递都顺手裁一次，见 relayStreamMaxLen 的说明。
+			MaxLen: relayStreamMaxLen,
+			Approx: true,
+			Values: map[string]any{
 				"event_id": e.EventID,
 				"type":     e.EventType,
 				"payload":  e.Payload,

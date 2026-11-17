@@ -142,8 +142,10 @@ func (c *Client) SuggestTag(ctx context.Context, title, content string) (string,
 	if err != nil {
 		return "", fmt.Errorf("call llm: %w", err)
 	}
-	// 不 defer 关闭：这个函数只有一次请求，defer 会把连接占到大模型返回之后才释放；
-	// 显式关掉能让底层连接立刻回到连接池。errcheck 要求检查返回值，用 nolint 说明。
+	// 用 defer 关闭：函数返回时就把连接还回连接池。
+	// 下面读 body 的三条分支（状态码非 200、解码失败、正常）都提前 return，
+	// 逐条写 Close 一定会有漏掉的一条；defer 是唯一不会漏的写法。
+	// errcheck 要求检查返回值，这里显式忽略并说明理由。
 	defer func() {
 		//nolint:errcheck // 关闭响应体的错误不影响已经读到的结果，也没有可补救的动作。
 		resp.Body.Close()

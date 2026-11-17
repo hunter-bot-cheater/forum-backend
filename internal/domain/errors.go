@@ -28,4 +28,11 @@ var (
 	// ErrRateLimited 表示某个操作的配额用完了。与中间件的按 IP 限流不是一回事：
 	// 这里限制的是「同一个人对同一个昂贵操作的次数」，比如调大模型建议标签。
 	ErrRateLimited = errors.New("rate limited")
+	// ErrAlreadyReported 表示同一个用户对同一条内容已经有一条待处理的举报。
+	// 不合并成 ErrDuplicateContent：那条文案是「改一下再发」，
+	// 而这里的正确做法是等管理员处理，再报一次不会有任何加速效果。
+	ErrAlreadyReported = errors.New("already reported and pending")
+	// ErrReportHandled 表示这条举报已经被处理过（可能是另一个管理员先点了）。
+	// 单独成一个哨兵，是为了让管理端能给出「已被他人处理」而不是笼统的冲突。
+	ErrReportHandled = errors.New("report already handled")
 )

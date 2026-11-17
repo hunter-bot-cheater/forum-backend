@@ -15,6 +15,135 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/admin/reports": {
+            "get": {
+                "description": "默认只返回待处理；status 可传 pending / dismissed / removed / banned",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "管理端举报列表",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "按状态筛选，缺省为 pending",
+                        "name": "status",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "页码，默认 1",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "每页条数，默认 10，最大 50",
+                        "name": "page_size",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/report.reportListResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "status 或分页参数不合法",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "403": {
+                        "description": "不是管理员",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/admin/reports/{id}": {
+            "put": {
+                "description": "dismiss 驳回、remove 下架内容、ban 下架内容并封禁作者（ban 必须带 ban_days）",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "admin"
+                ],
+                "summary": "处置一条举报",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "举报 id",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "处置动作与封禁天数",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/report.handleReq"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "处理完成，data 为 null",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "400": {
+                        "description": "动作未知或 ban_days 越界",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "403": {
+                        "description": "不是管理员",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "举报不存在",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "409": {
+                        "description": "这条举报已经被处理过",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/articles": {
             "get": {
                 "description": "可按作者、关键词或标签筛选；关键词同时匹配标题与正文，不区分大小写",
@@ -1682,6 +1811,70 @@ const docTemplate = `{
                 }
             }
         },
+        "/reports": {
+            "post": {
+                "description": "同一用户对同一条内容只保留一条待处理举报；不能举报自己的内容",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "reports"
+                ],
+                "summary": "举报文章或评论",
+                "parameters": [
+                    {
+                        "description": "目标类型与 id、举报分类、可选补充说明",
+                        "name": "body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/report.submitReq"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/report.submitResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "类型/分类不合法或补充说明过长",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "被举报的内容不存在或已删除",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "409": {
+                        "description": "已经举报过且仍在等待处理",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/tags": {
             "get": {
                 "description": "按文章数倒序返回前 20 个标签，供前端做标签云与筛选入口",
@@ -2847,6 +3040,129 @@ const docTemplate = `{
                 },
                 "total": {
                     "type": "integer"
+                }
+            }
+        },
+        "report.handleReq": {
+            "type": "object",
+            "required": [
+                "action"
+            ],
+            "properties": {
+                "action": {
+                    "description": "Action 只能是 dismiss / remove / ban，大小写由服务层归一。",
+                    "type": "string"
+                },
+                "ban_days": {
+                    "description": "BanDays 只在 action=ban 时读，范围 1..3650。\n\n要「永久」就填 3650，不设 0 或负数表示永久：那种约定太容易被误传，\n而一次误封永久账号是没法靠回滚补救的——人不来了，得先找到他才能解。",
+                    "type": "integer"
+                }
+            }
+        },
+        "report.reportItem": {
+            "type": "object",
+            "properties": {
+                "article_id": {
+                    "description": "ArticleID 让前端能直接给出「查看所在文章」的链接，评论类举报时尤其有用。",
+                    "type": "integer"
+                },
+                "created_at": {
+                    "type": "string"
+                },
+                "detail": {
+                    "type": "string"
+                },
+                "excerpt": {
+                    "description": "Excerpt 是被举报评论的正文摘要。文章类举报留空：\n正文可能几千字，列表里塞不下，管理员点进详情看更准。",
+                    "type": "string"
+                },
+                "handled_at": {
+                    "type": "string"
+                },
+                "id": {
+                    "type": "integer"
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "reporter": {
+                    "$ref": "#/definitions/user.BriefResp"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "target_author": {
+                    "$ref": "#/definitions/user.BriefResp"
+                },
+                "target_exists": {
+                    "description": "TargetExists 为 false 表示内容已经被删（作者自删或另一位管理员下架）。\n管理员据此可以直接驳回，不用再点一次下架。",
+                    "type": "boolean"
+                },
+                "target_id": {
+                    "type": "integer"
+                },
+                "target_title": {
+                    "description": "TargetTitle 是文章标题；评论类举报时是评论所在文章的标题。",
+                    "type": "string"
+                },
+                "target_type": {
+                    "type": "string"
+                }
+            }
+        },
+        "report.reportListResp": {
+            "type": "object",
+            "properties": {
+                "list": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/report.reportItem"
+                    }
+                },
+                "page": {
+                    "type": "integer"
+                },
+                "page_size": {
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
+                }
+            }
+        },
+        "report.submitReq": {
+            "type": "object",
+            "required": [
+                "reason",
+                "target_id",
+                "target_type"
+            ],
+            "properties": {
+                "detail": {
+                    "description": "Detail 是补充说明，可空。给「其他」这一类留一个说清楚的机会。",
+                    "type": "string"
+                },
+                "reason": {
+                    "description": "Reason 是分类而不是自由文本：分类能聚合出「这个作者反复被举报什么」，\n自由文本只能一条条读，管理端一多就没人看了。",
+                    "type": "string"
+                },
+                "target_id": {
+                    "type": "integer"
+                },
+                "target_type": {
+                    "description": "TargetType 只能是 article 或 comment，由服务层校验。",
+                    "type": "string"
+                }
+            }
+        },
+        "report.submitResp": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer"
+                },
+                "status": {
+                    "type": "string"
                 }
             }
         },

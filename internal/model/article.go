@@ -26,7 +26,7 @@ type Article struct {
 	// 作者点删除通常是手误或情绪化操作，硬删之后评论、点赞、标签关联一起消失，
 	// 想恢复只能翻备份。软删只把这一行标成已删，GORM 之后所有查询自动带上
 	// deleted_at IS NULL，业务代码不用改一行；子表数据原样留着，恢复时还完整。
-	// 代价是表会变大，需要定期归档（见 deploy/backup.sh 的说明）。
+	// 代价是表会变大，需要定期归档（见 scripts/backup.sh 与 README 的备份一节）。
 	DeletedAt gorm.DeletedAt `gorm:"index" json:"-"`
 
 	// ViewCount 是浏览数，只在详情接口被访问时自增，由 article.RecordView 维护。

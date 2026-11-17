@@ -395,3 +395,46 @@ func TestSuggestTagEndpointEnforcesQuota(t *testing.T) {
 		t.Fatalf("另一个用户状态码 = %d，期望 200", code)
 	}
 }
+
+// TestTagWorkerKeepsCacheWhenNothingWritten 验证事务内跳过时不动详情缓存。
+//
+// 要覆盖的是「事务内二次确认」这条分支，而不是开头那次前置检查：
+// 只有作者恰好在模型思考的那几秒里补了标签，才会走到这里。
+// 这时 worker 一个字段都没写，却仍然去删一次缓存、打一条「suggested tags saved」，
+// 结果是读者白丢一份缓存，排查时还会误以为标签是模型给的。
+func TestTagWorkerKeepsCacheWhenNothingWritten(t *testing.T) {
+	db := testutil.NewDB(t)
+	rdb := testutil.NewRedis(t)
+	ctx := context.Background()
+	tagger := &fakeTagger{tag: "模型给的"}
+	svc := NewArticleService(db, rdb, tagger)
+	worker := NewTagWorker(svc, rdb)
+	author := testutil.SeedUser(t, db, "workercache")
+
+	// 发布时不带标签，worker 才会走到「问模型」这一步。
+	created, err := svc.Create(ctx, author.ID, "标题", "正文", nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cacheKey := articleDetailKey(created.ID)
+
+	// 模拟模型思考期间发生的事：作者补了标签（这次 Update 会删掉缓存），
+	// 接着有读者打开详情页，把「作者补的」这一版重新写进缓存。
+	// 之后的跳过分支若再删一次，读者这一份就白填了。
+	tagger.onCall = func() {
+		if _, err := svc.Update(ctx, created.ID, author.ID, "标题", "正文", []string{"作者补的"}); err != nil {
+			t.Errorf("并发编辑失败: %v", err)
+		}
+		if _, err := svc.Detail(ctx, created.ID); err != nil {
+			t.Errorf("并发读详情失败: %v", err)
+		}
+	}
+
+	if err := worker.handle(ctx, tagMessage(t, created.ID)); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+
+	if n, err := rdb.Exists(ctx, cacheKey).Result(); err != nil || n != 1 {
+		t.Fatalf("没有写库却删掉了详情缓存: n=%d err=%v", n, err)
+	}
+}

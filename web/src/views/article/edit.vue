@@ -268,8 +268,16 @@ onMounted(async () => {
       }
       title.value = article.title
       content.value = article.content
-      tags.value = article.tags
-      original.value = { title: article.title, content: article.content, tags: article.tags }
+      // 两份标签必须各自独立：tags 之后会被 push / splice 修改，
+      // 而 original 是「进来那一刻的原文」，用来判断改没改。
+      // 若两者指向同一个数组，加一枚标签会把 original 也一起改掉，
+      // dirty 恒为 false —— 编辑态下「只改标签」的保存按钮会一直是灰的。
+      tags.value = [...article.tags]
+      original.value = {
+        title: article.title,
+        content: article.content,
+        tags: [...article.tags],
+      }
     } catch {
       // 404 与网络错误都已由拦截器弹过提示，这里不再弹第二个框。
       // 拿不到原文就没法编辑，退回详情页比留一个空表单安全。
@@ -335,6 +343,10 @@ function removeTag(index: number) {
 // 填了标签就不再问，用户已经做过决定。编辑态不问，标签是原文带来的。
 let suggestTimer = 0
 watch([title, content], () => {
+  // 先撤掉上一次排的定时器，再看这次还要不要问。
+  // 条件已经不满足时（删短了正文、自己填了标签、已经问过）还留着定时器的话，
+  // 1.2 秒后仍会发一次模型请求，白花一次配额。
+  window.clearTimeout(suggestTimer)
   if (suggestAsked.value || isEdit.value || tags.value.length > 0) {
     return
   }
@@ -342,7 +354,6 @@ watch([title, content], () => {
     return
   }
   // 打字期间不停重排，停手 1.2 秒才真的发请求，否则每敲一个字都是一次模型调用。
-  window.clearTimeout(suggestTimer)
   suggestTimer = window.setTimeout(() => {
     void fetchSuggestion()
   }, 1200)
