@@ -146,8 +146,8 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      # 单元测试只覆盖纯函数（时间格式化、计数压缩这类），
-      # 不连后端也不起浏览器，几秒就能跑完。
+      # 单元测试覆盖纯函数、组件与 store，不连后端也不起浏览器（jsdom），几秒跑完。
+      # 比 build 早一步：逻辑写错时不必等打包就能知道。
       - name: Unit test
         run: npm run test
 
