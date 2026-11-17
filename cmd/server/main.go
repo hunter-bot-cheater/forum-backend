@@ -116,6 +116,7 @@ func main() {
 		Metrics:        cfg.Metrics,
 		Admin:          cfg.Admin,
 		LLM:            cfg.LLM,
+		Upload:         cfg.Upload,
 	})
 	if err != nil {
 		exitOnError("注册路由失败", err)

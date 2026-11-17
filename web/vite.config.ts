@@ -34,6 +34,13 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           ws: true,
         },
+        // 上传的图片存在后端进程的 uploads/ 目录里，由后端直接吐。
+        // 不代理这一条，开发时头像会 404：Vite 只认 src 下的资源，
+        // 服务端文件得转给后端。生产由 Nginx 读同一个目录，不走这里。
+        '/uploads': {
+          target: 'http://127.0.0.1:8080',
+          changeOrigin: true,
+        },
       },
     },
     // preview 会继承 server 的 proxy 与 allowedHosts，端口不继承。

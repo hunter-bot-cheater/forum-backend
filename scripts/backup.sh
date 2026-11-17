@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # 数据库备份：mysqldump 到 backups/，按天数保留，自带一次完整性校验。
+# 同时把 uploads/（用户上传的头像）打成 tar.gz：那是用户数据，
+# 丢了没法从库里重建，虽然不值钱，但重来一遍要挨个通知用户重新上传。
 #
 # 为什么只备 MySQL，不备 Redis：
 #   Redis 里除了 refresh token 的登记表，其余全是可重建的缓存与计数。
@@ -87,6 +89,20 @@ fi
 
 echo "[$(date '+%F %T')] 备份完成 $TARGET（$SIZE）"
 
+# 上传目录单独打包。放在数据库备份成功之后：库才是主体，
+# 头像备份失败不该把整个备份任务判成失败（那会让 cron 天天报错，
+# 而报错久了就没人看了）。目录不存在时直接跳过，首次部署还没人上传过就是这种情况。
+UPLOAD_DIR="${UPLOAD_DIR:-$REPO_DIR/uploads}"
+if [ -d "$UPLOAD_DIR" ]; then
+  UPLOAD_TARGET="$BACKUP_DIR/uploads-$STAMP.tar.gz"
+  # -C 先切到父目录再打包，解压时不会带上一串绝对路径。
+  if tar -czf "$UPLOAD_TARGET" -C "$(dirname "$UPLOAD_DIR")" "$(basename "$UPLOAD_DIR")"; then
+    echo "[$(date '+%F %T')] 上传目录已备份 $UPLOAD_TARGET（$(du -h "$UPLOAD_TARGET" | cut -f1)）"
+  else
+    echo "[$(date '+%F %T')] 上传目录备份失败，数据库备份仍然有效" >&2
+  fi
+fi
+
 # 清理过期备份。只在备份成功后执行：备份天天失败还删旧的，等于把退路删光。
-DELETED="$(find "$BACKUP_DIR" -name 'forum-*.sql.gz' -type f -mtime +"$KEEP_DAYS" -print -delete | wc -l)"
+DELETED="$(find "$BACKUP_DIR" \( -name 'forum-*.sql.gz' -o -name 'uploads-*.tar.gz' \) -type f -mtime +"$KEEP_DAYS" -print -delete | wc -l)"
 echo "[$(date '+%F %T')] 清理 $KEEP_DAYS 天前的备份，共 $DELETED 份"

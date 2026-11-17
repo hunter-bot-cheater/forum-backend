@@ -26,6 +26,29 @@ type Config struct {
 	Metrics   MetricsConfig   `mapstructure:"metrics"`
 	Admin     AdminConfig     `mapstructure:"admin"`
 	LLM       LLMConfig       `mapstructure:"llm"`
+	Upload    UploadConfig    `mapstructure:"upload"`
+}
+
+// UploadConfig 是用户上传图片的落盘与压缩参数，含义见 internal/upload。
+//
+// 默认值都写在 Load 里，配置里只需要写想改的那几项；
+// 一台 2 GB 的机器用默认值就够，改这些值之前先想清楚「为什么原来的不合适」。
+type UploadConfig struct {
+	// Dir 是落盘根目录。容器里必须指向挂出来的数据卷，
+	// 否则重建镜像时用户上传的所有头像都会跟着容器一起消失。
+	Dir string `mapstructure:"dir"`
+	// URLPrefix 是对外访问前缀，默认 /uploads。
+	// 生产由 Nginx 直接读同一份目录，请求不会到后端。
+	URLPrefix string `mapstructure:"url_prefix"`
+	// MaxBytes 是原始文件上限（字节），默认 5 MB。
+	MaxBytes int64 `mapstructure:"max_bytes"`
+	// MaxDimension 是输出图最长边（像素），默认 256。
+	// 调大只会让每个访客多下载，头像在页面上最大也就 76 px。
+	MaxDimension int `mapstructure:"max_dimension"`
+	// JPEGQuality 是不透明图重编码质量，默认 82。
+	JPEGQuality int `mapstructure:"jpeg_quality"`
+	// MaxPixels 是解码前的像素上限，默认 1200 万，用来挡解压炸弹。
+	MaxPixels int `mapstructure:"max_pixels"`
 }
 
 // AdminConfig 是管理类接口的白名单。
@@ -218,6 +241,22 @@ func Load() (*Config, error) {
 	v.SetDefault("llm.model", "glm-4-flash")
 	v.SetDefault("llm.api_key", "")
 	v.SetDefault("llm.timeout_seconds", 8)
+
+	// 上传默认落在进程工作目录下的 uploads/。
+	// 不放到系统临时目录：临时目录会被清理，用户头像会静默消失。
+	// 生产用数据卷挂到这里，或显式配成绝对路径。
+	v.SetDefault("upload.dir", "uploads")
+	v.SetDefault("upload.url_prefix", "/uploads")
+	// 5 MB：足够覆盖手机原图。真正存下来的是压缩后的 256 px 小图，
+	// 这个上限只决定「服务愿意接多大的输入」。
+	v.SetDefault("upload.max_bytes", 5<<20)
+	// 256 px：页面最大的头像是个人主页的 76 px，三倍屏要 228 px。
+	// 再多就是给没人会看的像素付流量。
+	v.SetDefault("upload.max_dimension", 256)
+	v.SetDefault("upload.jpeg_quality", 82)
+	// 1200 万像素对应 4000×3000，手机原图的常见尺寸。
+	// 挡住的是「几百 KB 的 PNG 解出几亿像素」这类解压炸弹。
+	v.SetDefault("upload.max_pixels", 12_000_000)
 
 	// 第二步：决定读哪个文件。部署时用 CONFIG_PATH 传绝对路径，本机默认读项目内的 config/config.yaml。
 	configPath := os.Getenv("CONFIG_PATH")

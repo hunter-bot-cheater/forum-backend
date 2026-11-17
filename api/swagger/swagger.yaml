@@ -647,6 +647,24 @@ definitions:
       refresh_token:
         type: string
     type: object
+  upload.Saved:
+    properties:
+      bytes:
+        type: integer
+      format:
+        description: |-
+          Format 是最终落盘的编码格式：jpeg 或 png。
+          带透明通道的图必须留 png，压成 jpeg 会把透明区域变成黑色。
+        type: string
+      height:
+        type: integer
+      original_bytes:
+        type: integer
+      url:
+        type: string
+      width:
+        type: integer
+    type: object
   user.BriefResp:
     properties:
       avatar_url:
@@ -2013,6 +2031,46 @@ paths:
       summary: 热门标签
       tags:
       - articles
+  /uploads/avatar:
+    post:
+      consumes:
+      - multipart/form-data
+      description: 接收一张图片，服务端按 EXIF 摆正、缩到最长边 256px 并重编码后存盘。
+      parameters:
+      - description: 图片文件，支持 jpg/png/gif/webp，不超过 5 MB
+        in: formData
+        name: file
+        required: true
+        type: file
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/upload.Saved'
+              type: object
+        "400":
+          description: 空的、不是图片、尺寸过大或过小
+          schema:
+            type: string
+        "413":
+          description: 文件超过大小上限
+          schema:
+            type: string
+        "415":
+          description: 不支持的图片格式
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 上传头像
+      tags:
+      - uploads
   /users/{id}:
     get:
       description: 公开信息，不需要登录；未设置昵称时 nickname 回退为用户名。

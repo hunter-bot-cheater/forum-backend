@@ -91,6 +91,9 @@ services:
     # 宿主机和公网都碰不到后端，少一个被扫的入口。
     expose:
       - "8080"
+    volumes:
+      # 用户上传的头像。挂出来才不会在 `make rebuild` 之后全部消失。
+      - ./uploads:/app/uploads
 
   web:
     build:

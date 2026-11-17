@@ -6,6 +6,9 @@ web/node_modules
 web/dist
 bin
 backups
+# 用户上传的图片。它是运行时数据，不进镜像；
+# 不排掉的话每次构建都要把几百 MB 的头像传给 docker daemon。
+uploads
 logs
 tmp
 .git

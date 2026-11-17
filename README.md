@@ -115,7 +115,8 @@ internal/metrics/  Prometheus 指标定义与抓取 handler
 internal/router/   路由组装
 internal/testutil/ 测试夹具：真实 MySQL 与 miniredis
 pkg/               JWT、统一响应、结构化日志
-docs/              分阶段学习文档
+docs/              分阶段学习文档（docs/10 是上线部署）
+deploy/            部署样例：裸机 nginx、Prometheus 规则、容器镜像与生产叠加层
 api/swagger/       Swagger 生成物（04b 章）
 ```
 
@@ -398,6 +399,8 @@ make build-release                      # 交叉编译 bin/forum-server-linux �
 GIN_MODE=release ./forum-server-linux    # 生产模式：关闭 Swagger，跳过自动迁移
 ```
 
+完整的上线步骤（阿里云香港 ECS 选型、安全组、Docker 安装、拉代码、环境变量、域名解析、HTTPS 与自动续期、备份与排错）见 [`docs/10-部署上线-阿里云香港ECS与域名.md`](docs/10-部署上线-阿里云香港ECS与域名.md)，配套文件在 `deploy/prod/`（生产 compose 叠加层、两份 Nginx 配置、共用 locations、MySQL 小内存参数）。
+
 同域部署时 `VITE_API_BASE_URL` 保持默认 `/api`，后端的 `cors.allowed_origins` 留空即可。前后端拆到不同域名时，才需要放行完整 Origin 并把 `VITE_API_BASE_URL` 改成完整地址。样例只覆盖 Nginx 这一层，进程守护、证书申请与数据库备份仍需另外补；告警规则见上一节的 `deploy/alerts.yml`。
 
 ## 容器化部署（可选）
@@ -420,6 +423,35 @@ docker compose up -d                  # 打开 http://127.0.0.1:8088
 - **Redis 开了 `appendonly`**。refresh token 的登记表在 Redis 里，进程重启丢持久化会让所有人被迫重新登录；缓存丢了无所谓，登录态丢了很刺眼。
 
 镜像在本机没有验证过（这台机器没装 Docker），首次在服务器上跑请留意构建日志。
+
+## 图片上传与省流量
+
+头像只走上传一条路：`POST /api/uploads/avatar`（multipart 的 `file` 字段，需登录）。
+
+不提供「填图片地址」的入口是刻意的：贴外链看着灵活，但大多数人手边没有可外链的图床，填进去的多半是防盗链地址（带 Referer 直接 403），最后都变成「头像怎么没变」的困惑。后端的 `avatar_url` 仍然接受 http/https 绝对地址，那是为了老数据还能正常保存——前端不再给填的入口。
+
+服务端收下图片后会**重编码**再落盘，不是原样存：
+
+| 处理 | 默认值 | 为什么 |
+|---|---|---|
+| 按 EXIF 方向摆正 | — | 手机横拍的照片像素是躺着的，方向只写在 EXIF 里。重编码会丢这个标签，不摆正的话用户再也没法转回来 |
+| 缩到最长边 | 256 px | 页面上最大的头像是个人主页的 76 px，三倍屏 228 px。原图存下来，每次浏览都要多传几十倍没人会看的像素 |
+| 重编码 | JPEG q82 / 保留 PNG | 一张 267 KB 的 860 px 照片压完是 **16 KB**，约 16 倍 |
+| 文件名 | 内容的 sha256 前 16 位 | 同一张图重复上传只有一个文件；内容一变文件名就变，URL 天然带版本 |
+
+透明处理按面积判断：透明像素少于 1% 的图（截图、修图软件导出常见）先合成到白底再压 JPEG，真正大面积透明的（抠图头像、logo）保留 PNG。不这么分的话，要么多付三四倍体积，要么把透明区域压成黑块。
+
+省流量靠三件事叠加，缺一件效果就掉一半：
+
+1. **上传即压缩** 把单张图从几百 KB 降到十几 KB；
+2. **URL 带内容哈希** 让「缓存一年」是安全的——图变了地址就变，不会有人看到旧头像；
+3. **Nginx 直接吐文件** 并加 `Cache-Control: public, max-age=31536000, immutable`（见 `deploy/prod/locations.conf`），回访用户一个字节都不再请求。
+
+第 2 条是关键：没有内容哈希就只能用短缓存或主动刷新，前者省不下流量，后者要写一套清理逻辑还会漏。文件名现在是内容哈希，所以这两件事都不需要。
+
+参数在 `config.yaml` 的 `upload` 段：`max_bytes`（原始文件上限，默认 5 MB）、`max_dimension`、`jpeg_quality`、`max_pixels`（解码前的像素上限，挡解压炸弹）、`dir`（落盘目录，容器里必须挂数据卷）。限流单独一个桶（突发 5 次、每 10 秒补 1 次），不占发帖点赞的额度。
+
+上传目录是**用户数据**，不在代码里：`uploads/` 已加进 `.gitignore`，部署时要挂出来并纳入备份（见部署文档第 13 节）。
 
 ## 备份与恢复
 

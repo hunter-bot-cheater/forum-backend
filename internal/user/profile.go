@@ -117,11 +117,23 @@ func normalizeNickname(raw string) (string, error) {
 	return v, nil
 }
 
-// normalizeAvatarURL 校验头像地址。
-// 只接受 http/https 绝对地址，空串表示「用默认头像」。
+// normalizeAvatarURL 校验头像地址。三种合法形态：
+//   - 空串：清空，前端用名字首字兜底
+//   - http/https 绝对地址：老数据还在用，继续收
+//   - 以单个 / 开头的站内相对地址：我们自己上传的文件走这条
 //
-// 不校验域名白名单是有意为之：头像允许贴外链，
-// 但必须带 scheme，禁掉 javascript: 和 data: 这类在 <img src> 之外还能被复用的协议。
+// 前端已经不给「填图片地址」的入口了（只保留上传），
+// 这里仍然接受绝对地址是因为库里可能存着早年贴的外链：
+// 用户只改昵称时会把 avatar_url 原样带上来，拒掉等于让人没法保存其它字段。
+//
+// 为什么必须支持站内相对地址：上传接口返回的就是 /uploads/avatars/...
+// 这种路径，前端拿到后直接写进 avatar_url。如果只收绝对地址，
+// 上传成功却保存失败，用户看到的是「传上去了但头像没变」。
+// 也不该在这里把它拼成绝对地址：域名会被钉进用户数据，
+// 以后换域名或加 CDN，所有人的头像一起挂掉。
+//
+// 不接受 "//host/path"：那是协议相对地址，等价于一个外链，
+// 却绕过了下面的 scheme/host 校验。
 func normalizeAvatarURL(raw string) (string, error) {
 	v := strings.TrimSpace(raw)
 	if v == "" {
@@ -130,6 +142,21 @@ func normalizeAvatarURL(raw string) (string, error) {
 	if len(v) > maxAvatarURLLen {
 		return "", fmt.Errorf("%w: avatar_url must be at most %d bytes", domain.ErrInvalidInput, maxAvatarURLLen)
 	}
+
+	// 站内相对地址：只允许单个前导斜杠，且不能含空白或控制字符。
+	// 没有 scheme 就不可能是 javascript:，同源请求也带不出数据。
+	if strings.HasPrefix(v, "/") {
+		if strings.HasPrefix(v, "//") {
+			return "", fmt.Errorf("%w: avatar_url must not be protocol-relative", domain.ErrInvalidInput)
+		}
+		for _, r := range v {
+			if r <= 0x20 || r == 0x7f {
+				return "", fmt.Errorf("%w: avatar_url contains whitespace or control characters", domain.ErrInvalidInput)
+			}
+		}
+		return v, nil
+	}
+
 	parsed, err := url.Parse(v)
 	if err != nil {
 		return "", fmt.Errorf("%w: avatar_url is not a valid url", domain.ErrInvalidInput)

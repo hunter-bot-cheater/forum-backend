@@ -85,7 +85,10 @@ func TestUpdateProfileRejectsInvalidInput(t *testing.T) {
 	tooLongBio := strings.Repeat("字", maxBioRunes+1)
 	controlNick := "带\n换行"
 	jsAvatar := "javascript:alert(1)"
-	relativeAvatar := "/static/avatar.png"
+	// 协议相对地址等价于外链，却绕过了 scheme/host 校验，必须拒掉。
+	protocolRelativeAvatar := "//cdn.example.com/a.png"
+	// 站内相对地址本身合法，但含空白就不该收。
+	spacedRelativeAvatar := "/uploads/a b.png"
 
 	cases := []struct {
 		name  string
@@ -95,7 +98,8 @@ func TestUpdateProfileRejectsInvalidInput(t *testing.T) {
 		{name: "昵称含控制字符", patch: ProfilePatch{Nickname: &controlNick}},
 		{name: "简介超长", patch: ProfilePatch{Bio: &tooLongBio}},
 		{name: "头像非 http 协议", patch: ProfilePatch{AvatarURL: &jsAvatar}},
-		{name: "头像没有 host", patch: ProfilePatch{AvatarURL: &relativeAvatar}},
+		{name: "头像协议相对地址", patch: ProfilePatch{AvatarURL: &protocolRelativeAvatar}},
+		{name: "头像相对地址含空白", patch: ProfilePatch{AvatarURL: &spacedRelativeAvatar}},
 	}
 
 	for _, tc := range cases {
@@ -159,6 +163,21 @@ func TestNormalizeNicknameTrims(t *testing.T) {
 	}
 	if got != "小 明" {
 		t.Errorf("nickname = %q，期望 %q", got, "小 明")
+	}
+}
+
+// TestNormalizeAvatarURLAcceptsUploadedPath 验证上传接口返回的相对地址能通过校验。
+//
+// 这条必须有用例守着：上传成功后前端会把 /uploads/avatars/... 直接写进 avatar_url，
+// 这里一旦只收绝对地址，用户看到的就是「图传上去了，但头像没变」，而且没有任何报错。
+func TestNormalizeAvatarURLAcceptsUploadedPath(t *testing.T) {
+	const raw = "/uploads/avatars/2026/11/9beebac7459f4883.jpg"
+	got, err := normalizeAvatarURL(raw)
+	if err != nil {
+		t.Fatalf("站内相对地址被拒: %v", err)
+	}
+	if got != raw {
+		t.Errorf("avatar_url = %q，期望 %q", got, raw)
 	}
 }
 

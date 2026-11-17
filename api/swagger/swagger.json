@@ -2036,6 +2036,73 @@
                 }
             }
         },
+        "/uploads/avatar": {
+            "post": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "接收一张图片，服务端按 EXIF 摆正、缩到最长边 256px 并重编码后存盘。",
+                "consumes": [
+                    "multipart/form-data"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "uploads"
+                ],
+                "summary": "上传头像",
+                "parameters": [
+                    {
+                        "type": "file",
+                        "description": "图片文件，支持 jpg/png/gif/webp，不超过 5 MB",
+                        "name": "file",
+                        "in": "formData",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/upload.Saved"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "400": {
+                        "description": "空的、不是图片、尺寸过大或过小",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "413": {
+                        "description": "文件超过大小上限",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "415": {
+                        "description": "不支持的图片格式",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/users/me": {
             "get": {
                 "security": [
@@ -3369,6 +3436,30 @@
                 },
                 "refresh_token": {
                     "type": "string"
+                }
+            }
+        },
+        "upload.Saved": {
+            "type": "object",
+            "properties": {
+                "bytes": {
+                    "type": "integer"
+                },
+                "format": {
+                    "description": "Format 是最终落盘的编码格式：jpeg 或 png。\n带透明通道的图必须留 png，压成 jpeg 会把透明区域变成黑色。",
+                    "type": "string"
+                },
+                "height": {
+                    "type": "integer"
+                },
+                "original_bytes": {
+                    "type": "integer"
+                },
+                "url": {
+                    "type": "string"
+                },
+                "width": {
+                    "type": "integer"
                 }
             }
         },

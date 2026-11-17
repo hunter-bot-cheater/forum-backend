@@ -31,6 +31,7 @@ import (
 	"forum-backend/internal/realtime"
 	"forum-backend/internal/report"
 	"forum-backend/internal/session"
+	"forum-backend/internal/upload"
 	"forum-backend/internal/user"
 	"forum-backend/internal/ws"
 	"forum-backend/pkg/jwt"
@@ -58,6 +59,8 @@ type Deps struct {
 	// LLM 是自动生成标签的大模型配置。Enabled 或 APIKey 缺一个就不启用，
 	// 由 router 决定是否给 article 服务注入 tagger。
 	LLM config.LLMConfig
+	// Upload 是用户上传图片的落盘目录与压缩参数。
+	Upload config.UploadConfig
 }
 
 // New 组装出完整的 HTTP 服务：创建 gin 引擎 → 装全局中间件 → 建各业务对象 → 注册路由。
@@ -215,6 +218,21 @@ func New(deps Deps) (*gin.Engine, error) {
 	floorSvc := floor.NewService(deps.DB, deps.Redis)
 	floorHandler := floor.NewHandler(floorSvc)
 
+	// 上传模块在这里构造，原因是它要建落盘目录：
+	// 磁盘没挂上、权限不对应该在启动时报错，而不是等第一个用户上传时吃一个 500。
+	uploadSvc, err := upload.NewService(upload.Config{
+		Dir:          deps.Upload.Dir,
+		URLPrefix:    deps.Upload.URLPrefix,
+		MaxBytes:     deps.Upload.MaxBytes,
+		MaxDimension: deps.Upload.MaxDimension,
+		JPEGQuality:  deps.Upload.JPEGQuality,
+		MaxPixels:    deps.Upload.MaxPixels,
+	})
+	if err != nil {
+		return nil, err
+	}
+	uploadHandler := upload.NewHandler(uploadSvc)
+
 	// 限流器构造失败说明配置填错，跟上面的 nil 校验一样在装配期直接返回。
 	rateLimit, err := middleware.RateLimit(deps.Redis, middleware.RateLimitConfig{
 		Capacity:  deps.RateLimit.Capacity,
@@ -238,11 +256,43 @@ func New(deps Deps) (*gin.Engine, error) {
 		return nil, err
 	}
 
+	// 上传单独一个桶：每张图都要解码、缩放、编码、写盘，比普通接口重两个数量级。
+	// 正常用户换头像一天也换不了几次，容量 5、每 10 秒补一个足够，
+	// 而把它挂在全局桶里，刷图的人会把发帖、点赞的额度一起吃掉。
+	uploadLimit, err := middleware.RateLimit(deps.Redis, middleware.RateLimitConfig{
+		Capacity:  5,
+		Rate:      0.1,
+		KeyPrefix: deps.RateLimit.KeyPrefix + "upload:",
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// 上传的图片由后端直接吐，本机开发够用。
+	// 生产是 Nginx 读同一个目录（见 deploy/prod/locations.conf），请求根本不会到这里，
+	// 但仍然注册：单机部署、或者 Nginx 漏配 /uploads 时，图还能显示出来。
+	r.Static(uploadSvc.URLPrefix(), deps.Upload.Dir)
+
 	// /api 组上挂两个所有接口都要过的中间件：
 	// limitBody 限制请求体大小（防止超大 body 打爆内存），rateLimit 按 IP 限流。
 	api := r.Group("/api")
 	api.Use(limitBody(1 << 20))
 	api.Use(rateLimit)
+
+	// 上传单独建组，不挂在 api 组下面：那组的 limitBody 是 1 MiB，
+	// 一张手机照片天然超它；把 api 组放宽等于所有接口一起放宽五倍，
+	// 白白给了解析大 body 的机会。这里只给这一条路径放行。
+	uploads := r.Group("/api/uploads")
+	uploads.Use(limitBody(uploadHandler.BodyLimit()))
+	uploads.Use(rateLimit)
+	uploads.Use(middleware.JWTAuth(deps.JWT))
+	// 封禁限制的是「制造内容」，上传头像是个人资料的一部分，
+	// 但头像是公开可见的展示位，被封的人不该还能往上放图。
+	uploads.Use(middleware.RequireActive(banStore))
+	uploads.Use(uploadLimit)
+	{
+		uploads.POST("/avatar", uploadHandler.Avatar)
+	}
 	{
 		api.POST("/register", credentialLimit, userHandler.Register)
 		api.POST("/login", credentialLimit, userHandler.Login)
