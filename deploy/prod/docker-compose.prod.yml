@@ -1,0 +1,83 @@
+# 生产环境增量配置，叠加在根目录的 docker-compose.yml 之上。
+#
+# 用法（都在仓库根目录执行）：
+#   docker compose -f docker-compose.yml -f deploy/prod/docker-compose.prod.yml up -d
+#
+# 为什么不直接改根目录那份：那份是「本机一键起全套」，端口 8088、没有证书、
+# 内存随便用。改它会让本机开发也得先申请证书。这份只叠加生产需要的差异，
+# 本机照旧 `make up` 就能跑。
+#
+# 注意端口那一段用了 YAML 的 !override 标记：compose 对 ports 是「合并」而不是
+# 「替换」，不写这个标记的话会变成 8088、80、443 三个端口同时映射出来。
+# !override 需要 docker compose 2.24.4 以上（`docker compose version` 可以查），
+# 低于这个版本会报 unknown tag。
+
+services:
+  api:
+    environment:
+      # 时区必须显式给。镜像里装了 tzdata，但进程默认还是 UTC，
+      # 而 DSN 用 loc=Local（见 internal/config/db.go），
+      # 不设这一条，库里的 created_at、日志时间、页面上显示的时间全都差 8 小时。
+      TZ: Asia/Shanghai
+      # 2G 内存的护栏：Go 堆到这个量就加大 GC 频率，而不是把整台机器撑到 OOM。
+      # 论坛这个量级远用不到 256MB，写在这里是为了让「最坏情况」有上限。
+      GOMEMLIMIT: 256MiB
+    # 把配置从宿主机挂进去，而不是用镜像里烤好的那份。
+    # 理由有两个：ws.allowed_origins 与 admin.user_ids 是列表，viper 不会把
+    # 逗号分隔的环境变量拆成切片，只能改文件；改完也不必重新构建镜像。
+    # 宿主机上的 config/config.yaml 已被 .gitignore 忽略，不会误提交。
+    volumes:
+      - ./config/config.yaml:/app/config/config.yaml:ro
+      # 用户上传的图片。必须挂到宿主机目录而不是容器内路径：
+      # 重建镜像会让容器内的文件一起消失，而头像是用户数据。
+      # 另外 web 容器要读同一份，所以两边都指向宿主机 ./uploads。
+      - ./uploads:/app/uploads
+    # 日志写进容器的 json 文件，不限制的话几个月就能把 40G 系统盘写满。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  migrate:
+    environment:
+      # 和 api 保持一致：迁移命令会写日志，时间口径应当相同。
+      TZ: Asia/Shanghai
+
+  mysql:
+    # 小机器的内存主要被 MySQL 吃掉，参数见 deploy/prod/my.cnf。
+    # volumes 是合并的，不会顶掉根目录那份定义的 mysql-data。
+    volumes:
+      - ./deploy/prod/my.cnf:/etc/mysql/conf.d/forum.cnf:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  web:
+    # 生产只对外开 80 与 443。8088 是本机开发用的，不带到线上。
+    ports: !override
+      - "80:80"
+      - "443:443"
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      # 用一个文件覆盖镜像里的 nginx 配置。
+      # 首次申请证书时 NGINX_CONF=nginx.http.conf（纯 HTTP，站点可用但没有证书），
+      # 拿到证书后改成 nginx.conf（80 跳转 + 443）。变量写在 .env 里。
+      - ./deploy/prod/${NGINX_CONF:-nginx.conf}:/etc/nginx/conf.d/default.conf:ro
+      # 两个 server 块共用的站点规则，避免改一处漏一处。
+      - ./deploy/prod/locations.conf:/etc/nginx/snippets/forum-locations.conf:ro
+      # Let's Encrypt 的验证文件目录：certbot 写，nginx 读。
+      - ./certbot/www:/var/www/certbot:ro
+      # 证书本体：只读挂载，nginx 不需要写它。
+      - ./certbot/conf:/etc/letsencrypt:ro
+      # 用户上传的图片，只读。Nginx 直接从这里吐文件，
+      # 配合 Cache-Control: immutable 强缓存一年，回访用户不再请求图片。
+      - ./uploads:/var/www/uploads:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
