@@ -580,6 +580,10 @@ curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1/healthz
 
 两个都返回 200 就说明「Nginx 通到后端，后端通到 MySQL 和 Redis」这条链路是完整的。
 
+这里的 `http://` 只在这一节有效。此时 `NGINX_CONF` 还是 `nginx.http.conf`，80 端口直服。
+第 10 节切到 `nginx.conf` 之后，80 端口除了证书验证路径全部 301 跳 HTTPS，
+同样的命令会返回 301，那时要改成 `curl -sS -o /dev/null -w '%{http_code}\n' https://jiushixixi.xyz/readyz`。
+
 `/healthz` 只证明进程活着；`/readyz` 会真的去 ping 数据库和缓存，所以它才是「可以接流量」的判断依据。
 
 ---
@@ -1331,6 +1335,7 @@ docker compose up -d --no-build
 
 ```bash
 docker compose ps
+# 此时仍是 nginx.http.conf，80 端口直服，用 http 探活
 curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1/readyz
 ```
 
@@ -1558,7 +1563,7 @@ docker compose build api web
 docker compose up -d mysql redis
 docker compose run --rm migrate
 docker compose up -d --no-build
-curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1/readyz
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1/readyz   # 证书签发前，80 直服
 
 # 6. 域名解析生效后申请证书
 mkdir -p certbot/www certbot/conf
