@@ -42,7 +42,11 @@
           </el-badge>
         </router-link>
 
-        <el-dropdown trigger="click" @command="onCommand">
+        <!-- 未登录时不放下拉菜单。菜单里三项（我的主页、编辑资料、退出登录）
+             对游客全是无效入口，点开只会看到三个点了没反应的地址。
+             这里直接给一个登录按钮，点一下带上当前页面去登录。 -->
+        <el-button v-if="!userStore.token" class="hdr__login" @click="goLogin">登录</el-button>
+        <el-dropdown v-else trigger="click" @command="onCommand">
           <div class="hdr__user">
             <el-avatar
               :size="28"
@@ -97,9 +101,9 @@ function isActive(path: string): boolean {
 
 // 昵称优先：profile 还没拉回来时退回用户名。
 //
-// 有 token 但 profile 还在路上时返回空串，让名字整段不渲染。
-// 这一瞬间写成「未登录」是错的——用户明明登录了，闪一下「未登录」再变回昵称，
-// 看起来像掉线又自动重登。真的没 token（登录页没有顶栏，只有 401 后的瞬间）才写「未登录」。
+// 两者都没有时返回空串，让名字整段不渲染。这一瞬间是「已登录但资料在路上」，
+// 写成「未登录」会让用户看到闪一下掉线再自动重登。
+// 真的没 token 时整个头像块都不渲染，这里不需要给游客准备文案。
 const shownName = computed(() => {
   if (userStore.displayName) {
     return userStore.displayName
@@ -107,10 +111,7 @@ const shownName = computed(() => {
   if (userStore.username) {
     return userStore.username
   }
-  if (userStore.token) {
-    return ''
-  }
-  return '未登录'
+  return ''
 })
 
 const avatar = computed(() => {
@@ -171,6 +172,12 @@ function goAdmin() {
 // 统一的「没 token 就跳登录」只有一处逻辑，页面里再判一遍会出现两套口径。
 function goWrite() {
   void router.push('/write')
+}
+
+// 未登录时顶栏只有一个登录入口。带上当前地址，登录完回到原页面，
+// 而不是让每个游客登录后都从文章列表重新找起。
+function goLogin() {
+  void router.push({ path: '/login', query: { redirect: route.fullPath } })
 }
 
 async function logout() {
@@ -281,6 +288,14 @@ async function logout() {
 
 .hdr__write-icon {
   margin-right: 4px;
+}
+
+/* 登录按钮与写文章按钮取同一高度，两个并排时不至于一个高一寸一个矮一寸。
+   左边的 margin 补出与图标按钮之间的间隙。 */
+.hdr__login {
+  height: 34px;
+  margin-left: 6px;
+  padding: 0 16px;
 }
 
 /* 图标按钮做成 36px 方形热区：图标本身 20px，直接当点击区域太小，

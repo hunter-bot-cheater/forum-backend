@@ -30,12 +30,14 @@
 
 <script setup lang="ts">
 import { reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { Lock, User } from '@element-plus/icons-vue'
 import AuthCard from '@/components/AuthCard.vue'
 import { useUserStore } from '@/store/modules/user'
+import { safeRedirect } from '@/utils/redirect'
 
+const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 const formRef = ref<FormInstance>()
@@ -55,7 +57,8 @@ async function onSubmit() {
   try {
     await userStore.login({ ...form })
     ElMessage.success('登录成功')
-    router.replace('/articles')
+    // 回到守卫记下的来处。没有或不合规时 safeRedirect 会给回文章列表。
+    router.replace(safeRedirect(route.query.redirect))
   } finally {
     loading.value = false
   }

@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { getToken } from '@/utils/auth'
 import Layout from '@/layout/index.vue'
+import { guardTarget } from './guard'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -24,13 +25,13 @@ const routes: RouteRecordRaw[] = [
         path: 'articles',
         name: 'ArticleList',
         component: () => import('@/views/article/index.vue'),
-        meta: { title: '文章' },
+        meta: { title: '文章', public: true },
       },
       {
         path: 'articles/:id',
         name: 'ArticleDetail',
         component: () => import('@/views/article/detail.vue'),
-        meta: { title: '文章详情' },
+        meta: { title: '文章详情' , public: true},
         props: true,
       },
       {
@@ -53,7 +54,9 @@ const routes: RouteRecordRaw[] = [
         path: 'hot',
         name: 'Hot',
         component: () => import('@/views/hot/index.vue'),
-        meta: { title: '热榜' },
+        // 后端 GET /api/articles/hot 挂在 OptionalJWTAuth 上，游客也能看榜。
+        // 前端守卫若不放行，就会出现「接口公开、页面却要登录」的错配。
+        meta: { title: '热榜', public: true },
       },
       {
         path: 'notifications',
@@ -78,7 +81,9 @@ const routes: RouteRecordRaw[] = [
         path: 'users/:id',
         name: 'UserProfile',
         component: () => import('@/views/user/index.vue'),
-        meta: { title: '用户主页' },
+        // 用户主页公开，后端 GET /api/users/:id 同样挂 OptionalJWTAuth。
+        // 游客看得到资料与关注数，只是拿不到「我关注了没」。
+        meta: { title: '用户主页', public: true },
       },
       {
         // 编辑资料。没有塞进 /users/:id 下面：那是一组「账号设置」的第一个页面，
@@ -118,15 +123,7 @@ const router = createRouter({
   },
 })
 
-// 路由守卫：没 token 且不是公开页 → 去登录；已登录还去登录/注册 → 回文章列表。
-router.beforeEach((to) => {
-  const token = getToken()
-  const isPublic = to.meta.public === true
-  if (token) {
-    if (isPublic) return '/articles'
-    return true
-  }
-  return isPublic ? true : '/login'
-})
+// 守卫规则在 guard.ts 里，这里只负责把当前 token 喂给它。
+router.beforeEach((to) => guardTarget(to, getToken()))
 
 export default router
