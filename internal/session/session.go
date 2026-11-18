@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/redis/go-redis/v9"
 
@@ -95,6 +96,12 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (Tokens, err
 		//   - family 不存在：登出过，或因泄露被撤过，属于普通失效，不该再报一次泄露；
 		//   - family 还在：这条登录本该只有一个有效 jti，同一个旧 jti 又出现，
 		//     只能是 token 被复制了，撤销整条链。
+		//
+		// 这里判的是 family 这个 key 还在不在，不能用 SIsMember 判 jti 在不在集合里。
+		// 刷新时会把旧 jti 从集合里 SREM 掉，所以「集合里查不到 J1」是每条链的常态，
+		// 拿它当判断依据的话，所有重放都会被当成陌生 token 放过去。
+		// 只要这条登录还有效，family key 就一定存在（里面躺着当前那一个 jti），
+		// 这就足以证明「链还在、旧票却出现了」。
 		exists, err := s.rdb.Exists(ctx, keys.RefreshFamilyKey(userID, familyID)).Result()
 		if err != nil {
 			return Tokens{}, fmt.Errorf("check refresh family: %w", err)
@@ -108,6 +115,22 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (Tokens, err
 			return Tokens{}, fmt.Errorf("%w: revoke family: %w", ErrRefreshReused, revokeErr)
 		}
 		return Tokens{}, ErrRefreshReused
+	}
+
+	// 旧 jti 已作废，同步从链上摘掉，让 family 恒等于「当前有效 jti」。
+	//
+	// 不摘的话 SET 只增不减：family 的 TTL 每次刷新都重置（滑动续期），
+	// 活跃用户的成员数会随在线时长一直涨，7 天约 672 个、一个月近三千，
+	// 而成员数一旦超过 128 就从 listpack 转成 hashtable，内存开销翻倍。
+	//
+	// 顺序必须先 DEL 后 SREM。反过来的话，SREM 成功而 DEL 失败会留下
+	// 「登记表里还有、family 里没有它」的 jti，撤销时 SMembers 扫不到，
+	// 这张票就再也无法被撤销。当前顺序最坏只是多留一个已失效成员。
+	//
+	// 失败只记日志不中断：多留一个废成员，撤销时多打一次空 DEL，无害。
+	if err := s.rdb.SRem(ctx, keys.RefreshFamilyKey(userID, familyID), jti).Err(); err != nil {
+		slog.WarnContext(ctx, "remove consumed jti from family",
+			"user_id", userID, "jti", jti, "error", err)
 	}
 
 	return s.issueInFamily(ctx, userID, familyID)
@@ -185,8 +208,9 @@ func (s *Service) issueInFamily(ctx context.Context, userID uint, familyID strin
 	if err := s.rdb.Set(ctx, keys.RefreshTokenKey(userID, jti), "1", s.jwt.RefreshTTL()).Err(); err != nil {
 		return Tokens{}, fmt.Errorf("register refresh token: %w", err)
 	}
-	// family 是 SET，刷新时不断往里加新 jti。每次 SADD 后重设过期时间，
-	// 让活跃用户这条链不会因为第一次登录的 7 天到期而被删掉。
+	// family 是 SET，每条链只保留当前有效的那一个 jti：新 jti 在这里加入，
+	// 被消耗的旧 jti 由 Refresh 用 SREM 摘掉，成员数因此稳定在 1 个。
+	// 每次 SADD 后重设过期时间，让活跃用户这条链不会因为第一次登录的 7 天到期而被删掉。
 	familyKey := keys.RefreshFamilyKey(userID, familyID)
 	if err := s.rdb.SAdd(ctx, familyKey, jti).Err(); err != nil {
 		return Tokens{}, fmt.Errorf("register refresh family: %w", err)

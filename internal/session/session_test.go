@@ -109,9 +109,59 @@ func TestRefreshRotatesAndKeepsFamily(t *testing.T) {
 	}
 }
 
+// TestRefreshDropsConsumedJtiFromFamily 验证刷新后链上只剩当前有效的那个 jti。
+//
+// family 是 SET，早期实现只 SAdd 不 SRem，成员数随活跃时长一直涨：
+// 每 15 分钟刷新一次，7 天 672 个、一个月近三千；成员数超过 128 后
+// 编码从 listpack 转成 hashtable，内存开销翻倍。
+// 这里把「成员数恒为 1」钉成断言，防止以后又退回只加不删。
+func TestRefreshDropsConsumedJtiFromFamily(t *testing.T) {
+	svc, manager := newTestService(t)
+	ctx := context.Background()
+
+	first, err := svc.Issue(ctx, 7)
+	if err != nil {
+		t.Fatalf("Issue() error = %v", err)
+	}
+	_, firstJTI, familyID, err := manager.ParseRefresh(first.RefreshToken)
+	if err != nil {
+		t.Fatalf("ParseRefresh(first) error = %v", err)
+	}
+	familyKey := keys.RefreshFamilyKey(7, familyID)
+
+	// 刚登录时链上只有这一个 jti。
+	if n, err := svc.rdb.SCard(ctx, familyKey).Result(); err != nil || n != 1 {
+		t.Fatalf("登录后 SCard = %d, err = %v, want 1", n, err)
+	}
+
+	second, err := svc.Refresh(ctx, first.RefreshToken)
+	if err != nil {
+		t.Fatalf("Refresh() error = %v", err)
+	}
+	_, secondJTI, _, err := manager.ParseRefresh(second.RefreshToken)
+	if err != nil {
+		t.Fatalf("ParseRefresh(second) error = %v", err)
+	}
+
+	// 刷新后仍然是 1 个：旧的被摘掉，新的加进来。
+	if n, err := svc.rdb.SCard(ctx, familyKey).Result(); err != nil || n != 1 {
+		t.Fatalf("刷新后 SCard = %d, err = %v, want 1（旧 jti 应被 SREM）", n, err)
+	}
+	if ok, err := svc.rdb.SIsMember(ctx, familyKey, firstJTI).Result(); err != nil || ok {
+		t.Fatalf("旧 jti 仍在链上: ok = %v, err = %v, want false", ok, err)
+	}
+	if ok, err := svc.rdb.SIsMember(ctx, familyKey, secondJTI).Result(); err != nil || !ok {
+		t.Fatalf("新 jti 不在链上: ok = %v, err = %v, want true", ok, err)
+	}
+}
+
 // TestRefreshReuseRevokesFamily 是旋转的核心用例：
 // 旧 refresh 被用第二次时，必须撤销整条链，连刚发出去的新 refresh 也一起失效。
 // 如果只拒绝这一次而不撤销，攻击者手里的旧票仍然能换出新票，旋转就白做了。
+//
+// 这个用例还守着一条容易被改坏的规则：刷新时会把旧 jti 从 family 里 SREM 掉，
+// 所以「旧 jti 不在集合里」是每条链的常态。重放判定只能看 family key 是否存在，
+// 一旦有人改成用 SIsMember 判成员，这里会立刻变红。
 func TestRefreshReuseRevokesFamily(t *testing.T) {
 	svc, _ := newTestService(t)
 	ctx := context.Background()
