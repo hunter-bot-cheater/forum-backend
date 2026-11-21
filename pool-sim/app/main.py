@@ -8,7 +8,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from .schemas import SimulateRequest, SimulateResponse
 from .simulate import simulate_shot, warmup
@@ -58,4 +58,19 @@ def simulate(req: SimulateRequest) -> SimulateResponse:
     用同步 def 而不是 async def：物理计算是纯 CPU 活，FastAPI 会把同步端点
     放进线程池，不会卡住事件循环；写成 async 反而要自己再包一层线程。
     """
-    return simulate_shot(req)
+    try:
+        return simulate_shot(req)
+    except ValueError as err:
+        # 球位重叠、球号不认识这类输入问题：回 422 表示「这一杆算不了」，
+        # Go 侧会把它当成玩家可重试的失败。
+        # 把请求一起打进日志：pooltool 的报错往往是「argmin of an empty sequence」
+        # 这种不指向任何字段的话，只有看到球位才能判断到底是哪一颗球的问题。
+        log.warning("simulate rejected: %s | req=%s", err, req.model_dump_json())
+        raise HTTPException(status_code=422, detail=str(err)) from err
+    except Exception as err:  # noqa: BLE001 - 兜底也要带原因
+        # 不兜的话 Starlette 只回一行 "Internal Server Error"，
+        # Go 日志里除了状态码什么都没有，排查时等于没有信息。
+        log.exception("simulate failed | req=%s", req.model_dump_json())
+        raise HTTPException(
+            status_code=500, detail=f"{type(err).__name__}: {err}"
+        ) from err

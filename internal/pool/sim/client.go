@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -168,25 +169,49 @@ func (c *Client) shootOnce(ctx context.Context, req Request) (*Shot, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
 	}
-	// 响应体要读完再关：直接 Close 会让这条连接没法复用，
-	// 每次出杆都新建一条 TCP 连接对 pool-sim 是额外负担。
-	defer func() {
+	// 出错时才去读响应体，而且限长：pool-sim 的 500 会写明原因
+	// （球位重叠、球号不认识、参数越界），只记一个「status 500」排查时等于没有信息。
+	// 剩下的字节丢弃再关，这条连接才能复用。
+	if resp.StatusCode != http.StatusOK {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-	}()
 
-	if resp.StatusCode == http.StatusUnprocessableEntity || resp.StatusCode == http.StatusBadRequest {
-		return nil, fmt.Errorf("%w: status %d", ErrRejected, resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%w: status %d", ErrUnavailable, resp.StatusCode)
+		if resp.StatusCode == http.StatusUnprocessableEntity || resp.StatusCode == http.StatusBadRequest {
+			return nil, fmt.Errorf("%w: status %d: %s", ErrRejected, resp.StatusCode, summarize(snippet))
+		}
+		return nil, fmt.Errorf("%w: status %d: %s", ErrUnavailable, resp.StatusCode, summarize(snippet))
 	}
 
+	// 200 的响应体是一杆的完整轨迹（一百多帧、几十 KB），**不能限长**：
+	// 限了就把 JSON 截断，解出来是「unexpected end of JSON input」，
+	// 看着像 pool-sim 坏了，其实是自己截的。
 	var shot Shot
-	if err := json.NewDecoder(resp.Body).Decode(&shot); err != nil {
+	decodeErr := json.NewDecoder(resp.Body).Decode(&shot)
+	closeErr := resp.Body.Close()
+	if decodeErr != nil {
 		// 解不动响应说明两边协议不一致，属于部署问题：把它算成不可用，
 		// 让对局暂停并提示重试，比带着半个结果继续算规则安全。
-		return nil, fmt.Errorf("%w: decode response: %v", ErrUnavailable, err)
+		return nil, fmt.Errorf("%w: decode response: %v", ErrUnavailable, decodeErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("%w: close response: %v", ErrUnavailable, closeErr)
 	}
 	return &shot, nil
+}
+
+// summarize 把响应体压成一行，供日志与错误串使用。
+//
+// 换行会让日志按行切分后接到下一条记录上，看起来像别人的日志，
+// 所以统一折成空格；超长部分截断，剩下的用省略号表示。
+func summarize(body []byte) string {
+	const limit = 300
+	text := strings.Join(strings.Fields(string(body)), " ")
+	if len(text) > limit {
+		return text[:limit] + "…"
+	}
+	if text == "" {
+		return "(空响应)"
+	}
+	return text
 }

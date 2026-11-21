@@ -504,7 +504,11 @@ func (m *Match) handlePlaceCue(cmd command) error {
 	if !ok {
 		return ErrBadParams
 	}
-	cue.X, cue.Y, cue.OnTable = cmd.x, cmd.y, true
+	// z 必须归零。母球落袋后 z 是袋里的负值，只改 x/y 的话母球会留在台面以下，
+	// pooltool 拿到「台面下的球」会抛 argmin of an empty sequence（500），
+	// 表现为「落位之后怎么都出不了杆」，而服务端看不出任何问题。
+	cue.X, cue.Y, cue.Z = cmd.x, cmd.y, 0
+	cue.OnTable = true
 	m.state.setBall(cue)
 	m.state.BallInHand = false
 

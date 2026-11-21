@@ -351,6 +351,11 @@ func TestPlaceCue(t *testing.T) {
 		if !item.OnTable || item.X != 0.5 || item.Y != 0.5 {
 			t.Errorf("母球没落到位：%+v", item)
 		}
+		// z 必须是 0：母球落袋后 z 是袋里的负值，不归零的话它留在台面以下，
+		// pooltool 会抛 argmin of an empty sequence，落位之后永远出不了杆。
+		if item.Z != 0 {
+			t.Errorf("母球 z = %v，期望 0", item.Z)
+		}
 	}
 	if _, ok := conn0.last(MsgState); !ok {
 		t.Error("落位后要广播快照，否则对手画面上球还在袋里")

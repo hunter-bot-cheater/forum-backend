@@ -107,9 +107,14 @@ func main() {
 
 	// 台球对局：物理算在独立的 pool-sim 容器里，这里只建一个 HTTP 客户端。
 	// 一局一个 actor 协程，Manager 是全进程唯一的登记表。
+	//
+	// Recorder 必须传：不传的话 Manager 会兜一个 NopRecorder，
+	// 结果是一杆都不落库、对局永远不会从 playing 变成 finished——
+	// 战绩页永远是空的，回放一杆都读不到，而且没有任何报错。
 	poolManager, err := pool.NewManager(pool.Options{
 		Sim:         sim.NewClient(cfg.Pool.SimURL),
 		TurnTimeout: time.Duration(cfg.Pool.TurnTimeoutSeconds) * time.Second,
+		Recorder:    pool.NewStore(db),
 	})
 	if err != nil {
 		exitOnError("对局服务初始化失败", err)
