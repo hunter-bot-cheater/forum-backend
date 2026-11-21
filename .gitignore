@@ -81,3 +81,9 @@ certbot/
 # go test -coverprofile 的输出，只在本地临时看覆盖率，不该进仓库。
 coverage.out
 c.out
+
+# ============ pool-sim（Python 物理服务）============
+# 字节码与 pytest 缓存都带本机绝对路径，进仓库既没用又会天天制造 diff。
+__pycache__/
+*.pyc
+.pytest_cache/

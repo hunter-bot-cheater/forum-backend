@@ -1,0 +1,7 @@
+# 构建上下文只需要 app、tests、依赖清单与 pytest 配置。
+# 本地跑出来的缓存不该进镜像：__pycache__ 带的是 Windows 的绝对路径，
+# 拷进 Linux 镜像后除了占地方没有任何用。
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/

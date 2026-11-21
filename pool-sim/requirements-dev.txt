@@ -1,0 +1,6 @@
+# 测试依赖。只在 Dockerfile 的 test 阶段安装，不进运行镜像。
+-r requirements.txt
+
+pytest==8.3.4
+# TestClient 需要 httpx：starlette 的测试客户端就是 httpx 的薄包装。
+httpx==0.28.1

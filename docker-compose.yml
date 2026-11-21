@@ -95,6 +95,47 @@ services:
       # 用户上传的头像。挂出来才不会在 `make rebuild` 之后全部消失。
       - ./uploads:/app/uploads
 
+  # 台球物理服务。只有它算物理，对局状态与规则在 api 里。
+  # 无状态：每次请求都从给定球位重算，重启不影响进行中的对局。
+  pool-sim:
+    build:
+      context: ./pool-sim
+    restart: unless-stopped
+    environment:
+      # numba 的编译缓存落在容器内 /tmp。不设的话它会试着写包安装目录，
+      # 非 root 用户没有权限，于是每次重启都要重新编译七秒。
+      NUMBA_CACHE_DIR: /tmp/numba
+    # 不映射端口：只有 api 通过内部网络访问它，公网碰不到。
+    # /simulate 没有鉴权，暴露出去等于送一个免费 CPU 挖矿接口。
+    expose:
+      - "8000"
+    # 满力开球时 numba 的临时数组最占内存。512M 会在开球那一刻被 OOM kill，
+    # 768M 留了余量；改这里的值之前先在机器上看一次 docker stats 的真实峰值。
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    healthcheck:
+      # slim 镜像里没有 curl，用 python 自带的 urllib 探活。
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"
+      # 启动要跑一杆满台开球做 JIT 预热（约五秒），start_period 给到 40 秒。
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  # 契约与金样例测试。默认不启动（profiles），需要时显式跑：
+  #   docker compose run --rm pool-sim-test
+  pool-sim-test:
+    build:
+      context: ./pool-sim
+      target: test
+    profiles: ["test"]
+
   web:
     build:
       context: .

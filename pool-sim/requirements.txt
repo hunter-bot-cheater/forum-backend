@@ -1,0 +1,10 @@
+# 运行依赖。版本全部锁死：物理结果对版本敏感，升级前先跑 tests 里的金样例，
+# 轨迹偏差超过 2mm 就说明这批数据要重录（见 tests/test_golden.py 顶部）。
+#
+# 这几版是本机实测组合：numpy 2.3.5 + numba 0.62.1 + pooltool 0.6.0。
+# pydantic 跟着 fastapi 走，2.14.x 在 0.115.6 下正常。
+fastapi==0.115.6
+uvicorn==0.34.0
+pydantic==2.14.4
+numpy==2.3.5
+pooltool-billiards==0.6.0
