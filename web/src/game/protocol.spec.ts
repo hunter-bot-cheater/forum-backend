@@ -22,7 +22,9 @@ class FakeWS {
   sent: string[] = []
   onopen: (() => void) | null = null
   onmessage: ((event: { data: unknown }) => void) | null = null
-  onclose: (() => void) | null = null
+  // onclose 必须带 code：真实的 CloseEvent 永远有 code，
+  // 不传的话被测代码读 event.code 会炸，测出来的就不是它的行为。
+  onclose: ((event: { code: number }) => void) | null = null
   onerror: (() => void) | null = null
 
   constructor(url: string) {
@@ -37,7 +39,7 @@ class FakeWS {
   close() {
     this.readyState = FakeWS.CLOSED
     if (this.onclose) {
-      this.onclose()
+      this.onclose({ code: 1000 })
     }
   }
 
@@ -50,10 +52,11 @@ class FakeWS {
   }
 
   // serverClose 模拟服务端断开（手动 close 之外的那条路径）。
-  serverClose() {
+  // 不传 code 时按 1006（异常关闭）算，这是拔网线最常见的那种。
+  serverClose(code = 1006) {
     this.readyState = FakeWS.CLOSED
     if (this.onclose) {
-      this.onclose()
+      this.onclose({ code })
     }
   }
 
@@ -74,13 +77,15 @@ function last(ws: FakeWS): { type: string; seq: number; data: Record<string, unk
 function newSocket(tokenValue = 'tok') {
   const messages: DownMessage[] = []
   const states: string[] = []
+  const fatals: number[] = []
   const socket = new GameSocket({
     matchId: 42,
     token: () => tokenValue,
     onMessage: (msg) => messages.push(msg),
     onState: (state) => states.push(state),
+    onFatal: (code) => fatals.push(code),
   })
-  return { socket, messages, states }
+  return { socket, messages, states, fatals }
 }
 
 beforeEach(() => {
@@ -341,5 +346,33 @@ describe('GameSocket', () => {
 
     expect(FakeWS.instances).toHaveLength(before + 2)
     expect(states[states.length - 1]).not.toBe('gaveup')
+  })
+
+  // 4001 是服务端在握手之后才说得清的那一类拒绝（观战名额被抢）。
+  // 这种情况重连必然还是同一个结果，必须直接停：不然观战页会对着
+  // 一个永远进不去的房间空转完 47 秒的退避窗口。
+  it('服务端用 4001 关门时直接放弃，并说明原因', () => {
+    vi.useFakeTimers()
+    const { socket, states, fatals } = newSocket()
+    socket.connect()
+    FakeWS.instances[0].serverClose(4001)
+    vi.advanceTimersByTime(20000)
+
+    expect(fatals).toEqual([4001])
+    expect(states[states.length - 1]).toBe('gaveup')
+    expect(FakeWS.instances).toHaveLength(1)
+  })
+
+  // 退避重连走的仍是 1006 那条路，别把业务关闭码的判断写成兜底分支。
+  it('普通断线（1006）照旧退避重连，不算致命', () => {
+    vi.useFakeTimers()
+    const { socket, fatals } = newSocket()
+    socket.connect()
+    FakeWS.instances[0].open()
+    FakeWS.instances[0].serverClose(1006)
+    vi.advanceTimersByTime(2000)
+
+    expect(fatals).toEqual([])
+    expect(FakeWS.instances).toHaveLength(2)
   })
 })

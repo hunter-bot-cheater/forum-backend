@@ -69,6 +69,24 @@ func (c *wsConn) Close() {
 	})
 }
 
+// CloseWith 先发一条带业务关闭码的控制帧，再关连接。
+//
+// 用来区分「重试也没用」的失败：握手前的 HTTP 状态码在浏览器里读不到，
+// 但关闭码读得到。不发这一帧的话，观战名额被抢这种事在客户端看来
+// 就是一次普通断网，会白白退避重试四十七秒。
+//
+// gorilla 明确允许 WriteControl 与 WriteMessage 并发，不会和 writeLoop 抢写。
+func (c *wsConn) CloseWith(code int, text string) {
+	if c.conn != nil {
+		_ = c.conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(code, text),
+			time.Now().Add(time.Second),
+		)
+	}
+	c.Close()
+}
+
 // writeLoop 是唯一往这条连接写数据的协程。
 func (c *wsConn) writeLoop() {
 	ticker := time.NewTicker(gamePingPeriod)

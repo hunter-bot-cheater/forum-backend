@@ -93,6 +93,14 @@ export type DownMessage =
 // gaveup 与 closed 分开：closed 还会自动重连，gaveup 不会。
 export type ConnectionState = 'connecting' | 'open' | 'closed' | 'gaveup'
 
+// CLOSE_SPECTATOR_FULL 与服务端 internal/pool/protocol.go 的 CloseSpectatorFull 一致。
+//
+// 握手前就被拒的情况（对局不存在、名额已满）在浏览器里读不到 HTTP 状态码，
+// 一律表现为一次连接失败。名额被抢是唯一还需要在握手之后告知前端的一种：
+// 服务端会在关连接时带上这个码。其余情况（对局没了、权限不对）
+// 只能在重连窗口走完之后才判定。
+export const CLOSE_SPECTATOR_FULL = 4001
+
 export interface GameSocketOptions {
   matchId: number | string
   // token 是个 getter 不是字符串：access 只有 15 分钟，断线重连往往发生在
@@ -102,6 +110,9 @@ export interface GameSocketOptions {
   onMessage: (msg: DownMessage) => void
   // onState 连接状态变化。gaveup 时页面应该提示「对局已结束」并回大厅。
   onState: (state: ConnectionState) => void
+  // onFatal 收到业务关闭码时调用，之后不会再重连。
+  // 页面据此显示「为什么看不了」，而不是挂一个必然失败的重试按钮。
+  onFatal?: (code: number) => void
 }
 
 // 重连上限。超过就放弃，等用户点「重新连接」。
@@ -229,8 +240,18 @@ export class GameSocket {
       this.opts.onMessage(msg)
     }
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       this.socket = null
+      // 业务关闭码：服务端已经明确说了「这条路走不通」，
+      // 再退避重试只是让人对着一个必然失败的页面等四十七秒。
+      if (event.code === CLOSE_SPECTATOR_FULL) {
+        this.manualClose = true
+        this.opts.onFatal?.(event.code)
+        // 先要知道「为什么」，页面才谈得上显示什么；同时置成终态，
+        // 否则界面会停在「已连接」而其实一条消息都收不到了。
+        this.opts.onState('gaveup')
+        return
+      }
       if (this.manualClose) {
         return
       }

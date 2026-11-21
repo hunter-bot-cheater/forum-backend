@@ -40,6 +40,19 @@ const (
 	PeerOffline = "offline"
 )
 
+// 应用层关闭码。
+//
+// 浏览器的 WebSocket 读不到握手前的 HTTP 状态码（Upgrade 之前 409 也好
+// 404 也好，一律只表现为一次连接失败），但读得到关闭码。
+// 所以「重试也没用」的失败必须用关闭码说清楚，否则客户端会当成网络抖动
+// 白白退避重试几十秒。
+//
+// 4000 以上归应用自己用（1000-2999 是协议保留，3000-3999 留给库）。
+const (
+	// CloseSpectatorFull 表示观战名额在握手与进房之间被抢走了。
+	CloseSpectatorFull = 4001
+)
+
 // Message 是下行信封。
 type Message struct {
 	Type string `json:"type"`

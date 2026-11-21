@@ -98,9 +98,10 @@ func (h *WSHandler) Serve(c *gin.Context) {
 			return
 		}
 	} else if err := match.Watch(wsConn); err != nil {
-		// 预检通过、actor 里却又满了：并发抢位的结果，直接关掉。
-		// 前端会看到一次「连接断开」，重连一次通常就有位置了。
-		wsConn.Close()
+		// 预检通过、actor 里却又满了：两条连接并发抢最后一个位置。
+		// 这条连接马上就要关掉，关闭码是唯一还能告诉浏览器的渠道——
+		// 不带码直接关，客户端会当成一次网络抖动，退避重试四十七秒。
+		wsConn.CloseWith(CloseSpectatorFull, "观战人数已满")
 		return
 	}
 
