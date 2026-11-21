@@ -51,20 +51,26 @@ export function fitTable(view: Viewport, pad: number): ViewTransform {
 }
 
 // worldToScreen 把台面上的点（米）换成画布上的点（CSS 像素）。
-// 加 CUSHION_WIDTH 是因为世界原点在台面内沿，而 offset 是外层库边的左上角。
+//
+// 两处偏移都不是随便加的：
+//  1. 加 CUSHION_WIDTH 因为世界原点在台面内沿，而 offset 记的是外层库边的左上角。
+//  2. y 要翻转。pooltool 的 y 轴朝远端（y=0 是开球线那一端，y=1981mm 是摆球那一端），
+//     屏幕的 y 轴朝下。直接沿用会让母球（y≈0.46）画在屏幕上方、球堆画在下方，
+//     和玩家的视角正好相反——站在球台这一头看，母球永远在近处、在下面。
 export function worldToScreen(t: ViewTransform, x: number, y: number): Point {
   return {
     x: t.offsetX + (x + CUSHION_WIDTH) * t.scale,
-    y: t.offsetY + (y + CUSHION_WIDTH) * t.scale,
+    y: t.offsetY + (TABLE_LENGTH - y + CUSHION_WIDTH) * t.scale,
   }
 }
 
 // screenToWorld 是 worldToScreen 的逆运算，用于把手势位置换成台面坐标。
-// 手持球落位、点击瞄准都走它，和绘制共用同一个 scale，点哪就落在哪。
+// 手持球落位、点击瞄准都走它，和绘制共用同一个 scale 与同一次翻转，
+// 否则会出现「看着点在中袋、实际落在中袋另一侧」这种镜像错误。
 export function screenToWorld(t: ViewTransform, x: number, y: number): Point {
   return {
     x: (x - t.offsetX) / t.scale - CUSHION_WIDTH,
-    y: (y - t.offsetY) / t.scale - CUSHION_WIDTH,
+    y: TABLE_LENGTH - ((y - t.offsetY) / t.scale - CUSHION_WIDTH),
   }
 }
 

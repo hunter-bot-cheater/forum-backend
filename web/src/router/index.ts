@@ -106,6 +106,18 @@ const routes: RouteRecordRaw[] = [
       },
     ],
   },
+  {
+    // 对局页不套 Layout：顶栏与内容区留白在全屏球台里都是干扰，
+    // 页面自己画一条窄操作栏就够了。
+    //
+    // M1 阶段标 public 是为了能在未登录状态直接开地址验收画面；
+    // 接入真实对局（M5）时要去掉这一行，让游客先登录。
+    path: '/pool/match/:id',
+    name: 'PoolMatch',
+    component: () => import('@/views/pool/match.vue'),
+    meta: { title: '台球对局', public: true },
+    props: true,
+  },
   { path: '/:pathMatch(.*)*', redirect: '/articles' },
 ]
 

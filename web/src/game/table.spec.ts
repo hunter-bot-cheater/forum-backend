@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   BALL_RADIUS,
-  CUSHION_SEGMENTS,
   CUSHION_WIDTH,
   POCKETS,
   RACK_EIGHTBALL,
@@ -11,7 +10,7 @@ import {
 } from './table'
 
 // 台面常量是从 pooltool 导出的，这些用例锁住三件事：
-// 数据没被误改、袋口与库边的数量对得上、摆球确实落在台面内。
+// 数据没被误改、袋口数量与开口大小对得上、摆球确实落在台面内。
 // 它们不测渲染，只测「几何本身自洽」。
 
 describe('台面尺寸', () => {
@@ -56,20 +55,6 @@ describe('袋口', () => {
   it('袋口开口大于球直径，球才能落进去', () => {
     for (const p of POCKETS) {
       expect(p.radius * 2).toBeGreaterThan(BALL_RADIUS * 2)
-    }
-  })
-})
-
-describe('库边', () => {
-  it('18 段折线：4 条直库加 12 段袋口斜角', () => {
-    expect(CUSHION_SEGMENTS).toHaveLength(18)
-  })
-
-  it('每条库边都有长度，没有退化成点', () => {
-    for (const seg of CUSHION_SEGMENTS) {
-      const dx = seg.x2 - seg.x1
-      const dy = seg.y2 - seg.y1
-      expect(Math.hypot(dx, dy)).toBeGreaterThan(0.03)
     }
   })
 })

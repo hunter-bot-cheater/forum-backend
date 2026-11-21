@@ -86,17 +86,26 @@ describe('worldToScreen / screenToWorld', () => {
   const view = { width: 390, height: 844 }
   const t = fitTable(view, 8)
 
-  it('台面左上角落在库边外沿的左上角', () => {
+  it('世界原点落在屏幕左下角，y 翻转后起点在下方', () => {
     const p = worldToScreen(t, 0, 0)
     expect(p.x).toBeCloseTo(t.offsetX + CUSHION_WIDTH * t.scale, 9)
-    expect(p.y).toBeCloseTo(t.offsetY + CUSHION_WIDTH * t.scale, 9)
+    expect(p.y).toBeCloseTo(t.offsetY + (TABLE_LENGTH + CUSHION_WIDTH) * t.scale, 9)
   })
 
-  it('台面右下角与左上角的跨度等于台面尺寸乘缩放', () => {
+  it('台面两个对角在屏幕上的跨度等于台面尺寸乘缩放', () => {
     const a = worldToScreen(t, 0, 0)
     const b = worldToScreen(t, TABLE_WIDTH, TABLE_LENGTH)
     expect(b.x - a.x).toBeCloseTo(TABLE_WIDTH * t.scale, 9)
-    expect(b.y - a.y).toBeCloseTo(TABLE_LENGTH * t.scale, 9)
+    // y 轴翻转：世界 y 增大是往远端走，屏幕上反而往上。
+    expect(a.y - b.y).toBeCloseTo(TABLE_LENGTH * t.scale, 9)
+  })
+
+  it('母球在屏幕下方、球堆在上方，与玩家站在台子这一头的视角一致', () => {
+    const cue = worldToScreen(t, 0.5944, 0.4557)
+    const rack = worldToScreen(t, 0.4953, 1.585)
+    expect(cue.y).toBeGreaterThan(rack.y)
+    // x 不翻转：母球在 x 0.594，比球堆中心的 0.495 更靠右。
+    expect(cue.x).toBeGreaterThan(rack.x)
   })
 
   it('往返变换回到原点，误差在浮点范围内', () => {
