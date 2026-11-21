@@ -15,7 +15,10 @@
     <main class="rp__stage">
       <PoolTable :balls="balls" :aim="null" />
 
-      <p v-if="loadFailed" class="rp__hint">
+      <!-- 三种「没有画面」要分开：这一局不归你看（重试也没用）、
+           还没结算、以及拉失败（可以重试）。 -->
+      <p v-if="blockedText" class="rp__hint">{{ blockedText }}</p>
+      <p v-else-if="loadFailed" class="rp__hint">
         回放没加载出来。<button class="rp__retry" type="button" @click="load">重试</button>
       </p>
       <p v-else-if="!loaded" class="rp__hint">正在读取回放…</p>
@@ -62,6 +65,9 @@ const replay = ref<ReplayResp | null>(null)
 const balls = ref<BallState[]>([])
 const loaded = ref(false)
 const loadFailed = ref(false)
+// blockedText 是「重试也不会变」的那几种情况（不是你的局、还没结算）。
+// 与 loadFailed 分开：给一个必然失败的操作留按钮，只会让人反复点。
+const blockedText = ref('')
 
 // index 是「已经播完几杆」：0 表示还停在开局摆球上。
 const index = ref(0)
@@ -72,7 +78,14 @@ let handle: PlayHandle | null = null
 let disposed = false
 
 const shots = computed(() => replay.value?.shots ?? [])
-const winnerSide = computed<Seat>(() => replay.value?.winner ?? 0)
+// 还没拿到数据时是 -1，两边都不高亮。
+// 用 0 兜底的话，加载中的那一瞬间左侧名字就已经被标成赢家了。
+const winnerSide = computed(() => {
+  if (!replay.value) {
+    return -1
+  }
+  return replay.value.winner
+})
 // 回放页没有「我」这一侧，用不带主语的赢法说法（见 game/reasons.ts）。
 const reasonText = computed(() => {
   const value = replay.value
@@ -119,6 +132,11 @@ function stop() {
 }
 
 // seekTo 把画面定到「第 k 杆开始之前」。
+//
+// 先逐杆套前几杆的末帧，再单独套第 k 杆的首帧：
+// 第 k 杆开打时的局面并不等于第 k-1 杆结束时那一帧——母球落袋后是下一杆
+// 才摆回台面的，它的位置只存在于下一杆的首帧里。只套末帧的话，
+// 停在下一杆开头时台面上没有母球，看着像球没了。
 function seekTo(k: number) {
   stop()
   playing.value = false
@@ -131,6 +149,12 @@ function seekTo(k: number) {
     }
     const last = frames[frames.length - 1]
     applySample(balls.value, sampleAt([last], last.t))
+  }
+  if (k < list.length) {
+    const opening = list[k].frames
+    if (opening.length > 0) {
+      applySample(balls.value, sampleAt([opening[0]], opening[0].t))
+    }
   }
   index.value = k
 }
@@ -203,8 +227,12 @@ function stepForward() {
 }
 
 // load 拉回放数据，成功后从第一杆开始播。
+//
+// 只有网络错误与 5xx 值得给重试按钮；403 / 404 / 409 是这一局的属性
+// （不是你的局、没有这局、还没结算），重试一万次结果都一样。
 async function load() {
   loadFailed.value = false
+  blockedText.value = ''
   try {
     const resp = await getReplay(props.id)
     if (disposed) {
@@ -216,10 +244,35 @@ async function load() {
     if (resp.shots.length > 0) {
       playFrom(0)
     }
-  } catch {
+  } catch (error) {
+    if (disposed) {
+      return
+    }
+    if (explainBlocked(error)) {
+      return
+    }
     // 拦截器已提示；页面显示重试入口。
     loadFailed.value = true
   }
+}
+
+// explainBlocked 把「重试也没用」的几种状态码翻成一句说明。
+// 返回 true 表示已经接管了这次错误，页面不再显示重试按钮。
+function explainBlocked(error: unknown): boolean {
+  const status = (error as { response?: { status?: number } } | null)?.response?.status
+  if (status === 403) {
+    blockedText.value = '这一局不是你的对局，看不到回放。'
+    return true
+  }
+  if (status === 404) {
+    blockedText.value = '这一局没有回放，可能已经被清理了。'
+    return true
+  }
+  if (status === 409) {
+    blockedText.value = '这一局还没结束，结算之后再来看。'
+    return true
+  }
+  return false
 }
 
 // back 回战绩页。

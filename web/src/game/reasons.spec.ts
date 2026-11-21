@@ -10,15 +10,23 @@ describe('reasonLabel', () => {
     expect(reasonLabel('eight_legal', true)).toBe('打进黑八，赢下这一局')
   })
 
+  // 中文没有主语时默认指说话人：输家读到「打进黑八，赢下这一局」
+  // 会理解成「我打进黑八赢了」，和上面那行「这局输了」直接打架。
+  it('别人打进黑八时，输家那一行必须点明是对手', () => {
+    expect(reasonLabel('eight_legal', false)).toBe('对手打进黑八，赢下这一局')
+  })
+
   it('输的那一方，离开/超时/提前打黑八都算在自己头上', () => {
     expect(reasonLabel('leave', false)).toBe('你中途离开，判负')
     expect(reasonLabel('timeout', false)).toBe('你连续两次超时，判负')
     expect(reasonLabel('eight_early', false)).toBe('你提前打进黑八')
+    expect(reasonLabel('eight_with_foul', false)).toBe('你犯规同时打进黑八')
   })
 
   it('赢的那一方，同样的码说的是对手', () => {
     expect(reasonLabel('leave', true)).toBe('对手中途离开，判负')
     expect(reasonLabel('timeout', true)).toBe('对手连续两次超时，判负')
+    expect(reasonLabel('eight_with_foul', true)).toBe('对手犯规同时打进黑八')
   })
 
   it('未登记的码不猜原因', () => {

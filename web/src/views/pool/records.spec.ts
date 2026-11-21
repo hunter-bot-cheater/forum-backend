@@ -3,11 +3,12 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { PoolRecord, RecordsResp } from '@/api/pool'
 
-// 战绩页的用例集中在四件事上：
-//   1. 汇总数字怎么显示（尤其是一场没打时的胜率）；
+// 战绩页的用例集中在五件事上：
+//   1. 汇总数字怎么显示（尤其是一场没打、以及还没拉到时的胜率）；
 //   2. 「拉失败」与「真的没战绩」不能混成同一种空态；
 //   3. 每行的胜负标记与对手资料；
-//   4. 翻页会带上新的页码再请求一次。
+//   4. 翻页会带上新的页码再请求一次，且慢的旧请求不许盖回新页；
+//   5. 返回键走 goBack。
 // 页面里没有 WebSocket，也没有计时器，所以不需要假时钟。
 
 const mocks = vi.hoisted(() => ({
@@ -160,5 +161,79 @@ describe('战绩页', () => {
 
     expect(mocks.getRecords).toHaveBeenCalledTimes(2)
     expect(mocks.getRecords).toHaveBeenLastCalledWith(2, 10)
+  })
+
+  // 汇总条在拿到数据之前不能摆出 1000 / 0 胜 0 负：
+  // 请求失败时那三个数字会留在页面上，与下面那句「没加载出来」互相打架，
+  // 看起来还像「我的积分被清零了」。
+  it('还没拉到数据时汇总条显示短横，不拿默认值顶上', async () => {
+    // 永不 resolve 的请求：页面停在「首次加载中」。
+    mocks.getRecords.mockReturnValue(new Promise(() => {}))
+
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const wrapper = mount(RecordsPage, { global: { plugins: [pinia], stubs } })
+    await flushPromises()
+
+    const stats = wrapper.findAll('.rec__stat-value')
+    expect(stats[0].text()).toBe('—')
+    expect(stats[1].text()).toBe('— / —')
+    expect(stats[2].text()).toBe('—')
+    expect(stats[0].text()).not.toBe('1000')
+  })
+
+  // 连点两页时分页控件不会禁用，两条请求同时在途。
+  // 先发的那条后到时如果照写，用户翻到新一页看到的却是上一页的内容。
+  it('两条请求同时在途时，后发的才算数', async () => {
+    let resolveOlder: (value: RecordsResp) => void = () => {}
+    let resolveNewer: (value: RecordsResp) => void = () => {}
+
+    // 第一条直接返回第 1 页：分页器要等 total 出来才渲染。
+    mocks.getRecords.mockResolvedValueOnce(resp([record()], 25))
+    mocks.getRecords.mockReturnValueOnce(
+      new Promise<RecordsResp>((resolve) => {
+        resolveOlder = resolve
+      }),
+    )
+    mocks.getRecords.mockReturnValueOnce(
+      new Promise<RecordsResp>((resolve) => {
+        resolveNewer = resolve
+      }),
+    )
+
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const wrapper = mount(RecordsPage, { global: { plugins: [pinia], stubs } })
+    await flushPromises()
+
+    // 连点两次，排进两条还在途的请求。
+    await wrapper.find('.el-pagination').trigger('click')
+    await flushPromises()
+    await wrapper.find('.el-pagination').trigger('click')
+    await flushPromises()
+    expect(mocks.getRecords).toHaveBeenCalledTimes(3)
+
+    // 后发的先回来，先发的后回来：最终留下的必须是后发那条。
+    resolveNewer(
+      resp([record({ match_id: 21, opponent: { user_id: 3, nickname: '后发的那页', avatar: '' } })]),
+    )
+    await flushPromises()
+    resolveOlder(
+      resp([record({ match_id: 31, opponent: { user_id: 4, nickname: '先发的那页', avatar: '' } })]),
+    )
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('后发的那页')
+    expect(wrapper.text()).not.toContain('先发的那页')
+  })
+
+  // 返回键走 goBack 而不是 router.back()：从大厅进来再回去，
+  // 页面各自 push 会把历史压满，用户连点几次就退不出去。
+  it('返回键走 goBack，退回大厅', async () => {
+    const wrapper = await mountPage(resp([record()]))
+
+    await wrapper.find('.rec__back').trigger('click')
+
+    expect(mocks.goBack).toHaveBeenCalledWith('/pool')
   })
 })

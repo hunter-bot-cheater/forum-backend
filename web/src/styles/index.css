@@ -32,6 +32,14 @@
   --fs-like: #f5552d;
   --fs-like-weak: #fff2ee;
 
+  /* 胜负标记。国内习惯「胜红负绿」，与股市同向，别按欧美反过来。
+     只给台球的结算面板与战绩列表用：这两个色是暖红与绿，
+     散到别处会让人以为是报错或成功提示。 */
+  --fs-win: #e0553f;
+  --fs-win-weak: rgba(224, 85, 63, 0.12);
+  --fs-lose: #35a06a;
+  --fs-lose-weak: rgba(53, 160, 106, 0.12);
+
   --fs-radius-sm: 6px;
   --fs-radius: 8px;
   --fs-radius-lg: 12px;

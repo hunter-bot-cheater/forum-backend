@@ -13,13 +13,16 @@
 // reasonLabel 是结算面板用的完整说法。
 export function reasonLabel(code: string, won: boolean): string {
   if (code === 'eight_legal') {
-    return '打进黑八，赢下这一局'
+    // 赢家说「赢下这一局」，输家也得点明是谁打的：
+    // 中文没有主语时默认指说话人，写成「打进黑八，赢下这一局」，
+    // 输家读到的是「我打进黑八赢了」，与上面那行「这局输了」直接打架。
+    return won ? '打进黑八，赢下这一局' : '对手打进黑八，赢下这一局'
   }
   if (code === 'eight_early') {
     return won ? '对手提前打进黑八' : '你提前打进黑八'
   }
   if (code === 'eight_with_foul') {
-    return won ? '对手犯规同时打进黑八' : '犯规同时打进黑八'
+    return won ? '对手犯规同时打进黑八' : '你犯规同时打进黑八'
   }
   if (code === 'timeout') {
     return won ? '对手连续两次超时，判负' : '你连续两次超时，判负'

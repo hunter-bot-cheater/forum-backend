@@ -15,11 +15,11 @@
     <section class="rec__summary">
       <div class="rec__stat">
         <span class="rec__stat-label">积分</span>
-        <span class="rec__stat-value">{{ rating.elo }}</span>
+        <span class="rec__stat-value">{{ eloText }}</span>
       </div>
       <div class="rec__stat">
         <span class="rec__stat-label">胜 / 负</span>
-        <span class="rec__stat-value">{{ rating.wins }} / {{ rating.losses }}</span>
+        <span class="rec__stat-value">{{ recordText }}</span>
       </div>
       <div class="rec__stat">
         <span class="rec__stat-label">胜率</span>
@@ -108,7 +108,10 @@ import { keepInPlace } from '@/utils/scroll'
 const router = useRouter()
 
 const items = ref<PoolRecord[]>([])
-const rating = ref<PoolRating>({ elo: 1000, wins: 0, losses: 0 })
+// rating 为 null 表示还没拉到（首次加载中或失败）。
+// 不给一个「1000 / 0 胜 0 负」的默认值：拉失败时那三个数字会显示成
+// 真实数据，与下面那句「战绩没加载出来」互相打架，还容易让人以为分被清零了。
+const rating = ref<PoolRating | null>(null)
 const total = ref(0)
 const page = ref(1)
 const size = 10
@@ -119,12 +122,37 @@ const loadFailed = ref(false)
 // pager 指到分页器本身，翻页时把它钉在原地。
 const pager = ref<HTMLElement | null>(null)
 
-// winRateText 是胜率。一场没打时显示一个短横而不是 0%：
-// 0% 看起来像「打了全输」。
+// loadSeq 是请求序号。连点两页时分页控件不会禁用，
+// 先发的请求可能后到，用旧页的数据覆盖掉新页——翻到第 3 页却显示第 2 页的内容。
+let loadSeq = 0
+
+// placeholder 是「这个数字还没有」的统一写法。用短横而不是 0：
+// 0 分看起来像真的输光了，短横一眼就知道是还没拉到。
+const placeholder = '—'
+
+// eloText / recordText / winRateText 都从 rating 派生。
+// 胜率一场没打时也显示短横：0% 看起来像「打了全输」。
+const eloText = computed(() => {
+  if (!rating.value) {
+    return placeholder
+  }
+  return String(rating.value.elo)
+})
+
+const recordText = computed(() => {
+  if (!rating.value) {
+    return placeholder + ' / ' + placeholder
+  }
+  return String(rating.value.wins) + ' / ' + String(rating.value.losses)
+})
+
 const winRateText = computed(() => {
+  if (!rating.value) {
+    return placeholder
+  }
   const played = rating.value.wins + rating.value.losses
   if (played === 0) {
-    return '—'
+    return placeholder
   }
   const rate = (rating.value.wins / played) * 100
   return String(Math.round(rate)) + '%'
@@ -149,18 +177,30 @@ function timeOf(item: PoolRecord): string {
 
 // load 拉当前这一页。
 async function load() {
+  loadSeq += 1
+  const seq = loadSeq
   loading.value = true
   loadFailed.value = false
   try {
     const resp = await getRecords(page.value, size)
+    // 期间又发了一次请求：这次的结果已经过时，直接丢掉，
+    // 否则慢的那条后到，会把新页的内容盖回旧页。
+    if (seq !== loadSeq) {
+      return
+    }
     items.value = resp.list
     rating.value = resp.rating
     total.value = resp.total
   } catch {
+    if (seq !== loadSeq) {
+      return
+    }
     // 拦截器已经弹过提示，这里只负责把失败态显示出来。
     loadFailed.value = true
   } finally {
-    loading.value = false
+    if (seq === loadSeq) {
+      loading.value = false
+    }
   }
 }
 
@@ -343,13 +383,13 @@ onMounted(load)
 }
 
 .rec__flag.is-win {
-  color: #e0553f;
-  background: rgba(224, 85, 63, 0.12);
+  color: var(--fs-win);
+  background: var(--fs-win-weak);
 }
 
 .rec__flag.is-lose {
-  color: #35a06a;
-  background: rgba(53, 160, 106, 0.12);
+  color: var(--fs-lose);
+  background: var(--fs-lose-weak);
 }
 
 .rec__time {
