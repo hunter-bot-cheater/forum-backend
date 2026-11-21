@@ -2,6 +2,7 @@ package pool
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
+	"forum-backend/internal/model"
 	"forum-backend/internal/pool/sim"
 	"forum-backend/pkg/jwt"
 )
@@ -63,6 +65,27 @@ func readMessage(t *testing.T, conn *websocket.Conn) Message {
 	return msg
 }
 
+// readCloseCode 读到连接关闭，返回服务端给的关闭码。
+//
+// 关掉之前可能还会收到业务帧（joined 之类），跳过它们继续读；
+// 没带关闭码就断了、或者读超时，都当用例失败——这两种情况前端都读不到原因。
+func readCloseCode(t *testing.T, conn *websocket.Conn) int {
+	t.Helper()
+
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	for {
+		_, _, err := conn.ReadMessage()
+		if err == nil {
+			continue
+		}
+		var closeErr *websocket.CloseError
+		if errors.As(err, &closeErr) {
+			return closeErr.Code
+		}
+		t.Fatalf("连接没带关闭码就断了：%v", err)
+	}
+}
+
 // mustMatch 从 Manager 里取一局，取不到直接让用例失败。
 func mustMatch(t *testing.T, manager *Manager, matchID uint) *Match {
 	t.Helper()
@@ -107,19 +130,23 @@ func TestGameWSRequiresToken(t *testing.T) {
 	}
 }
 
-// 对局不在内存里：404，前端据此回大厅而不是反复重连。
+// 对局不在内存里：先升级，再用关闭码 4004 说「这一局没了」。
+//
+// 握手前的 404 浏览器读不到（只表现为一次连接失败），客户端会当成网络抖动
+// 退避重试四十七秒。所以业务性的拒绝一律放到升级之后，用关闭码说清楚。
 func TestGameWSRejectsUnknownMatch(t *testing.T) {
 	manager, _ := startMatch(t, quietShot())
 	baseURL, jwtManager := newTestServer(t, manager)
 
 	token, _ := jwtManager.SignAccess(1)
-	conn, resp, err := dialGame(t, baseURL, token, 999999)
-	if err == nil {
-		conn.Close()
-		t.Fatal("不存在的对局不该连上")
+	conn, _, err := dialGame(t, baseURL, token, 999999)
+	if err != nil {
+		t.Fatalf("握手本身不该失败（拒绝要放到升级之后）：%v", err)
 	}
-	if resp == nil || resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("状态码应当 404，实际 %+v", resp)
+	defer conn.Close()
+
+	if code := readCloseCode(t, conn); code != CloseMatchGone {
+		t.Errorf("关闭码 = %d，期望 %d", code, CloseMatchGone)
 	}
 }
 
@@ -212,10 +239,48 @@ func TestGameWSSpectatorCannotShoot(t *testing.T) {
 	}
 }
 
-// 观战名额满了：握手前就 409。
+// 观战者发 leave：也必须回 error，绝不能落进规则层。
 //
-// WS 里拿不到 HTTP 状态码，所以这条拒绝必须发生在 Upgrade 之前，
-// 否则浏览器只会看到一次连上又断开的抖动，前端也没法显示「人数已满」。
+// 这条比 shoot 那条更要命：handleLeave 不看是不是本人，
+// 而 SeatSpectator.Other() 返回 Seat0——真放进去就是「座位 0 判负、这一局结束」。
+// 用 shoot 验不出这个，因为两种实现回的错误码恰好都是 ErrCodeNotYourTurn。
+func TestGameWSSpectatorCannotLeave(t *testing.T) {
+	manager, matchID := startMatch(t, quietShot())
+	baseURL, jwtManager := newTestServer(t, manager)
+
+	token, _ := jwtManager.SignAccess(3)
+	conn, _, err := dialGame(t, baseURL, token, matchID)
+	if err != nil {
+		t.Fatalf("观战连接失败：%v", err)
+	}
+	defer conn.Close()
+
+	readMessage(t, conn)
+	readMessage(t, conn)
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"leave","seq":7,"data":{}}`)); err != nil {
+		t.Fatalf("发送 leave 失败：%v", err)
+	}
+
+	msg := readMessage(t, conn)
+	if msg.Type != MsgError {
+		t.Fatalf("应当收到 error，实际 %s（观战者把对局退了）", msg.Type)
+	}
+
+	snapshot, err := mustMatch(t, manager, matchID).Snapshot(SeatSpectator)
+	if err != nil {
+		t.Fatalf("取快照失败：%v", err)
+	}
+	if snapshot.Status != model.PoolStatusPlaying {
+		t.Errorf("观战者的 leave 让对局结束了：%s", snapshot.Status)
+	}
+}
+
+// 观战名额满了：用关闭码 4001 告诉浏览器。
+//
+// 这里曾经是「握手前回 409」，但浏览器读不到握手前的状态码，
+// 观战页因此对着一个必然失败的房间空转完 47 秒的退避窗口。
+// 唯一读得到的渠道是关闭码。
 func TestGameWSRejectsWhenSpectatorsFull(t *testing.T) {
 	manager, matchID := startMatch(t, quietShot())
 	match := mustMatch(t, manager, matchID)
@@ -227,13 +292,17 @@ func TestGameWSRejectsWhenSpectatorsFull(t *testing.T) {
 
 	baseURL, jwtManager := newTestServer(t, manager)
 	token, _ := jwtManager.SignAccess(3)
-	conn, resp, err := dialGame(t, baseURL, token, matchID)
-	if err == nil {
-		conn.Close()
-		t.Fatal("观战名额满了不该连上")
+	conn, _, err := dialGame(t, baseURL, token, matchID)
+	if err != nil {
+		t.Fatalf("握手本身不该失败（拒绝要放到升级之后）：%v", err)
 	}
-	if resp == nil || resp.StatusCode != http.StatusConflict {
-		t.Fatalf("状态码应当 409，实际 %+v", resp)
+	defer conn.Close()
+
+	if code := readCloseCode(t, conn); code != CloseSpectatorFull {
+		t.Errorf("关闭码 = %d，期望 %d", code, CloseSpectatorFull)
+	}
+	if count := match.SpectatorCount(); count != maxSpectators {
+		t.Errorf("被拒的那条不该占名额，实际 %d", count)
 	}
 }
 

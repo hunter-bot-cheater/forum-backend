@@ -49,8 +49,10 @@ const (
 //
 // 4000 以上归应用自己用（1000-2999 是协议保留，3000-3999 留给库）。
 const (
-	// CloseSpectatorFull 表示观战名额在握手与进房之间被抢走了。
+	// CloseSpectatorFull 表示观战名额已经满了。
 	CloseSpectatorFull = 4001
+	// CloseMatchGone 表示这一局已经不在了（结束并被回收，或不是自己的局）。
+	CloseMatchGone = 4004
 )
 
 // Message 是下行信封。

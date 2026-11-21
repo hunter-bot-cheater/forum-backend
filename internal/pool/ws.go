@@ -45,6 +45,10 @@ func NewWSHandler(manager *Manager, jwtManager *jwt.Manager, origins []string) *
 //
 // 鉴权必须在 Upgrade 之前做完：升级之后响应头已经发出去了，
 // 再想返回 401 已经来不及，浏览器只会看到一次莫名其妙的连接失败。
+//
+// 反过来，**业务性的拒绝**（对局没了、观战名额满了）一律放到升级之后，
+// 用关闭码告诉浏览器。握手前的 4xx 浏览器读不到，只表现为一次连接失败，
+// 客户端会当成网络抖动，白白退避重试四十七秒。
 func (h *WSHandler) Serve(c *gin.Context) {
 	token := c.Query("token")
 	if token == "" {
@@ -63,25 +67,6 @@ func (h *WSHandler) Serve(c *gin.Context) {
 		return
 	}
 
-	match, ok := h.manager.Get(uint(matchID))
-	if !ok {
-		// 对局不在内存里：可能已经结束并被回收。前端据此回大厅而不是反复重连。
-		response.Error(c, http.StatusNotFound, "对局已结束")
-		return
-	}
-
-	seat, isPlayer := seatOf(match, userID)
-	if !isPlayer {
-		// 观战名额满了要在握手前就拒：WebSocket 里拿不到 HTTP 状态码，
-		// 升级之后再发一条 error 帧再关闭，浏览器只会看到一次莫名其妙的断连。
-		// 这里读到的是略旧的计数，真正的上限由 handleWatch 在 actor 里再判一次。
-		if match.SpectatorCount() >= maxSpectators {
-			response.Error(c, http.StatusConflict, "这场对局观战人数已满，稍后再来")
-			return
-		}
-		seat = SeatSpectator
-	}
-
 	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		// Upgrade 失败时它自己已经写过响应，这里只能记日志。
@@ -91,18 +76,38 @@ func (h *WSHandler) Serve(c *gin.Context) {
 
 	wsConn := newWSConn(conn)
 	go wsConn.writeLoop()
+	// readLoop 返回之后必须把连接关掉：hijack 之后的连接不会被 net/http 回收，
+	// 不关的话 writeLoop 要等下一次 ping 写失败才退出，fd 与协程会多挂一分钟。
+	defer wsConn.Close()
 
+	match, ok := h.manager.Get(uint(matchID))
+	if !ok {
+		// 对局不在内存里：可能已经结束并被回收。前端据此回大厅而不是反复重连。
+		wsConn.CloseWith(CloseMatchGone, "对局已结束")
+		return
+	}
+
+	seat, isPlayer := seatOf(match, userID)
 	if isPlayer {
 		if err := match.Join(seat, wsConn); err != nil {
-			wsConn.Close()
+			// 走到这里只可能是这一局刚好被回收：Join 对重连是覆盖旧连接，不报冲突。
+			wsConn.CloseWith(CloseMatchGone, "对局已结束")
 			return
 		}
-	} else if err := match.Watch(wsConn); err != nil {
-		// 预检通过、actor 里却又满了：两条连接并发抢最后一个位置。
-		// 这条连接马上就要关掉，关闭码是唯一还能告诉浏览器的渠道——
-		// 不带码直接关，客户端会当成一次网络抖动，退避重试四十七秒。
-		wsConn.CloseWith(CloseSpectatorFull, "观战人数已满")
-		return
+	} else {
+		// 不是局中人就一定是观战者：座位改回 -1，
+		// dispatch 靠它把上行命令全部挡掉（留 0 会被当成真座位放行）。
+		seat = SeatSpectator
+		if err := match.Watch(wsConn); err != nil {
+			// 名额满了与被回收要分开说：前者重试也没用（等人走），
+			// 后者重试同样没用但页面该回大厅而不是让人等一场不存在的对局。
+			if errors.Is(err, ErrSpectatorFull) {
+				wsConn.CloseWith(CloseSpectatorFull, "观战人数已满")
+			} else {
+				wsConn.CloseWith(CloseMatchGone, "对局已结束")
+			}
+			return
+		}
 	}
 
 	// 读循环占住当前协程，直到连接断开。
