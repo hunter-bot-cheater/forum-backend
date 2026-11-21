@@ -226,13 +226,35 @@ describe('GameSocket', () => {
     const { socket, states } = newSocket()
     socket.connect()
 
-    // 每次断开都会排下一次重连（上限 5 次），把每一轮都跑完。
-    for (let i = 0; i < 6; i += 1) {
+    // 每次断开都会排下一次重连，轮数按上限（8 次）再多跑两轮，确保走到放弃。
+    for (let i = 0; i < 10; i += 1) {
       FakeWS.instances[FakeWS.instances.length - 1].serverClose()
       vi.advanceTimersByTime(20000)
     }
 
     expect(states[states.length - 1]).toBe('gaveup')
+  })
+
+  // 断网半分钟再回来，不该要求用户做任何操作。
+  it('重连窗口盖得住三十秒断网', () => {
+    vi.useFakeTimers()
+    const { socket, states } = newSocket()
+    socket.connect()
+    FakeWS.instances[0].open()
+    FakeWS.instances[0].serverClose()
+
+    // 三十秒里一直是「连不上又断」：每次握手失败后都还能再排下一轮。
+    let elapsed = 0
+    while (elapsed < 30000) {
+      vi.advanceTimersByTime(1000)
+      elapsed += 1000
+      const latest = FakeWS.instances[FakeWS.instances.length - 1]
+      if (latest.readyState === FakeWS.CONNECTING) {
+        latest.serverClose()
+      }
+    }
+
+    expect(states[states.length - 1]).not.toBe('gaveup')
   })
 
   it('重连时重新取一次 token，不沿用建连时那个', () => {
@@ -304,7 +326,7 @@ describe('GameSocket', () => {
     vi.useFakeTimers()
     const { socket, states } = newSocket()
     socket.connect()
-    for (let i = 0; i < 6; i += 1) {
+    for (let i = 0; i < 10; i += 1) {
       FakeWS.instances[FakeWS.instances.length - 1].serverClose()
       vi.advanceTimersByTime(20000)
     }

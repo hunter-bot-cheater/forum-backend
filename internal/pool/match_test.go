@@ -366,6 +366,75 @@ func TestPlaceCueRequiresBallInHand(t *testing.T) {
 	}
 }
 
+// 断线重连：新连接顶上同一个座位，先收 joined 再收完整快照，然后能接着出杆。
+//
+// 这是 M6 的服务端一半：断线不判负、对局继续走读秒、重连靠一份快照收敛。
+func TestRejoinAfterDisconnect(t *testing.T) {
+	match, conn0, conn1 := newTestMatch(t, &fakeSim{shot: quietShot()})
+
+	// 座位 0 掉线：对手要收到 offline，否则他会以为是自己卡住了。
+	if err := match.NotifyDisconnect(Seat0, conn0); err != nil {
+		t.Fatalf("断线通知失败：%v", err)
+	}
+	peerMsg, ok := conn1.last(MsgPeer)
+	if !ok {
+		t.Fatal("对手没有收到掉线通知")
+	}
+	if peerMsg.Data.(PeerData).Event != PeerOffline {
+		t.Errorf("peer 事件 = %s，期望 %s", peerMsg.Data.(PeerData).Event, PeerOffline)
+	}
+
+	// 重连：新连接顶掉旧的那条。
+	fresh := &fakeConn{}
+	if err := match.Join(Seat0, fresh); err != nil {
+		t.Fatalf("重连失败：%v", err)
+	}
+	kinds := fresh.types()
+	// joined 必须在 state 前面：前端要先用它认自己坐哪边。
+	if len(kinds) < 2 || kinds[0] != MsgJoined || kinds[1] != MsgState {
+		t.Fatalf("重连后应当先 joined 再 state，实际 %v", kinds)
+	}
+
+	stateMsg, _ := fresh.last(MsgState)
+	snapshot := stateMsg.Data.(Snapshot)
+	if snapshot.Seat != Seat0 {
+		t.Errorf("快照里的座位 = %d，期望 0", snapshot.Seat)
+	}
+	if snapshot.Status != "playing" {
+		t.Errorf("状态 = %s，期望 playing（断线不该判负）", snapshot.Status)
+	}
+	if len(snapshot.Balls) != len(StandardRack) {
+		t.Errorf("快照里有 %d 颗球，期望 %d 颗", len(snapshot.Balls), len(StandardRack))
+	}
+
+	// 接着出杆：轮次没被断线弄丢。
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 1); err != nil {
+		t.Fatalf("重连后出杆失败：%v", err)
+	}
+}
+
+// 旧连接的退出回调晚到一步时，不能把已经重连上来的新连接一起清掉。
+func TestDisconnectOfOldConnKeepsNewOne(t *testing.T) {
+	match, conn0, _ := newTestMatch(t, &fakeSim{shot: quietShot()})
+
+	fresh := &fakeConn{}
+	if err := match.Join(Seat0, fresh); err != nil {
+		t.Fatalf("重连失败：%v", err)
+	}
+	// 旧连接此时才报断线。
+	if err := match.NotifyDisconnect(Seat0, conn0); err != nil {
+		t.Fatalf("断线通知失败：%v", err)
+	}
+
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 1); err != nil {
+		t.Fatalf("重连后出杆失败：%v", err)
+	}
+	// 新连接必须收到这一杆：被旧回调误清的话这里什么也收不到。
+	if _, ok := fresh.last(MsgShot); !ok {
+		t.Error("新连接没收到这一杆，说明它被旧连接的断线回调清掉了")
+	}
+}
+
 // 主动退出判负。
 func TestLeaveLosesTheMatch(t *testing.T) {
 	match, conn0, _ := newTestMatch(t, &fakeSim{shot: quietShot()})

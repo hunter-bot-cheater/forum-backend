@@ -102,9 +102,12 @@ export interface GameSocketOptions {
   onState: (state: ConnectionState) => void
 }
 
-// 重连上限。超过就放弃：对局已经从服务端内存里回收时，
-// 重连会一直拿到 404，无限重试只会让页面永远卡在「连接中」。
-const MAX_RETRY = 5
+// 重连上限。超过就放弃，等用户点「重新连接」。
+//
+// 取 8 次而不是三五次，是为了盖住「拔网半分钟」这种真实情况：
+// 退避序列是 1+2+4+8+8+8+8+8 ≈ 47 秒（另有 0~500ms 抖动），
+// 断网三十秒的人不用做任何事就能自己接回来。
+const MAX_RETRY = 8
 
 // 退避基数，实际间隔是 base * 2^n，上限 8 秒，再叠 0~500ms 抖动。
 const RETRY_BASE = 1000

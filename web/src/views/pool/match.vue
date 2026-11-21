@@ -62,11 +62,19 @@
       @lobby="backToLobby"
     />
 
-    <!-- 连接彻底放弃（重连多次失败）时才整屏拦一下：
-         对局已经从服务端回收了，留在球台上只会让人对着一个死局拖力度。 -->
+    <!-- 连接彻底放弃（重连窗口走完）时才整屏拦一下：
+         留在球台上只会让人对着一个死局拖力度。
+         但给一个「重新连接」：断网超过四十秒才会走到这里，
+         而人多半只是切了一下网，直接赶回大厅等于这局白打。 -->
     <div v-if="connState === 'gaveup'" class="pm__gone" role="dialog" aria-modal="true">
       <p class="pm__gone-text">与对局的连接已断开</p>
-      <button class="pm__gone-btn" type="button" @click="backToLobby">回大厅</button>
+      <p class="pm__gone-sub">网络恢复后可以重试；对局还在服务端等你。</p>
+      <div class="pm__gone-actions">
+        <button class="pm__gone-btn pm__gone-btn--ghost" type="button" @click="backToLobby">
+          回大厅
+        </button>
+        <button class="pm__gone-btn" type="button" @click="retryConnect">重新连接</button>
+      </div>
     </div>
   </div>
 </template>
@@ -734,6 +742,18 @@ async function rematch() {
   }
 }
 
+// retryConnect 在放弃之后人工重试一次。
+//
+// 走到 gaveup 只说明「自动重连的窗口走完了」，不代表对局没了：
+// 服务端不会因为断线判负，重连上来照样拿得到完整快照。
+function retryConnect() {
+  if (!socket) {
+    return
+  }
+  // connect 内部会复位重试计数（见 protocol.ts），所以这是一次全新的重连。
+  socket.connect()
+}
+
 // backToLobby 停掉一切并回大厅。
 function backToLobby() {
   cleanup()
@@ -954,6 +974,17 @@ onBeforeRouteLeave(() => {
   color: #e8eaed;
 }
 
+.pm__gone-sub {
+  margin: -10px 0 0;
+  font-size: 12px;
+  color: #8a919c;
+}
+
+.pm__gone-actions {
+  display: flex;
+  gap: 10px;
+}
+
 .pm__gone-btn {
   height: 42px;
   padding: 0 26px;
@@ -964,5 +995,12 @@ onBeforeRouteLeave(() => {
   border: none;
   border-radius: 12px;
   cursor: pointer;
+}
+
+/* 次级按钮必须写在主按钮之后：两条规则特异性相同（都是单类），
+   谁在后面谁生效。写在前面会被主按钮的蓝底盖掉。 */
+.pm__gone-btn--ghost {
+  color: #c8ccd3;
+  background: rgba(255, 255, 255, 0.1);
 }
 </style>
