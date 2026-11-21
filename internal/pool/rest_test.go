@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -103,25 +104,33 @@ func decodeData(t *testing.T, body []byte, target any) {
 }
 
 // blockingSim 会一直卡在 Shoot 里，直到用例放行。
-// 用来模拟「这一局正在算杆」——actor 此时被占住，快照请求只能排队。
+// 用来模拟「这一局正在算杆」——actor 此时被占住，命令往返只能排队。
 type blockingSim struct {
+	entered chan struct{}
 	release chan struct{}
+	once    sync.Once
 }
 
 func (b *blockingSim) Shoot(context.Context, sim.Request) (*sim.Shot, error) {
+	b.once.Do(func() { close(b.entered) })
 	<-b.release
 	return quietShot(), nil
 }
 
-// 有一局正在算杆时，观战列表不能被它拖住。
+// 有一局正在算杆时，观战列表要照常列出它，而且要秒回。
 //
-// 串行取快照的话，这一局算一秒，后面的每一局都要等一秒；
-// 五十局就是五十秒，而这个列表每十秒拉一次。现在每局各给 300ms，
-// 忙的那一局这一轮不列出来，其余的照常返回。
+// 两件事一起验，因为它们是一件事的两面：
+//   - 走命令往返取快照的话，忙的那一局会超时被丢掉，
+//     大厅那块「正在进行的对局」每十秒闪掉一次；
+//   - 不丢而是一直等的话，整页被一局拖住。
+//
+// 现在读的是 actor 发布的摘要，所以既不丢也不等：内容是上一杆的序号，
+// 晚一杆对「谁在打」没有影响。
 func TestLiveDoesNotWaitForBusyMatch(t *testing.T) {
 	db := testutil.NewDB(t)
 	release := make(chan struct{})
-	manager, err := NewManager(Options{Sim: &blockingSim{release: release}, TurnTimeout: time.Minute})
+	blocker := &blockingSim{entered: make(chan struct{}), release: release}
+	manager, err := NewManager(Options{Sim: blocker, TurnTimeout: time.Minute})
 	if err != nil {
 		t.Fatalf("构造 manager 失败：%v", err)
 	}
@@ -136,26 +145,18 @@ func TestLiveDoesNotWaitForBusyMatch(t *testing.T) {
 		t.Fatalf("进房失败：%v", err)
 	}
 
-	// 让 401 这一局的 actor 卡在 Shoot 里。
+	// 让 401 这一局的 actor 卡在 Shoot 里，并等它真的进去（不是还在排队）。
 	shotDone := make(chan struct{})
 	go func() {
 		defer close(shotDone)
 		_ = busy.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 1)
 	}()
-	// 等到快照真的取不到，说明 actor 已经进去了（不是还在排队）。
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, ok := busy.SnapshotWithin(SeatSpectator, 20*time.Millisecond); !ok {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	<-blocker.entered
 
 	engine := newRestEngine(t, db, manager, nil)
 	startedAt := time.Now()
 
-	// 在协程里发请求：串行取快照的实现会让这条请求一直等下去，
-	// 直接调用的话用例会挂到包级超时，看不出是哪一步卡了。
+	// 在协程里发请求：真卡住的话直接调用会挂到包级超时，看不出是哪一步卡了。
 	type answer struct {
 		status int
 		body   []byte
@@ -180,14 +181,19 @@ func TestLiveDoesNotWaitForBusyMatch(t *testing.T) {
 	if reply.status != http.StatusOK {
 		t.Fatalf("状态码 = %d：%s", reply.status, reply.body)
 	}
-	if elapsed > 1500*time.Millisecond {
+	// 300ms 是列表能满足的量级；1.5 秒就说明又退回去等 actor 了。
+	if elapsed > 500*time.Millisecond {
 		t.Errorf("观战列表耗时 %v，被忙的那一局拖住了", elapsed)
 	}
 
 	var list []liveMatchResp
 	decodeData(t, reply.body, &list)
-	if len(list) != 1 || list[0].MatchID != 402 {
-		t.Fatalf("应当只列出空闲的那一局，实际 %+v", list)
+	if len(list) != 2 {
+		t.Fatalf("忙的那一局也该列出来，实际 %+v", list)
+	}
+	// 倒序：新开的局在前。
+	if list[0].MatchID != 402 || list[1].MatchID != 401 {
+		t.Fatalf("顺序不对，实际 %+v", list)
 	}
 
 	close(release)

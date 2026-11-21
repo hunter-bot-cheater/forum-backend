@@ -18,7 +18,6 @@ var (
 	ErrNotYourTurn   = errors.New("not your turn")
 	ErrBadParams     = errors.New("shot params out of range")
 	ErrSimFailed     = errors.New("simulation failed")
-	ErrSeatTaken     = errors.New("seat already taken by another connection")
 	ErrNotBallInHand = errors.New("ball in hand is not available")
 	ErrMustPlaceCue  = errors.New("cue ball must be placed first")
 	ErrSpectatorFull = errors.New("too many spectators")
@@ -132,6 +131,19 @@ type command struct {
 	state  chan Snapshot
 }
 
+// LiveInfo 是观战列表要看的那一小份数据。
+//
+// 单独拎出来是因为它必须能在**不打扰 actor** 的前提下读到：
+// 一局正在算杆时 actor 被占着一两秒，而大厅那个列表每十秒就要拉一次、
+// 还要一次问几十局。走命令往返的话，这个列表就会被某一局拖住。
+type LiveInfo struct {
+	MatchID uint
+	Status  string
+	Turn    Seat
+	ShotSeq int
+	Players [2]PlayerBrief
+}
+
 // Match 是一局对局。所有状态只在 run() 这条协程里读写。
 type Match struct {
 	opts Options
@@ -145,6 +157,10 @@ type Match struct {
 	state      MatchState
 	conns      [2]Conn
 	spectators []Conn
+
+	// live 是观战列表要读的那份摘要，由 actor 每条命令处理完发布一次。
+	// 外面读它不需要命令往返，所以永远不会被「正在算杆」挡住。
+	live atomic.Pointer[LiveInfo]
 
 	// spectatorCount 是 spectators 的原子镜像，只给「观战是不是满了」这个判断用。
 	// 走命令往返当然也行，但握手前的预检每来一个人就要排一次队，
@@ -176,9 +192,41 @@ func NewMatch(state MatchState, opts Options) *Match {
 	}
 	match.state = state
 	match.state.Deadline = time.Now().Add(opts.TurnTimeout)
+	// 先发布一份初始摘要再起协程：房间阶段的对局也可能被列表读到。
+	match.publishLive()
 
 	go match.run()
 	return match
+}
+
+// publishLive 把当前状态里的几个字段抄进 atomic 指针。只在 actor 里调用。
+//
+// 每条命令处理完都发布一次，而不是只在换人时发：
+// 球的序号、状态（开局 / 结束）都会变，漏发就会让列表显示上一杆的序号。
+func (m *Match) publishLive() {
+	m.live.Store(&LiveInfo{
+		MatchID: m.state.MatchID,
+		Status:  m.state.Status,
+		Turn:    m.state.Turn,
+		ShotSeq: m.state.ShotSeq,
+		Players: m.state.Players,
+	})
+}
+
+// Live 读最近一次发布的摘要。第二个返回值为 false 表示这一局已经关掉。
+//
+// 不加锁、不进队列：它读的是一个原子指针，被丢弃的那个旧结构由 GC 回收。
+func (m *Match) Live() (LiveInfo, bool) {
+	select {
+	case <-m.done:
+		return LiveInfo{}, false
+	default:
+	}
+	info := m.live.Load()
+	if info == nil {
+		return LiveInfo{}, false
+	}
+	return *info, true
 }
 
 // Join 把一条连接绑到座位上。同一座位重连会顶掉旧连接。
@@ -193,7 +241,8 @@ func (m *Match) Watch(conn Conn) error {
 	return m.call(command{kind: cmdWatch, conn: conn})
 }
 
-// SpectatorCount 返回当前观战连接数。握手前的容量预检用它。
+// SpectatorCount 返回当前观战连接数。观战列表拿它算「还有几个位置」，
+// 名额本身由 handleWatch 在 actor 里判。
 func (m *Match) SpectatorCount() int {
 	return int(atomic.LoadInt32(&m.spectatorCount))
 }
@@ -255,34 +304,6 @@ func (m *Match) Snapshot(viewer Seat) (Snapshot, error) {
 	}
 }
 
-// SnapshotWithin 取一份快照，超时就放弃。
-//
-// 给观战列表这种「一次问几十局、但不能被某一局拖住」的场景用：
-// 一局正在算杆时 actor 是阻塞的（物理调用在协程里），串行问五十局
-// 就可能变成几十秒，而那个列表每十秒就要拉一次。
-// 超时的那一局这一轮先不列出来，下一轮自然会回来。
-//
-// reply 带缓冲，所以超时之后 actor 再回话也不会把它卡住。
-func (m *Match) SnapshotWithin(viewer Seat, timeout time.Duration) (Snapshot, bool) {
-	reply := make(chan Snapshot, 1)
-	select {
-	case m.cmd <- command{kind: cmdSnapshot, seat: viewer, state: reply}:
-	case <-m.done:
-		return Snapshot{}, false
-	}
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case snapshot := <-reply:
-		return snapshot, true
-	case <-timer.C:
-		return Snapshot{}, false
-	case <-m.done:
-		return Snapshot{}, false
-	}
-}
-
 // Close 停掉 actor 并断开所有连接。
 func (m *Match) Close() {
 	m.closeOnce.Do(func() {
@@ -332,9 +353,11 @@ func (m *Match) run() {
 				return
 			}
 			m.handle(cmd)
+			m.publishLive()
 			m.armTimer(timer)
 		case <-timer.C:
 			m.handleTimeout()
+			m.publishLive()
 			m.armTimer(timer)
 		}
 	}
