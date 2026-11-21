@@ -97,6 +97,7 @@ const (
 	cmdPlaceCue
 	cmdSnapshot
 	cmdLeave
+	cmdDisconnect
 	cmdClose
 )
 
@@ -176,6 +177,15 @@ func (m *Match) PlaceCue(seat Seat, x, y float64) error {
 // Leave 主动退出，判负。
 func (m *Match) Leave(seat Seat) error {
 	return m.call(command{kind: cmdLeave, seat: seat})
+}
+
+// NotifyDisconnect 告诉对局某个座位的连接断了。
+//
+// 断线不判负：对局继续按读秒走，重连上来会拿到完整快照。
+// 这里只做两件事：把这个连接从登记表摘掉（如果它还是当前连接），
+// 以及通知对手「对方掉线了」，让对方别以为是自己卡住。
+func (m *Match) NotifyDisconnect(seat Seat, conn Conn) error {
+	return m.call(command{kind: cmdDisconnect, seat: seat, conn: conn})
 }
 
 // Snapshot 取一份快照。viewer 是看的人坐在哪；-1 表示观战。
@@ -281,6 +291,8 @@ func (m *Match) handle(cmd command) {
 		cmd.state <- m.state.snapshot(cmd.seat, time.Now())
 	case cmdLeave:
 		cmd.reply <- m.handleLeave(cmd)
+	case cmdDisconnect:
+		cmd.reply <- m.handleDisconnect(cmd)
 	}
 }
 
@@ -476,6 +488,19 @@ func (m *Match) handleLeave(cmd command) error {
 	m.state.Deadline = time.Time{}
 	m.finish(WinLeave)
 	m.broadcast(m.wrap(MsgResult, ResultData{Winner: winner, Reason: WinLeave}))
+	return nil
+}
+
+// handleDisconnect 处理掉线：摘掉连接并通知对手。
+func (m *Match) handleDisconnect(cmd command) error {
+	// 只摘掉还登记着的这条：玩家可能已经用新连接重连上来，
+	// 旧连接的退出回调晚到一步，不能把新连接一起清掉。
+	if m.conns[cmd.seat] == cmd.conn {
+		m.conns[cmd.seat] = nil
+	}
+	if peer := m.conns[cmd.seat.Other()]; peer != nil {
+		peer.Send(m.wrap(MsgPeer, PeerData{Event: PeerOffline, Seat: cmd.seat}))
+	}
 	return nil
 }
 

@@ -1,6 +1,8 @@
 package pool
 
 import (
+	"encoding/json"
+
 	"forum-backend/internal/pool/sim"
 )
 
@@ -47,11 +49,14 @@ type Message struct {
 }
 
 // ClientMessage 是上行信封。Data 交给各命令自己解，信封层不关心它的形状。
+//
+// Data 必须是 json.RawMessage 而不是 []byte：后者在 encoding/json 里
+// 对应的是 base64 字符串，客户端发对象过来会直接解不动。
 type ClientMessage struct {
-	Type string `json:"type"`
-	Seq  int    `json:"seq"`
-	TS   int64  `json:"ts"`
-	Data []byte `json:"data,omitempty"`
+	Type string          `json:"type"`
+	Seq  int             `json:"seq"`
+	TS   int64           `json:"ts"`
+	Data json.RawMessage `json:"data,omitempty"`
 }
 
 // JoinedData 是进房成功的应答。

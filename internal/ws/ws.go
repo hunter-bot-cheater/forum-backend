@@ -21,46 +21,49 @@ type onlineStatsResp struct {
 }
 
 // WSHandler 负责升级连接与在线状态查询。
-// allowedOrigins 是启动时从配置算好的白名单，这里用 map 存是为了 O(1) 判断。
 type WSHandler struct {
-	hub            *realtime.Hub
-	jwt            *jwt.Manager
-	allowedOrigins map[string]bool
-	upgrader       websocket.Upgrader
+	hub      *realtime.Hub
+	jwt      *jwt.Manager
+	upgrader websocket.Upgrader
 }
 
 // NewWSHandler 由装配层调用，origins 为空表示谁都不放行（浏览器连接会被拒）。
 func NewWSHandler(hub *realtime.Hub, jwtManager *jwt.Manager, origins []string) *WSHandler {
-	h := &WSHandler{
-		hub:            hub,
-		jwt:            jwtManager,
-		allowedOrigins: make(map[string]bool, len(origins)),
+	return &WSHandler{
+		hub: hub,
+		jwt: jwtManager,
+		upgrader: websocket.Upgrader{
+			// 这个连接只收心跳、发通知，1 KiB 读写缓冲够用。
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
+			CheckOrigin:     OriginChecker(origins),
+		},
 	}
-	for _, origin := range origins {
-		h.allowedOrigins[origin] = true
-	}
-	h.upgrader = websocket.Upgrader{
-		// 这个连接只收心跳、发通知，1 KiB 读写缓冲够用。
-		ReadBufferSize:  1024,
-		WriteBufferSize: 1024,
-		CheckOrigin:     h.checkOrigin,
-	}
-	return h
 }
 
-// 浏览器的同源策略管不住 WebSocket，握手是普通 HTTP 请求，
-// 跨站页面可以带着 Cookie 发起，所以服务端必须自己校验 Origin。
-func (h *WSHandler) checkOrigin(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		// curl、Go 客户端这类非浏览器调用不带 Origin。
-		return true
+// OriginChecker 按白名单校验 Origin，返回一个给 websocket.Upgrader 用的回调。
+//
+// 浏览器的同源策略管不住 WebSocket：握手是普通 HTTP 请求，跨站页面可以带着
+// Cookie 发起，所以服务端必须自己校验 Origin。两个 WebSocket 入口
+// （通知与对局）共用这一份判断，避免其中一个漏改。
+func OriginChecker(origins []string) func(*http.Request) bool {
+	allowed := make(map[string]bool, len(origins))
+	for _, origin := range origins {
+		allowed[origin] = true
 	}
-	u, err := url.Parse(origin)
-	if err != nil {
-		return false
+
+	return func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			// curl、Go 客户端这类非浏览器调用不带 Origin。
+			return true
+		}
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		return allowed[u.Host]
 	}
-	return h.allowedOrigins[u.Host]
 }
 
 // Notifications 把连接升级成 WebSocket，之后由 Hub 往这里推消息。

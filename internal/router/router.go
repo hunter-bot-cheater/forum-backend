@@ -28,6 +28,7 @@ import (
 	"forum-backend/internal/metrics"
 	"forum-backend/internal/middleware"
 	"forum-backend/internal/notification"
+	"forum-backend/internal/pool"
 	"forum-backend/internal/realtime"
 	"forum-backend/internal/report"
 	"forum-backend/internal/session"
@@ -61,6 +62,9 @@ type Deps struct {
 	LLM config.LLMConfig
 	// Upload 是用户上传图片的落盘目录与压缩参数。
 	Upload config.UploadConfig
+	// Pool 是台球对局的登记表。在 main 里建好再传进来，与 Hub 同理：
+	// 进程退出时 main 要能把它所有对局停掉。
+	Pool *pool.Manager
 }
 
 // New 组装出完整的 HTTP 服务：创建 gin 引擎 → 装全局中间件 → 建各业务对象 → 注册路由。
@@ -79,6 +83,9 @@ func New(deps Deps) (*gin.Engine, error) {
 	}
 	if deps.Hub == nil {
 		return nil, errors.New("router: realtime hub is required")
+	}
+	if deps.Pool == nil {
+		return nil, errors.New("router: pool manager is required")
 	}
 
 	// 管理员白名单为空时，创建活动接口对所有人都是 403。
@@ -201,6 +208,9 @@ func New(deps Deps) (*gin.Engine, error) {
 	notificationSvc := notification.NewNotificationService(deps.DB, userSvc)
 	notificationHandler := notification.NewNotificationHandler(notificationSvc)
 	wsHandler := ws.NewWSHandler(deps.Hub, deps.JWT, deps.WSOrigins)
+	// 对局连接与通知连接分开两个 handler：它们上行语义不同（对局要读客户端消息），
+	// 但共用同一份 Origin 白名单与 JWT 校验。
+	poolHandler := pool.NewWSHandler(deps.Pool, deps.JWT, deps.WSOrigins)
 
 	// 私信的展示信息同样走 user.Briefs，所以只要 userSvc，不需要 follow。
 	messageSvc := message.NewService(deps.DB, userSvc)
@@ -333,6 +343,8 @@ func New(deps Deps) (*gin.Engine, error) {
 		// 所以这两条放在公开组里，不能挂 JWTAuth。
 		api.GET("/ws/notifications", wsHandler.Notifications)
 		api.GET("/ws/stats", wsHandler.Stats)
+		// 对局连接同样自己从查询参数读 token。
+		api.GET("/ws/game", poolHandler.Serve)
 
 		// 下面这个子组路径是空的（""），表示沿用 /api 前缀，只是多挂一个登录校验。
 		// 挂在这个组上的接口，handler 里一定能取到 userID；上面公开组的接口则取不到。

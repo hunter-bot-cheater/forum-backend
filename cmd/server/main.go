@@ -29,6 +29,8 @@ import (
 	"forum-backend/internal/llm"
 	"forum-backend/internal/message"
 	"forum-backend/internal/notification"
+	"forum-backend/internal/pool"
+	"forum-backend/internal/pool/sim"
 	"forum-backend/internal/realtime"
 	"forum-backend/internal/router"
 	"forum-backend/internal/user"
@@ -103,6 +105,16 @@ func main() {
 	// 各建一个的话消息永远找不到连接。
 	hub := realtime.NewHub()
 
+	// 台球对局：物理算在独立的 pool-sim 容器里，这里只建一个 HTTP 客户端。
+	// 一局一个 actor 协程，Manager 是全进程唯一的登记表。
+	poolManager, err := pool.NewManager(pool.Options{
+		Sim:         sim.NewClient(cfg.Pool.SimURL),
+		TurnTimeout: time.Duration(cfg.Pool.TurnTimeoutSeconds) * time.Second,
+	})
+	if err != nil {
+		exitOnError("对局服务初始化失败", err)
+	}
+
 	// 所有外部依赖通过 Deps 显式注入，router 内部不再读全局配置。
 	r, err := router.New(router.Deps{
 		DB:             db,
@@ -117,6 +129,7 @@ func main() {
 		Admin:          cfg.Admin,
 		LLM:            cfg.LLM,
 		Upload:         cfg.Upload,
+		Pool:           poolManager,
 	})
 	if err != nil {
 		exitOnError("注册路由失败", err)
@@ -172,6 +185,13 @@ func main() {
 		}()
 	}
 
+	// 对局清扫：收掉已经结束且没人连着的对局，否则内存只增不减。
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		poolManager.Janitor(ctx, time.Minute, 10*time.Minute)
+	}()
+
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	srv := &http.Server{Addr: addr, Handler: r}
 
@@ -182,6 +202,8 @@ func main() {
 		// WebSocket 连接握手后就被 hijack 了，不算 http.Server 管的活跃请求，
 		// Shutdown 不会关它们，所以必须自己先全部断开，否则这些 goroutine 一直挂着。
 		hub.CloseAll()
+		// 对局连接同样是 hijack 过的，Shutdown 管不到，必须显式断开并停掉 actor。
+		poolManager.CloseAll()
 
 		// 给在途 HTTP 请求 5 秒收尾时间；超时就强制返回，不再等。
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

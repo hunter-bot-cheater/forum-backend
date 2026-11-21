@@ -27,6 +27,18 @@ type Config struct {
 	Admin     AdminConfig     `mapstructure:"admin"`
 	LLM       LLMConfig       `mapstructure:"llm"`
 	Upload    UploadConfig    `mapstructure:"upload"`
+	Pool      PoolConfig      `mapstructure:"pool"`
+}
+
+// PoolConfig 是 2D 台球对战的外部依赖配置。
+//
+// 物理算在独立的 pool-sim 容器里，这里只需要知道它在哪里、一杆读秒多久。
+// 仿真服务的地址不写进代码：本机是 127.0.0.1:8000，容器网络里是 pool-sim:8000。
+type PoolConfig struct {
+	// SimURL 是 pool-sim 的根地址，不带路径。
+	SimURL string `mapstructure:"sim_url"`
+	// TurnTimeoutSeconds 是一杆的读秒秒数。超时一次换人，连续两次判负。
+	TurnTimeoutSeconds int `mapstructure:"turn_timeout_seconds"`
 }
 
 // UploadConfig 是用户上传图片的落盘与压缩参数，含义见 internal/upload。
@@ -254,6 +266,11 @@ func Load() (*Config, error) {
 	// 再多就是给没人会看的像素付流量。
 	v.SetDefault("upload.max_dimension", 256)
 	v.SetDefault("upload.jpeg_quality", 82)
+	// 台球仿真服务默认在本机 8000 端口（docker compose 里是 http://pool-sim:8000）。
+	// 40 秒一杆：手机端拖动瞄准本身就慢，开球时服务端还要算一秒半。
+	v.SetDefault("pool.sim_url", "http://127.0.0.1:8000")
+	v.SetDefault("pool.turn_timeout_seconds", 40)
+
 	// 1200 万像素对应 4000×3000，手机原图的常见尺寸。
 	// 挡住的是「几百 KB 的 PNG 解出几亿像素」这类解压炸弹。
 	v.SetDefault("upload.max_pixels", 12_000_000)
