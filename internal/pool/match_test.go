@@ -257,7 +257,10 @@ func TestShootRejectsBadParams(t *testing.T) {
 	}
 }
 
-// 仿真失败：状态不动、射手收到 error、回合还在自己手里。
+// 仿真失败：状态不动、回合还在自己手里、错误帧交给 WS 层统一发。
+//
+// actor 不自己发 error：它出错时会 return，WS 层按 error 码回一条。
+// 两边都发的话玩家会连着看到两条一模一样的「球桌暂时算不动」。
 func TestShootSurvivesSimFailure(t *testing.T) {
 	fake := &fakeSim{err: sim.ErrUnavailable}
 	match, conn0, _ := newTestMatch(t, fake)
@@ -267,12 +270,8 @@ func TestShootSurvivesSimFailure(t *testing.T) {
 		t.Fatalf("err = %v，期望 ErrSimFailed", err)
 	}
 
-	errMsg, ok := conn0.last(MsgError)
-	if !ok {
-		t.Fatal("射手应当收到一条 error")
-	}
-	if errMsg.Data.(ErrorData).Code != ErrCodeSimFailed {
-		t.Errorf("错误码 = %s", errMsg.Data.(ErrorData).Code)
+	if _, ok := conn0.last(MsgError); ok {
+		t.Error("actor 不该自己发 error 帧，交给 WS 层发")
 	}
 
 	snapshot, _ := match.Snapshot(Seat0)
@@ -412,6 +411,18 @@ func TestTimeoutSwitchesThenLoses(t *testing.T) {
 	}
 	if foulMsg.Data.(FoulData).Code != "timeout" {
 		t.Errorf("原因码 = %s，期望 timeout", foulMsg.Data.(FoulData).Code)
+	}
+
+	// foul 与 turn 都是增量帧，都不带「手中球」这一项。
+	// 少补一份完整快照，接手方会看到自己的回合却出不了杆
+	// （服务端按 ErrMustPlaceCue 拒掉、状态又不变），界面就此卡死。
+	stateMsg, ok := conn0.last(MsgState)
+	if !ok {
+		t.Fatal("超时换人后没有广播快照")
+	}
+	afterTimeout := stateMsg.Data.(Snapshot)
+	if afterTimeout.Turn != Seat1 {
+		t.Errorf("快照里的回合 = %d，期望换成座位 1", afterTimeout.Turn)
 	}
 
 	// 第二次超时落在座位 1 身上，这是它第一次，所以还是换人。

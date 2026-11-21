@@ -370,8 +370,9 @@ func (m *Match) handleShoot(cmd command) error {
 		SampleHz: 30,
 	})
 	if err != nil {
+		// 这里只记日志并返回错误：错误帧由 WS 层按 error 码统一回一条。
+		// 两处都发的话，玩家会看到两条一模一样的「球桌暂时算不动」。
 		m.log.Error("simulate shot", "error", err)
-		m.sendTo(cmd.seat, m.wrap(MsgError, ErrorData{Code: ErrCodeSimFailed, Message: "球桌暂时算不动，请稍后重试"}))
 		return ErrSimFailed
 	}
 
@@ -592,6 +593,11 @@ func (m *Match) handleTimeout() {
 		Seat:       seat,
 	}))
 	m.broadcast(m.wrap(MsgTurn, TurnData{Seat: m.state.Turn, DeadlineMS: m.remainingMS()}))
+
+	// 单次超时把母球交给对手，这个 ball_in_hand 只存在于状态里。
+	// 不补快照的话，接手那方的界面看不到「手中球」，直接出杆会被 ErrMustPlaceCue 拒，
+	// 而拒绝之后状态没有任何变化，于是他会一直撞在同一句提示上——对局卡死。
+	m.broadcastState()
 }
 
 // finish 结算落库，并把结果记进日志。

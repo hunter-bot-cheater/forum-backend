@@ -85,13 +85,33 @@ beforeEach(() => {
 })
 
 describe('pool store 的邀请推送', () => {
-  it('initWS 注册四类处理函数，重复调用不会注册两遍', () => {
+  it('三个推送帧各注册一次，重复调用不会注册两遍', () => {
     const store = usePoolStore()
     store.initWS()
     store.initWS()
 
-    // 三个帧类型各注册一次，重复调用不该再加倍。
+    // 注册次数与「注册了哪几个」都要验：
+    // 只数次数的话，把 pool_invite_declined 换成 pool_invite_xxx 也照样是 3。
     expect(mocks.frameRegistrations).toBe(3)
+    expect([...mocks.frames.keys()].sort()).toEqual([
+      'pool_invite',
+      'pool_invite_accepted',
+      'pool_invite_declined',
+    ])
+  })
+
+  // expires_in 是「服务端发这一帧时还剩多少秒」，必须换成本地截止时刻：
+  // 排在后面的邀请轮到时早已过时，按剩余量起表会显示一个假的倒计时。
+  it('入库时把剩余秒数换成本地截止时刻', () => {
+    const store = usePoolStore()
+    store.initWS()
+
+    const before = Date.now()
+    fire('pool_invite', invite('a', 7, 30))
+
+    const first = store.pending[0]
+    expect(first.expires_at).toBeGreaterThanOrEqual(before + 30 * 1000)
+    expect(first.expires_at).toBeLessThanOrEqual(Date.now() + 30 * 1000)
   })
 
   it('同一条邀请被推两次只留一条', () => {
@@ -161,7 +181,7 @@ describe('pool store 的邀请处理', () => {
     expect(store.pending).toHaveLength(0)
   })
 
-  it('invite 成功后记住自己发出的那条', async () => {
+  it('invite 成功后记住自己发出的那条，以及发给了谁', async () => {
     const store = usePoolStore()
     mocks.createInvite.mockResolvedValue({
       invite_id: 'x',
@@ -174,6 +194,26 @@ describe('pool store 的邀请处理', () => {
 
     expect(mocks.createInvite).toHaveBeenCalledWith(9)
     expect(store.outgoing?.room_code).toBe('111222')
+    // 响应里没有被邀请者的 id，大厅要靠 outgoingTo 把那一行标成「已发送」。
+    expect(store.outgoingTo).toBe(9)
+    expect(store.outgoing?.expires_at).toBeGreaterThan(Date.now())
+  })
+
+  it('点了不等之后，等待卡与「发给谁」一起清掉', async () => {
+    const store = usePoolStore()
+    mocks.createInvite.mockResolvedValue({
+      invite_id: 'x',
+      match_id: 200,
+      room_code: '111222',
+      expires_in: 60,
+    })
+    await store.invite(9)
+
+    store.cancelOutgoing()
+
+    expect(store.outgoing).toBeNull()
+    // 不清的话大厅那一行会一直是「已发送」并禁用，用户再也约不到这个人。
+    expect(store.outgoingTo).toBe(0)
   })
 })
 
@@ -181,7 +221,7 @@ describe('pool store 的实时结果', () => {
   it('对方接受后清掉等待卡，并给出跳转信号', () => {
     const store = usePoolStore()
     store.initWS()
-    store.outgoing = { invite_id: 'x', match_id: 200, room_code: '111222', expires_in: 60 }
+    store.outgoing = { invite_id: 'x', match_id: 200, room_code: '111222', expires_in: 60, expires_at: Date.now() + 60000 }
 
     fire('pool_invite_accepted', { match_id: 200, room_code: '111222' })
 
@@ -192,7 +232,7 @@ describe('pool store 的实时结果', () => {
   it('对方拒绝后清掉等待卡并留一句话', () => {
     const store = usePoolStore()
     store.initWS()
-    store.outgoing = { invite_id: 'x', match_id: 200, room_code: '111222', expires_in: 60 }
+    store.outgoing = { invite_id: 'x', match_id: 200, room_code: '111222', expires_in: 60, expires_at: Date.now() + 60000 }
 
     fire('pool_invite_declined', { match_id: 200, room_code: '111222' })
 
@@ -242,7 +282,8 @@ describe('pool store 的刷新与清理', () => {
     const store = usePoolStore()
     store.initWS()
     fire('pool_invite', invite('a'))
-    store.outgoing = { invite_id: 'x', match_id: 200, room_code: '111222', expires_in: 60 }
+    store.outgoing = { invite_id: 'x', match_id: 200, room_code: '111222', expires_in: 60, expires_at: Date.now() + 60000 }
+    store.outgoingTo = 9
     store.acceptedRoom = { match_id: 200, room_code: '111222' }
 
     store.reset()
@@ -250,6 +291,7 @@ describe('pool store 的刷新与清理', () => {
     expect(store.pending).toHaveLength(0)
     expect(store.incoming).toBeNull()
     expect(store.outgoing).toBeNull()
+    expect(store.outgoingTo).toBe(0)
     expect(store.acceptedRoom).toBeNull()
   })
 })

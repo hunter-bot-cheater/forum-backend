@@ -112,8 +112,6 @@ func (h *WSHandler) dispatch(match *Match, seat Seat, conn *wsConn, msg ClientMe
 			Theta float64 `json:"theta"`
 			A     float64 `json:"a"`
 			B     float64 `json:"b"`
-			// ClientSeq 是客户端给这一杆编的号，用来挡住重复提交。
-			ClientSeq int `json:"client_seq"`
 		}
 		if err := json.Unmarshal(msg.Data, &payload); err != nil {
 			conn.Send(errorMessage(msg.Seq, ErrCodeBadParams, "杆法参数解析失败"))

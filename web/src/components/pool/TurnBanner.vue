@@ -1,7 +1,7 @@
 <template>
   <!-- 换人横幅。从视频里照搬的做法：换人时整块横幅从中间滑过，
        一眼能看到「现在轮到谁」，比在角落里改一行小字清楚得多。
-       它不是弹窗——不拦任何操作，0.4 秒后自己滑走。 -->
+       它不是弹窗——不拦任何操作，1.4 秒后自己滑走。 -->
   <Transition name="tb">
     <div v-if="visible" class="tb" :class="{ 'is-mine': isMe }">
       <div class="tb__inner">

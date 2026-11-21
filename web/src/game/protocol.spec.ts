@@ -284,4 +284,40 @@ describe('GameSocket', () => {
 
     expect(FakeWS.instances).toHaveLength(1)
   })
+
+  // close 会把 manualClose 置位（不再自动重连），重新 connect 必须把它解掉，
+  // 否则「离开页面又回来」的连接是一次性的，第二次断线就永远连不回去。
+  it('close 之后再 connect 能重新建一条连接', () => {
+    const { socket } = newSocket()
+    socket.connect()
+    FakeWS.instances[0].open()
+    socket.close()
+
+    socket.connect()
+
+    expect(FakeWS.instances).toHaveLength(2)
+  })
+
+  // gaveup 之后的人工重试必须是一次全新计数。
+  // 不复位的话第一次握手失败就会立刻再判 gaveup，页面再也连不回来。
+  it('gaveup 之后再 connect 不会立刻又放弃', () => {
+    vi.useFakeTimers()
+    const { socket, states } = newSocket()
+    socket.connect()
+    for (let i = 0; i < 6; i += 1) {
+      FakeWS.instances[FakeWS.instances.length - 1].serverClose()
+      vi.advanceTimersByTime(20000)
+    }
+    expect(states[states.length - 1]).toBe('gaveup')
+    const before = FakeWS.instances.length
+
+    socket.connect()
+    expect(FakeWS.instances).toHaveLength(before + 1)
+
+    FakeWS.instances[before].serverClose()
+    vi.advanceTimersByTime(2000)
+
+    expect(FakeWS.instances).toHaveLength(before + 2)
+    expect(states[states.length - 1]).not.toBe('gaveup')
+  })
 })

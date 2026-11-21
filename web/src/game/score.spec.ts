@@ -80,6 +80,14 @@ describe('remainingOf', () => {
     const snap = snapshot([ball('7'), ball('cue'), ball('1'), ball('3')], ['solids', 'stripes'])
     expect(remainingOf(snap, 0)).toEqual(['1', '3', '7'])
   })
+
+  // 8 号与母球都不属于任何一组：混进剩余球里，双方条上会一直挂着一颗
+  // 永远清不掉的球，「清完打黑八」的提示也就永远不出现。
+  it('黑八与母球不算进任何一组', () => {
+    const snap = snapshot([ball('cue'), ball('8'), ball('2')], ['solids', 'stripes'])
+    expect(remainingOf(snap, 0)).toEqual(['2'])
+    expect(remainingOf(snap, 1)).toEqual([])
+  })
 })
 
 describe('hasGroup', () => {

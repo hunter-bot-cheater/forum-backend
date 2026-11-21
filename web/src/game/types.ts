@@ -1,4 +1,4 @@
-// 2D 台球的共享类型，与后端 internal/pool/handler/dto.go 的 JSON 字段一一对应。
+// 2D 台球的共享类型，与后端 internal/pool/dto.go 的 JSON 字段一一对应。
 //
 // 前端不在这里做校验或补默认值：服务端是唯一权威，缺字段就是协议不一致，
 // 应该立刻在开发期暴露出来，而不是被一层「宽松解析」掩盖掉。
@@ -36,11 +36,11 @@ export interface BallState {
   on_table: boolean
 }
 
-// ShotParams 是一次击球的六个参数，服务端只认这六个数。
+// ShotParams 是一次击球的参数，服务端只认这五个数。
 //
 // phi 是方位角（弧度，0 指向 +x），power 是 0~1 的力度，
 // theta 是杆头仰角（弧度），a / b 是击球点相对球心的偏移（-1~1）。
-// 手机与电脑算出的都是这六个浮点数，因此两端的物理结果必然一致。
+// 手机与电脑算出的都是这五个浮点数，因此两端的物理结果必然一致。
 export interface ShotParams {
   phi: number
   power: number

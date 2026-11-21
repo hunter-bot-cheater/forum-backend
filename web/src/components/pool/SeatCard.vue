@@ -50,7 +50,7 @@ import { initials } from '@/utils/format'
 
 const props = defineProps<{
   player: PlayerBrief
-  // group 是这一侧的组别，'none' 表示还没定组。
+  // group 是这一侧的组别，空串表示还没定组（后端用 Go 零值当哨兵，不是 'none'）。
   group: BallGroup
   // remaining 是自己组里还在台面上的球号。
   remaining: string[]

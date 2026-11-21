@@ -58,7 +58,7 @@
       :won="result.won"
       :reason="result.reason"
       :delta="result.delta"
-      @again="backToLobby"
+      @again="rematch"
       @lobby="backToLobby"
     />
 
@@ -82,7 +82,7 @@
 // 规则判定一行都不在客户端：能不能出杆由 turn 与 ball_in_hand 决定，
 // 但服务端会再判一次，客户端提前拦住只是省一次往返，不是权威。
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { ElMessageBox } from 'element-plus'
 import FineTuneRail from '@/components/pool/FineTuneRail.vue'
@@ -108,12 +108,14 @@ import { remainingOf } from '@/game/score'
 import { BALL_RADIUS, TABLE_LENGTH, TABLE_WIDTH } from '@/game/table'
 import type { BallState, MatchSnapshot, PoolDrag, Seat, ShotParams } from '@/game/types'
 import { getToken } from '@/utils/auth'
+import { usePoolStore } from '@/store/modules/pool'
 
 const props = defineProps<{
   id: string
 }>()
 
 const router = useRouter()
+const pool = usePoolStore()
 
 // ===== 服务端状态 =====
 
@@ -165,7 +167,12 @@ const placing = ref(false)
 // 所以除了 shot（用来驱动动画）之外，其余一律先存起来，播完再放出去。
 let handle: PlayHandle | null = null
 let pendingFoul: FoulData | null = null
-let pendingTurn: TurnData | null = null
+// pendingTurn 连着截止时刻一起存。
+//
+// 只存帧本身的话，applyTurn 里再算 Date.now() + deadline_ms，会用「动画播完」那一刻
+// 当起点，读秒上限凭空多出整段动画时长；而 flush 里它排在 state 后面，
+// 还会把 state 给的正确值覆盖掉。
+let pendingTurn: { data: TurnData; deadlineAt: number } | null = null
 let pendingState: { snap: MatchSnapshot; deadlineAt: number } | null = null
 let pendingResult: ResultData | null = null
 
@@ -176,6 +183,8 @@ let dragBase = 0
 let socket: GameSocket | null = null
 // disposed 在卸载时置位，用来挡住在途帧。
 let disposed = false
+// leaveSent 保证「告知服务端退出」只发一次，见 sendLeave。
+let leaveSent = false
 // 读秒用的 1Hz 计时器。
 let tickTimer: ReturnType<typeof setInterval> | null = null
 let bannerTimer: ReturnType<typeof setTimeout> | null = null
@@ -280,6 +289,10 @@ function applySnapshot(snap: MatchSnapshot, deadline: number) {
   // 快照回来了说明落位请求已经有结论（成功会带新球位，失败会有错误帧），
   // 这个标记只在「点了台面到服务端答复」之间有用。
   placing.value = false
+  // 出杆在途标记同理：快照是权威状态，它能到就说明那一杆已经有结论了
+  // （服务端要么算完广播了 shot，要么把请求拒了）。
+  // 断线重连时正是靠这一句把标记解开——否则 canShoot 永远是 false，只能刷新页面。
+  shotPending.value = false
   // 第一次拿到快照时才知道母球在哪，瞄准角要在这之后算：
   // 组件挂载那一刻 balls 还是空的，算出来恒为 0（永远指向 +x）。
   if (first) {
@@ -335,15 +348,21 @@ function onMessage(msg: DownMessage) {
       pendingFoul = msg.data
       return
     }
-    showNotice(msg.data.reason)
+    applyFoul(msg.data)
     return
   }
   if (msg.type === 'turn') {
+    // 与 state 一样按「收到这一刻」换算截止时刻：晚了整段动画再算，
+    // 读秒就会比服务端的真实读秒多出四五秒。
+    const entry = {
+      data: msg.data,
+      deadlineAt: msg.data.deadline_ms > 0 ? Date.now() + msg.data.deadline_ms : 0,
+    }
     if (shooting.value) {
-      pendingTurn = msg.data
+      pendingTurn = entry
       return
     }
-    applyTurn(msg.data)
+    applyTurn(entry.data, entry.deadlineAt)
     return
   }
   if (msg.type === 'result') {
@@ -436,12 +455,12 @@ function flushAfterShot() {
   if (pendingFoul) {
     const foul = pendingFoul
     pendingFoul = null
-    showNotice(foul.reason)
+    applyFoul(foul)
   }
   if (pendingTurn) {
     const next = pendingTurn
     pendingTurn = null
-    applyTurn(next)
+    applyTurn(next.data, next.deadlineAt)
   }
   if (pendingResult) {
     const next = pendingResult
@@ -450,12 +469,27 @@ function flushAfterShot() {
   }
 }
 
+// applyFoul 显示犯规文案，并顺便采纳「这一杆之后是不是手中球」。
+//
+// 正常顺序下紧随其后的 state 会用权威值覆盖它，但 WS 不保证不丢包：
+// state 恰好丢掉时，foul 里的这一项就是唯一来源。
+// 只在 true 时采纳——漏掉「有手中球」会让接手方既摆不了球也出不了杆（彻底卡死），
+// 而多留一个手中球最多被服务端按 ErrNotBallInHand 拒一次，下一次快照就纠正回来。
+function applyFoul(data: FoulData) {
+  const snap = snapshot.value
+  if (snap && data.ball_in_hand) {
+    snap.ball_in_hand = true
+  }
+  showNotice(data.reason)
+}
+
 // applyTurn 应用换人：轮次、读秒、横幅。
+// deadline 是收包时换算好的绝对截止时刻，这里不再重新算。
 // 只在没有后续 state 帧时才需要它来改 turn；
 // 有 state 时两者一致，重复应用同一个值没有副作用。
-function applyTurn(data: TurnData) {
+function applyTurn(data: TurnData, deadline: number) {
   turn.value = data.seat
-  deadlineAt.value = data.deadline_ms > 0 ? Date.now() + data.deadline_ms : 0
+  deadlineAt.value = deadline
   showBanner(data.seat)
 }
 
@@ -645,10 +679,27 @@ function shoot() {
   power.value = 0
 }
 
-// leave 离开对局页。对局还在进行时先确认：中途离开会被判负。
+// isPlaying 表示对局还在进行、也还没出结果。
+// 「要不要判负」只看这一条：房间页与已结算的状态都不该弹确认框。
+function isPlaying(): boolean {
+  return snapshot.value !== null && snapshot.value.status === 'playing' && !result.value
+}
+
+// sendLeave 通知服务端退出，只发一次。
+//
+// 两个入口（点返回、浏览器返回键）会走到同一个守卫，
+// 不去重就是两条 leave：第二条按「对局已结束」被拒，日志里白白多一条错误。
+function sendLeave() {
+  if (leaveSent) {
+    return
+  }
+  leaveSent = true
+  socket?.leave()
+}
+
+// leave 点左上角返回。对局还在进行时先确认：中途离开会被判负。
 async function leave() {
-  const playing = snapshot.value !== null && snapshot.value.status === 'playing' && !result.value
-  if (playing) {
+  if (isPlaying()) {
     try {
       await ElMessageBox.confirm('对局还没结束，现在离开会判负。确定离开吗？', '离开对局', {
         confirmButtonText: '离开',
@@ -658,9 +709,29 @@ async function leave() {
     } catch {
       return
     }
-    socket?.leave()
+    sendLeave()
   }
   backToLobby()
+}
+
+// rematch 再约一局：给同一个对手发一条新邀请，回大厅等对方接受。
+//
+// 复用大厅那条邀请流程而不是在本页干等：对局已经结算、服务端那一局也回收了，
+// 重开一局必须走「邀请 → 对方接受 → 新房间」这条完整链路。
+async function rematch() {
+  const snap = snapshot.value
+  const other: Seat = mySeat.value === 0 ? 1 : 0
+  const target = snap ? snap.players[other].user_id : 0
+  backToLobby()
+  if (target === 0) {
+    return
+  }
+  try {
+    await pool.invite(target)
+  } catch {
+    // 对方已经下线、或者互相关注的关系变了，接口会拒。
+    // 拦截器已经弹过提示，回到大厅重新挑人即可。
+  }
 }
 
 // backToLobby 停掉一切并回大厅。
@@ -728,6 +799,15 @@ onMounted(() => {
 })
 
 onBeforeUnmount(cleanup)
+
+// 浏览器/手机的返回键不走 leave()，它直接换路由，确认框根本没机会弹。
+// 这里补一发 leave：判负是规则，逃不掉；不加的话对手要干等满两次读秒
+// （40 秒）才知道人已经走了。
+onBeforeRouteLeave(() => {
+  if (isPlaying()) {
+    sendLeave()
+  }
+})
 </script>
 
 <style scoped>

@@ -98,13 +98,9 @@ const loadFailed = ref(false)
 // busyId 是正在发送邀请的那个人的 id，用来只禁用一行而不是整张列表。
 const busyId = ref(0)
 
-// invitedId 记住这次邀请发给谁，用于把那一行按钮显示成「已发送」。
-// 后端返回的 invite 响应里没有被邀请者 id，本地记一下最省事。
-const invitedId = ref(0)
-
 const outgoing = computed(() => pool.outgoing)
 
-// waitLeft 是等待卡上的剩余秒数，由本地按 expires_in 倒数。
+// waitLeft 是等待卡上的剩余秒数，按 store 里记下的本地截止时刻倒数。
 const waitLeft = ref(0)
 let waitTimer: ReturnType<typeof setInterval> | null = null
 
@@ -115,11 +111,29 @@ function stopWaitTimer() {
   }
 }
 
-// 每次出现新的等待卡都重新起表。收到 accepted 推送时 outgoing 会被清空，
-// 这里跟着停表并把「已发送」标记一起复位。
+// tick 重算剩余秒数。
+//
+// 不从 expires_in 逐秒减：从别的页面回到大厅时这张卡可能已经挂了几十秒，
+// 按剩余量重新起表会显示「还有 60 秒」而服务端那边早就过期了。
+function tick() {
+  const invite = outgoing.value
+  if (!invite) {
+    stopWaitTimer()
+    waitLeft.value = 0
+    return
+  }
+  const left = Math.max(0, Math.ceil((invite.expires_at - Date.now()) / 1000))
+  waitLeft.value = left
+  if (left === 0) {
+    stopWaitTimer()
+    pool.cancelOutgoing()
+  }
+}
+
+// 关注列表要等 userId 落地才拉得到，所以在 watch 里等它。
 //
 // immediate 不能省：profile 是异步拉的，进页面那一刻 userId 还是 0，
-// 关注列表要等它落地才拉得到。不标 immediate 时这条 watch 永远不会被叫到，
+// 不标 immediate 时这条 watch 永远不会被叫到（挂载时它还没变过），
 // 大厅会一直显示「你还没有关注任何人」——哪怕关注了几十个人。
 watch(
   () => user.userId,
@@ -131,25 +145,26 @@ watch(
   { immediate: true },
 )
 
-watch(outgoing, (value) => {
-  stopWaitTimer()
-  if (!value) {
-    invitedId.value = 0
-    waitLeft.value = 0
-    return
-  }
-  waitLeft.value = value.expires_in
-  waitTimer = setInterval(() => {
-    waitLeft.value -= 1
-    if (waitLeft.value <= 0) {
-      stopWaitTimer()
-      pool.cancelOutgoing()
+// 等待卡出现与消失都走这一条：出现就起表，消失（对方接受/拒绝、自己点了不等）就停表。
+//
+// immediate 不能省：从对局页「再约一局」回到大厅时，outgoing 在挂载前就已经有值，
+// 不标 immediate 会停在「0 秒后失效」且不再倒数，看起来像一条已经失效的邀请。
+watch(
+  outgoing,
+  (value) => {
+    stopWaitTimer()
+    if (!value) {
+      waitLeft.value = 0
+      return
     }
-  }, 1000)
-})
+    tick()
+    waitTimer = setInterval(tick, 1000)
+  },
+  { immediate: true },
+)
 
 function isWaitingOn(userId: number): boolean {
-  return outgoing.value !== null && invitedId.value === userId
+  return outgoing.value !== null && pool.outgoingTo === userId
 }
 
 function initialOf(person: FollowItem): string {
@@ -220,7 +235,8 @@ function statusOf(err: unknown): number {
   return 0
 }
 
-// onInvite 发邀请。成功就把这一行标成「已发送」，
+// onInvite 发邀请。成功就由 store 记住「发给谁」，
+// 那一行据此显示成「已发送」；
 // 失败（409 已有待接受邀请、400 对方已不在关注列表）交给拦截器提示。
 async function onInvite(person: FollowItem) {
   if (busyId.value !== 0) {
@@ -229,7 +245,6 @@ async function onInvite(person: FollowItem) {
   busyId.value = person.id
   try {
     await pool.invite(person.id)
-    invitedId.value = person.id
   } catch {
     // 拦截器已提示。
   } finally {

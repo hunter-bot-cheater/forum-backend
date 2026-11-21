@@ -165,7 +165,9 @@ type MatchState struct {
 	Ready      [2]bool
 	BallInHand bool
 	ShotSeq    int
-	// Timeouts 记录每个座位连续超时的次数，进一次球或换一次人就清零。
+	// Timeouts 记录每个座位连续超时的次数。
+	// 该座位每成功击球一次就清零（见 handleShoot），
+	// 所以「两次超时之间只要打过一杆」就不再算连续。
 	Timeouts [2]int
 
 	// Deadline 是本杆的读秒截止时间，零值表示不计时（房间还没开局）。

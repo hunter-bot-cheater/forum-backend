@@ -24,10 +24,23 @@ import { onFrame, onReconnect } from '@/utils/ws'
 // PoolPushInvite 是后端推 pool_invite 时的 data 形状，与 PendingInvite 一致。
 // 单独起名是为了让「这条来自推送、没有经过 HTTP 校验」这件事在类型上看得见。
 
+// TrackedInvite 是带本地截止时刻的邀请。
+//
+// 协议里的 expires_in 是「服务端发这一帧时还剩多少秒」，它只在到手那一刻准：
+// 第二条排队邀请往往比第一条晚十几秒才轮到，此时再拿它的 expires_in 起表，
+// 界面会显示「还剩 55 秒」而服务端那边已经过期。
+// 所以在入库时一次性换成本地绝对时刻，之后所有倒数都按它算。
+export type TrackedInvite<T> = T & { expires_at: number }
+
+// track 把一条邀请的剩余秒数换成本地截止时刻。
+function track<T extends { expires_in: number }>(item: T): TrackedInvite<T> {
+  return { ...item, expires_at: Date.now() + item.expires_in * 1000 }
+}
+
 export const usePoolStore = defineStore('pool', () => {
   // pending 是收到的、还没处理的邀请。同一个发起人同时只会有一条，
   // 所以这个列表通常最多一两项，不需要分页。
-  const pending = ref<PendingInvite[]>([])
+  const pending = ref<TrackedInvite<PendingInvite>[]>([])
   // ignored 是本地「先放一放」的邀请 id。
   //
   // 忽略不通知服务端：邀请 60 秒后自然过期，为此多一个接口没必要。
@@ -35,7 +48,13 @@ export const usePoolStore = defineStore('pool', () => {
   const ignored = ref<string[]>([])
   // outgoing 是我发出、还在等对方回应的那条邀请。
   // 同一时间只允许一条：后端在同一个发起人已有 pending 时会返回 409。
-  const outgoing = ref<InviteResp | null>(null)
+  const outgoing = ref<TrackedInvite<InviteResp> | null>(null)
+  // outgoingTo 是这条邀请发给谁。
+  //
+  // 接口响应里没有被邀请者的 id，但大厅要按它把那一行显示成「已发送」。
+  // 存在这里而不是大厅组件里：从对局页「再约一局」回大厅时组件是重新挂载的，
+  // 本地 ref 会归零，那一行就会重新变成可点的「邀请」，点了必然 409。
+  const outgoingTo = ref(0)
   // acceptedRoom 是「对方接受了」的跳转信号，由弹层组件消费后清空。
   //
   // store 自己不跳路由：让 store import router 会在单测里拉起整棵路由树，
@@ -49,7 +68,7 @@ export const usePoolStore = defineStore('pool', () => {
 
   // incoming 是当前应该弹出来的那条邀请。
   // 取第一条未被忽略的：同时收到两条时先处理早的那条，处理完自动轮到下一条。
-  const incoming = computed<PendingInvite | null>(() => {
+  const incoming = computed<TrackedInvite<PendingInvite> | null>(() => {
     for (const item of pending.value) {
       if (!ignored.value.includes(item.invite_id)) {
         return item
@@ -65,7 +84,8 @@ export const usePoolStore = defineStore('pool', () => {
   // 邀请是「有就弹、没有就算了」的东西，为一次静默失败弹红条只会干扰阅读。
   async function refresh() {
     try {
-      pending.value = await listPendingInvites()
+      const list = await listPendingInvites()
+      pending.value = list.map(track)
     } catch {
       // 保持上一次的列表，等下一轮刷新。
     }
@@ -73,9 +93,10 @@ export const usePoolStore = defineStore('pool', () => {
 
   // invite 邀请一个关注的人，成功后记住这条邀请以便显示倒计时。
   // 失败原样抛出：调用方（大厅页）要按 409 与 400 给不同的提示。
-  async function invite(toUserId: number): Promise<InviteResp> {
-    const resp = await createInvite(toUserId)
+  async function invite(toUserId: number): Promise<TrackedInvite<InviteResp>> {
+    const resp = track(await createInvite(toUserId))
     outgoing.value = resp
+    outgoingTo.value = toUserId
     return resp
   }
 
@@ -86,6 +107,7 @@ export const usePoolStore = defineStore('pool', () => {
   // 因为对方已经进房了，房间是真实存在的。
   function cancelOutgoing() {
     outgoing.value = null
+    outgoingTo.value = 0
   }
 
   // accept 接受邀请，成功后清掉这条并返回房间信息供调用方跳转。
@@ -134,7 +156,7 @@ export const usePoolStore = defineStore('pool', () => {
         return
       }
     }
-    pending.value = [data].concat(pending.value)
+    pending.value = [track(data)].concat(pending.value)
   }
 
   // takeNotice 取走一次性提示，取完清空，避免同一句话弹两次。
@@ -159,12 +181,14 @@ export const usePoolStore = defineStore('pool', () => {
     // 不清的话大厅会一直显示「等待对方接受」，而对方已经在房间里等着了。
     onFrame('pool_invite_accepted', (data: AcceptInviteResp) => {
       outgoing.value = null
+      outgoingTo.value = 0
       acceptedRoom.value = data
     })
 
     // 对方拒绝：服务端已经把这个房间解散了，本地只需要收起卡片并提示。
     onFrame('pool_invite_declined', () => {
       outgoing.value = null
+      outgoingTo.value = 0
       notice.value = '对方拒绝了这次邀请'
     })
 
@@ -180,6 +204,7 @@ export const usePoolStore = defineStore('pool', () => {
     pending.value = []
     ignored.value = []
     outgoing.value = null
+    outgoingTo.value = 0
     acceptedRoom.value = null
     notice.value = ''
   }
@@ -190,6 +215,7 @@ export const usePoolStore = defineStore('pool', () => {
     pending,
     incoming,
     outgoing,
+    outgoingTo,
     acceptedRoom,
     notice,
     refresh,

@@ -134,6 +134,9 @@ export class GameSocket {
       return
     }
     this.manualClose = false
+    // 计数必须复位：gaveup 之后再调 connect 是一次全新的人工重试，
+    // 不复位的话第一次握手失败就会立刻再判一次 gaveup（计数还停在上限）。
+    this.retryCount = 0
     this.open()
   }
 

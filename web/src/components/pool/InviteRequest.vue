@@ -27,8 +27,8 @@
         </div>
         <div class="pi__fact">
           <dt>有效</dt>
-          <!-- 倒计时是本地跑的：服务端给的 expires_in 只是「给这一帧时的剩余秒数」，
-               每来一帧都重新算一遍也没有意义，本地倒数再加上一秒的粒度就够了。 -->
+          <!-- 倒计时按 store 里记的本地截止时刻算：协议给的 expires_in 只是
+               「服务端发这一帧时还剩多少秒」，排队到现在早已不准。 -->
           <dd>{{ remain }} 秒</dd>
         </div>
       </dl>
@@ -77,27 +77,35 @@ const initial = computed(() => {
   return initials(name)
 })
 
-// startCountdown 按当前这条的剩余秒数重新起表。
+// startCountdown 起一支 1Hz 的表，每次按本地截止时刻重算剩余秒数。
 //
-// 每次都先清掉上一支：切到下一条邀请时若不复位，两支定时器会一起减，
-// 倒计时会以两倍速走完。
-function startCountdown(seconds: number) {
+// 不逐秒减：轮到排队的第二条邀请时，它入队已经过去十几秒了，
+// 用推送时刻的 expires_in 重新起表会显示「还剩 55 秒」，而服务端那边已经过期。
+function startCountdown() {
   stopCountdown()
-  remain.value = Math.max(0, seconds)
-  if (remain.value === 0) {
+  tick()
+  if (!current.value) {
     return
   }
-  timer = setInterval(() => {
-    remain.value -= 1
-    if (remain.value <= 0) {
-      stopCountdown()
-      // 到点就本地收起。服务端此时也已经把它标成过期，
-      // 继续留在页面上只会诱使用户点一个必然失败的按钮。
-      if (current.value) {
-        pool.dismiss(current.value.invite_id)
-      }
-    }
-  }, 1000)
+  timer = setInterval(tick, 1000)
+}
+
+// tick 重算剩余秒数，走到 0 就把这条本地收起。
+function tick() {
+  const invite = current.value
+  if (!invite) {
+    stopCountdown()
+    remain.value = 0
+    return
+  }
+  const left = Math.max(0, Math.ceil((invite.expires_at - Date.now()) / 1000))
+  remain.value = left
+  if (left === 0) {
+    stopCountdown()
+    // 到点就本地收起。服务端此时也已经把它标成过期，
+    // 继续留在页面上只会诱使用户点一个必然失败的按钮。
+    pool.dismiss(invite.invite_id)
+  }
 }
 
 function stopCountdown() {
@@ -115,7 +123,7 @@ watch(
       stopCountdown()
       return
     }
-    startCountdown(current.value.expires_in)
+    startCountdown()
   },
   { immediate: true },
 )
@@ -160,8 +168,10 @@ async function accept() {
     stopCountdown()
     await router.replace('/pool/room/' + String(room.match_id))
   } catch {
-    // 邀请大概率已经过期或被撤销，本地这条也该收起来。
-    pool.dismiss(inviteId)
+    // 不 dismiss：失败可能只是网络抖了一下（限流、超时），这条邀请还活着。
+    // 一旦 dismiss 会把它记进 ignored，本会话再也不会弹出来，
+    // 用户就只剩下「刷新页面」这一条路。留在原地可以直接再点一次，
+    // 真的过期了由倒计时自己收起来。
   } finally {
     busy.value = false
   }
