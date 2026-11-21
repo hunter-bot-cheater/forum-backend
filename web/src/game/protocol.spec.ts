@@ -348,7 +348,7 @@ describe('GameSocket', () => {
     expect(states[states.length - 1]).not.toBe('gaveup')
   })
 
-  // 4001 是服务端在握手之后才说得清的那一类拒绝（观战名额被抢）。
+  // 4001 是服务端在握手之后才说得清的那一类拒绝（观战名额满）。
   // 这种情况重连必然还是同一个结果，必须直接停：不然观战页会对着
   // 一个永远进不去的房间空转完 47 秒的退避窗口。
   it('服务端用 4001 关门时直接放弃，并说明原因', () => {
@@ -363,6 +363,19 @@ describe('GameSocket', () => {
     expect(FakeWS.instances).toHaveLength(1)
   })
 
+  // 4004（对局已结束）走同一条路：凡 4000 以上的关闭码都是服务端在说话，
+  // 不是网络抖。写成只认 4001 的话，收藏了一个旧链接的人会白等 47 秒。
+  it('4000 以上的关闭码一律不再重连', () => {
+    vi.useFakeTimers()
+    const { socket, fatals } = newSocket()
+    socket.connect()
+    FakeWS.instances[0].serverClose(4004)
+    vi.advanceTimersByTime(20000)
+
+    expect(fatals).toEqual([4004])
+    expect(FakeWS.instances).toHaveLength(1)
+  })
+
   // 退避重连走的仍是 1006 那条路，别把业务关闭码的判断写成兜底分支。
   it('普通断线（1006）照旧退避重连，不算致命', () => {
     vi.useFakeTimers()
@@ -374,5 +387,49 @@ describe('GameSocket', () => {
 
     expect(fatals).toEqual([])
     expect(FakeWS.instances).toHaveLength(2)
+  })
+
+  // 「连上就被踢」也要能走到放弃。
+  //
+  // 重试预算如果在 onopen 里立刻清零，这种服务端会让退避永远停在 1 秒一档：
+  // 页面无限重连，用户永远看不到「重新连接」这个台阶。
+  it('每次都是连上就被踢，退避也会走到放弃', () => {
+    vi.useFakeTimers()
+    const { socket, states } = newSocket()
+    socket.connect()
+
+    // 放弃之后不再有新连接，继续 open 只会把旧实例反复打开，
+    // 所以每一步先看状态，已经在给台阶了就别再折腾。
+    for (let i = 0; i < 12; i += 1) {
+      if (states[states.length - 1] === 'gaveup') {
+        break
+      }
+      const ws = FakeWS.instances[FakeWS.instances.length - 1]
+      ws.open()
+      ws.serverClose(1006)
+      vi.advanceTimersByTime(9000)
+    }
+
+    expect(states[states.length - 1]).toBe('gaveup')
+  })
+
+  // 旧连接的关闭回调在新连接建好之后才到，是浏览器里的常态（关连接是异步的）。
+  // 不认身份的话它会把新连接从字段上清掉：之后 send 全部返回 0，
+  // 界面显示「正在重连」而其实连着。
+  it('旧连接的关闭回调不会把新连接清掉', () => {
+    const { socket } = newSocket()
+    socket.connect()
+    const first = FakeWS.instances[0]
+    first.open()
+    const lateClose = first.onclose
+
+    socket.close()
+    socket.connect()
+    FakeWS.instances[1].open()
+
+    // 旧那个回调现在才被调用。
+    lateClose?.({ code: 1006 })
+
+    expect(socket.shoot({ phi: 0, power: 0.5, theta: 0, a: 0, b: 0 })).toBe(1)
   })
 })

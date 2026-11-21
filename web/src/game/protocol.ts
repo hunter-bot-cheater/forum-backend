@@ -93,13 +93,17 @@ export type DownMessage =
 // gaveup 与 closed 分开：closed 还会自动重连，gaveup 不会。
 export type ConnectionState = 'connecting' | 'open' | 'closed' | 'gaveup'
 
-// CLOSE_SPECTATOR_FULL 与服务端 internal/pool/protocol.go 的 CloseSpectatorFull 一致。
+// 服务端在升级之后拒绝时用的关闭码，与 internal/pool/protocol.go 一致。
 //
-// 握手前就被拒的情况（对局不存在、名额已满）在浏览器里读不到 HTTP 状态码，
-// 一律表现为一次连接失败。名额被抢是唯一还需要在握手之后告知前端的一种：
-// 服务端会在关连接时带上这个码。其余情况（对局没了、权限不对）
-// 只能在重连窗口走完之后才判定。
+// 握手前的 4xx 在浏览器里读不到（一律表现为一次连接失败），
+// 所以「对局没了」「观战名额满了」这类业务性拒绝都改成升级后用关闭码说，
+// 客户端读得到就能立刻停，而不是退避重试四十七秒再给一个必然失败的按钮。
 export const CLOSE_SPECTATOR_FULL = 4001
+export const CLOSE_MATCH_GONE = 4004
+
+// 4000 以上归应用自己用（1000-2999 协议保留，3000-3999 留给库）。
+// 换句话说：凡是从这个区间来的关闭码，都不是网络问题，重连没有意义。
+const CLOSE_FATAL_BASE = 4000
 
 export interface GameSocketOptions {
   matchId: number | string
@@ -126,6 +130,13 @@ const MAX_RETRY = 8
 const RETRY_BASE = 1000
 const RETRY_CAP = 8000
 
+// 连接要稳定这么久才算「这次重连真的成功了」，才把重试预算清零。
+//
+// 不在 onopen 里立刻清零：服务端或前置代理接受升级后马上关（1006、1011，
+// 或者库自己的 3xxx 码）时，立刻清零会让退避永远停在 1 秒一档，
+// 页面无限重连、永远走不到 gaveup，用户也就永远等不到「重新连接」。
+const STABLE_MS = 5000
+
 // GameSocket 管理一条对局连接。
 //
 // 用法：new GameSocket(opts) → connect() → 用 shoot / placeCue 发命令 → close()。
@@ -135,6 +146,8 @@ export class GameSocket {
   private socket: WebSocket | null = null
   private retryCount = 0
   private retryTimer: ReturnType<typeof setTimeout> | null = null
+  // stableTimer 是「连接已经稳定」的计时器，见 STABLE_MS。
+  private stableTimer: ReturnType<typeof setTimeout> | null = null
   // manualClose 区分「我们自己关的」与「网络断了」：
   // 主动离开对局后不该再重连，否则会在服务端一直挂着一条幽灵连接。
   private manualClose = false
@@ -159,6 +172,7 @@ export class GameSocket {
   // close 主动断开且不再重连。
   close() {
     this.manualClose = true
+    this.clearStableTimer()
     if (this.retryTimer) {
       clearTimeout(this.retryTimer)
       this.retryTimer = null
@@ -205,6 +219,14 @@ export class GameSocket {
     return this.seq
   }
 
+  // clearStableTimer 清掉「连接已稳定」的计时器。
+  private clearStableTimer() {
+    if (this.stableTimer) {
+      clearTimeout(this.stableTimer)
+      this.stableTimer = null
+    }
+  }
+
   // open 真正发起一次握手。
   private open() {
     const token = this.opts.token()
@@ -228,8 +250,12 @@ export class GameSocket {
     this.opts.onState('connecting')
 
     ws.onopen = () => {
-      this.retryCount = 0
       this.opts.onState('open')
+      this.clearStableTimer()
+      this.stableTimer = setTimeout(() => {
+        this.retryCount = 0
+        this.stableTimer = null
+      }, STABLE_MS)
     }
 
     ws.onmessage = (event) => {
@@ -241,10 +267,17 @@ export class GameSocket {
     }
 
     ws.onclose = (event) => {
+      // 旧连接的回调可能在新连接建好之后才到（浏览器关连接是异步的）。
+      // 不认身份的话它会把新连接从字段上清掉——之后 send 全被丢掉、
+      // 界面显示「重连中」而其实连着，还会多排一次退避。
+      if (this.socket !== ws) {
+        return
+      }
       this.socket = null
+      this.clearStableTimer()
       // 业务关闭码：服务端已经明确说了「这条路走不通」，
       // 再退避重试只是让人对着一个必然失败的页面等四十七秒。
-      if (event.code === CLOSE_SPECTATOR_FULL) {
+      if (event.code >= CLOSE_FATAL_BASE) {
         this.manualClose = true
         this.opts.onFatal?.(event.code)
         // 先要知道「为什么」，页面才谈得上显示什么；同时置成终态，
