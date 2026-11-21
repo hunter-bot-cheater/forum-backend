@@ -201,27 +201,35 @@ function stopLiveTimer() {
   }
 }
 
-// startLive 起表。资料还没回来之前不起：
-// 「哪一局是我在打」要靠 user.userId，而它是异步拉的——
-// 冷启动就轮询的话，自己的局会被当成别人的局摆上「观战」，
-// 点进去等于用第二条连接顶掉自己那条对局连接。
-function startLive() {
+// startLiveTimer 只在表没跑的时候起表，重复调用无害。
+function startLiveTimer() {
   if (liveTimer) {
     return
   }
-  void loadLive()
   liveTimer = setInterval(() => {
     void loadLive()
   }, LIVE_POLL_MS)
 }
 
-// retryLive 手动重试观战列表：重置计数并重新起表。
+// startLive 起表。资料还没回来之前不起：
+// 「哪一局是我在打」要靠 user.userId，而它是异步拉的——
+// 冷启动就轮询的话，自己的局会被当成别人的局摆上「观战」，
+// 点进去等于用第二条连接顶掉自己那条对局连接。
+function startLive() {
+  void loadLive()
+  startLiveTimer()
+}
+
+// retryLive 手动重试观战列表：重置计数、立刻拉一次、必要时重新起表。
 //
+// 立刻拉一次是必须的：只失败过一次时表还活着，光起表等于点了没反应，
+// 用户要等到下一个十秒。
 // 不先清 liveFailed：面板是 v-if="live.length > 0 || liveFailed"，
 // 先清会让空列表时整块消失几百毫秒再回来。等这次请求成功了再清。
 function retryLive() {
   liveMisses = 0
-  startLive()
+  void loadLive()
+  startLiveTimer()
 }
 
 // isMine 判断这一局里有没有自己。List 里的 players 是按座位排的定长数组。
