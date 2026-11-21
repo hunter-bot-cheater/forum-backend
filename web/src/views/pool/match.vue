@@ -197,6 +197,9 @@ let pendingResult: ResultData | null = null
 let dragBase = 0
 
 let socket: GameSocket | null = null
+// switchingToWatch 挡住重复跳转：joined 与紧随其后的 state 都会撞上观战座位，
+// 不加这个标记时 router.replace 会被调用两次。
+let switchingToWatch = false
 // disposed 在卸载时置位，用来挡住在途帧。
 let disposed = false
 // leaveSent 保证「告知服务端退出」只发一次，见 sendLeave。
@@ -295,13 +298,19 @@ const aim = computed<AimLayer | null>(() => {
 // seatOfViewer 把协议里的「看的人坐哪」收窄成座位。
 //
 // 对局页只服务两个座位：观战快照（-1）本该出现在观战页。真收到了说明
-// 走错了入口，返回 null 让调用方跳过这次赋值——把它当成座位 0 的话，
-// 界面会把左边的球当成「我的球」，看着像坐错了位置。
+// 走错了入口（大厅里点开了自己那场之外的观战链接），这时不能拿座位 0
+// 硬画——界面会把左边的球当成「我的球」，看着像坐错了位置。
+// 换成观战页去，那里才是这份快照该去的地方。
 function seatOfViewer(viewer: Viewer): Seat | null {
-  if (viewer === SEAT_SPECTATOR) {
-    return null
+  if (viewer !== SEAT_SPECTATOR) {
+    return viewer
   }
-  return viewer
+  if (!switchingToWatch) {
+    switchingToWatch = true
+    socket?.close()
+    void router.replace('/pool/watch/' + props.id)
+  }
+  return null
 }
 
 // applySnapshot 用服务端快照重建本地场景。
@@ -312,9 +321,10 @@ function applySnapshot(snap: MatchSnapshot, deadline: number) {
   const first = snapshot.value === null
   snapshot.value = snap
   const seat = seatOfViewer(snap.seat)
-  if (seat !== null) {
-    mySeat.value = seat
+  if (seat === null) {
+    return
   }
+  mySeat.value = seat
   turn.value = snap.turn
   deadlineAt.value = deadline
   // 快照回来了说明落位请求已经有结论（成功会带新球位，失败会有错误帧），

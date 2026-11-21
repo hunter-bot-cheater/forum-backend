@@ -22,14 +22,22 @@
     </section>
 
     <!-- 正在进行的对局。没有人在打时整块不出现：
-         一块永远空着的「现在没有对局」比不显示更占地方。 -->
-    <section v-if="live.length > 0" class="pl__panel">
+         一块永远空着的「现在没有对局」比不显示更占地方。
+         但刷新失败时仍然要出现，否则用户没有任何地方能重试。 -->
+    <section v-if="live.length > 0 || liveFailed" class="pl__panel">
       <div class="pl__panel-head">
         <h2 class="pl__panel-title">正在进行的对局</h2>
-        <span class="pl__panel-count">{{ live.length }} 场</span>
+        <button v-if="liveFailed" class="pl__retry" type="button" @click="retryLive">
+          刷新失败，重试
+        </button>
+        <span v-else class="pl__panel-count">{{ live.length }} 场</span>
       </div>
 
-      <ul class="pl__list">
+      <p v-if="live.length === 0" class="pl__empty">
+        对局列表没加载出来。刷新一下试试。
+      </p>
+
+      <ul v-else class="pl__list">
         <li v-for="item in live" :key="item.match_id" class="pl__row">
           <div class="pl__who">
             <span class="pl__name">{{ nameOfPlayer(item, 0) }} vs {{ nameOfPlayer(item, 1) }}</span>
@@ -37,10 +45,18 @@
               第 {{ item.shot_seq }} 杆 · {{ item.spectators }}/{{ item.spectators_max }} 人在看
             </span>
           </div>
-          <!-- 名额满了就摆一个不可点的「已满」，而不是让链接把人送进
-               一个必然被 409 拒掉的观战页。 -->
+          <!-- 自己正在打的那一局不能给「观战」：观战连接会以玩家身份
+               被服务端安排到座位上，等于把自己的对局连接顶掉。
+               换成「回到对局」，点击行为与用户的意图也一致。 -->
           <router-link
-            v-if="item.spectators < item.spectators_max"
+            v-if="isMine(item)"
+            class="pl__watch"
+            :to="'/pool/match/' + String(item.match_id)"
+          >
+            回到对局
+          </router-link>
+          <router-link
+            v-else-if="item.spectators < item.spectators_max"
             class="pl__watch"
             :to="'/pool/watch/' + String(item.match_id)"
           >
@@ -135,28 +151,72 @@ const live = ref<LiveMatch[]>([])
 // liveTimer 每 10 秒刷新一次：对局几秒就换一杆，但观战列表只是
 // 「现在有谁在打」，晚十秒知道不影响任何事，反而省下大量请求。
 let liveTimer: ReturnType<typeof setInterval> | null = null
+// liveFailed 表示上一次刷新失败。连续失败到一定次数就停表：
+// 断网时每 10 秒弹一条「请求失败」的提示，比停止刷新更烦人。
+const liveFailed = ref(false)
+let liveMisses = 0
 
 // LIVE_POLL_MS 取得比一杆（约 20 秒）小一档：
 // 一局打完就立刻从列表里消失，不至于点进去发现「对局已结束」。
 const LIVE_POLL_MS = 10 * 1000
+// LIVE_MAX_MISSES 是连续失败几次就停表。两次是「网络抖一下」与「真的不通」的分界。
+const LIVE_MAX_MISSES = 2
 
-// loadLive 拉一次观战列表。失败就保持上一次的内容：
-// 这是一块附加区域，为它显示一条错误提示比不显示更打扰。
+// loadLive 拉一次观战列表。
 async function loadLive() {
   try {
     live.value = await getLiveMatches()
+    liveFailed.value = false
+    liveMisses = 0
   } catch {
-    // 拦截器已提示；保留上一份列表。
+    // 拦截器已经弹过提示。保留上一份列表（总比整块消失好），
+    // 但连续失手两次就停下来，等用户自己点重试。
+    liveMisses += 1
+    liveFailed.value = true
+    if (liveMisses >= LIVE_MAX_MISSES) {
+      stopLiveTimer()
+    }
   }
 }
 
+function stopLiveTimer() {
+  if (liveTimer) {
+    clearInterval(liveTimer)
+    liveTimer = null
+  }
+}
+
+// retryLive 手动重试观战列表：重置计数并重新起表。
+function retryLive() {
+  liveMisses = 0
+  liveFailed.value = false
+  void loadLive()
+  if (!liveTimer) {
+    liveTimer = setInterval(() => {
+      void loadLive()
+    }, LIVE_POLL_MS)
+  }
+}
+
+// isMine 判断这一局里有没有自己。List 里的 players 是按座位排的定长数组。
+function isMine(item: LiveMatch): boolean {
+  const me = user.userId
+  if (me === 0) {
+    return false
+  }
+  return item.players[0].user_id === me || item.players[1].user_id === me
+}
+
 // nameOfPlayer 取某一侧昵称，没有资料时说「玩家 1 / 玩家 2」。
+//
+// players 是定长两项，但没进房的那一侧 user_id 为 0、昵称为空串，
+// 而正在打的对局两边都该有资料——这里是兜住后端数据异常，不是兜住 undefined。
 function nameOfPlayer(item: LiveMatch, seat: 0 | 1): string {
-  const player = item.players[seat]
-  if (!player || !player.nickname) {
+  const name = item.players[seat].nickname
+  if (!name) {
     return '玩家 ' + String(seat + 1)
   }
-  return player.nickname
+  return name
 }
 
 const outgoing = computed(() => pool.outgoing)
@@ -327,10 +387,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopWaitTimer()
-  if (liveTimer) {
-    clearInterval(liveTimer)
-    liveTimer = null
-  }
+  stopLiveTimer()
 })
 </script>
 

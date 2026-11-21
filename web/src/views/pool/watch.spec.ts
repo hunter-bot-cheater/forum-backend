@@ -4,41 +4,79 @@ import type { DownMessage, GameSocketOptions } from '@/game/protocol'
 import type { MatchSnapshot } from '@/game/types'
 import { SEAT_SPECTATOR } from '@/game/types'
 
-// 观战页的用例集中在三件事上：
+// 观战页的用例集中在五件事上：
 //   1. 快照到达后双方都在、且界面上没有一处「我」；
-//   2. 结算与断线的提示文案；
-//   3. 观战连接只连不收命令（页面没有任何操作入口）。
+//   2. 结算与断线的提示文案，以及「重试也没用」时不给重试按钮；
+//   3. 观战页一个上行命令都不发（它是只读页面）；
+//   4. 动画没播完时到达的快照与结算要排在后面，不能抢跑；
+//   5. 自己就是当事人时让位回对局页。
 //
 // GameSocket 换成假的：真实实现要连 WebSocket，jsdom 里连不上。
-// 假 socket 把 onMessage / onState 留在外面，用例自己往里灌帧。
+// animator 的 playShot 也是假的，让用例自己决定什么时候「播完」。
 
 const mocks = vi.hoisted(() => ({
   options: [] as unknown[],
   connects: 0,
   closes: 0,
+  uplinks: [] as string[],
+  replace: vi.fn(),
+  playCalls: [] as Array<{ options: { onSample: (s: never[]) => void; onDone?: () => void } }>,
 }))
 
-vi.mock('@/game/protocol', () => ({
-  GameSocket: class {
-    constructor(options: unknown) {
-      mocks.options.push(options)
-    }
+vi.mock('@/game/protocol', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/game/protocol')>()
+  return {
+    ...actual,
+    GameSocket: class {
+      constructor(options: unknown) {
+        mocks.options.push(options)
+      }
 
-    connect() {
-      mocks.connects += 1
-    }
+      connect() {
+        mocks.connects += 1
+      }
 
-    close() {
-      mocks.closes += 1
-    }
-  },
-}))
+      close() {
+        mocks.closes += 1
+      }
+
+      // 下面三个是被测页面绝不该调用的：调了就说明观战页在写服务端。
+      shoot() {
+        mocks.uplinks.push('shoot')
+        return 1
+      }
+
+      placeCue() {
+        mocks.uplinks.push('place_cue')
+        return 1
+      }
+
+      leave() {
+        mocks.uplinks.push('leave')
+        return 1
+      }
+    },
+  }
+})
+
+vi.mock('@/game/animator', async (importOriginal) => {
+  // 只换 playShot：它靠 requestAnimationFrame 与真实时间，
+  // 而这几条用例要的是「动画播到一半」这个确定的状态。
+  const actual = await importOriginal<typeof import('@/game/animator')>()
+  return {
+    ...actual,
+    playShot: (_shot: unknown, options: never) => {
+      mocks.playCalls.push({ options })
+      return { stop: () => {} }
+    },
+  }
+})
 
 vi.mock('vue-router', async (importOriginal) => {
   const actual = await importOriginal<typeof import('vue-router')>()
   return {
     ...actual,
-    useRouter: () => ({ replace: vi.fn(), push: vi.fn(), back: vi.fn() }),
+    useRouter: () => ({ replace: mocks.replace, push: vi.fn(), back: vi.fn() }),
   }
 })
 
@@ -64,7 +102,7 @@ function snapshot(patch: Partial<MatchSnapshot> = {}): MatchSnapshot {
       { id: '1', x: 0.6, y: 1.0, z: 0, on_table: true },
       { id: '9', x: 0.7, y: 1.1, z: 0, on_table: true },
     ],
-    group: ['solids', 'stripes'],
+    group: ['solids', 'stripes'] as [string, string],
     ready: [true, true],
     ball_in_hand: false,
     shot_seq: 3,
@@ -85,13 +123,17 @@ async function mountPage() {
   const options = mocks.options[mocks.options.length - 1] as GameSocketOptions
   const push = (msg: DownMessage) => options.onMessage(msg)
   const setState = (state: 'connecting' | 'open' | 'closed' | 'gaveup') => options.onState(state)
-  return { wrapper, push, setState }
+  const fatal = (code: number) => options.onFatal?.(code)
+  return { wrapper, push, setState, fatal }
 }
 
 beforeEach(() => {
   mocks.options.length = 0
   mocks.connects = 0
   mocks.closes = 0
+  mocks.uplinks.length = 0
+  mocks.playCalls.length = 0
+  mocks.replace.mockReset()
 })
 
 describe('观战页', () => {
@@ -111,14 +153,29 @@ describe('观战页', () => {
     expect(wrapper.find('.wt__turn').text()).toContain('轮到 阿泽')
   })
 
-  it('观战者进房用的是同一条对局连接，且只连一次', async () => {
+  // 观战是只读的：一条上行命令都不该发出去。
+  // 这条用例挡的是「以后有人在观战页加个按钮顺手接上 shoot」。
+  it('全程不发任何上行命令', async () => {
+    const { wrapper, push } = await mountPage()
+    push({ type: 'state', ts: 0, data: snapshot() })
+    push({ type: 'shot', ts: 0, data: shotFrame() })
+    push({ type: 'result', ts: 0, data: { winner: 0, reason: 'eight_legal', elo_delta_0: 0, elo_delta_1: 0 } })
+    await flushPromises()
+
+    expect(mocks.uplinks).toEqual([])
+    // 卸载时只关连接，也不发 leave：服务端把断线当成观众离场。
+    wrapper.unmount()
+    expect(mocks.uplinks).toEqual([])
+  })
+
+  it('观战者进房用的是同一条对局连接，只连一次，卸载时关掉', async () => {
     const { wrapper } = await mountPage()
 
     expect(mocks.connects).toBe(1)
     expect(wrapper.find('.wt__badge').text()).toBe('观战')
 
     wrapper.unmount()
-    // 卸载必须关连接，否则服务端会一直挂着一位已经离开的观众。
+    // 不关的话服务端会一直挂着一位已经离开的观众。
     expect(mocks.closes).toBe(1)
   })
 
@@ -133,6 +190,47 @@ describe('观战页', () => {
     expect(end.text()).not.toContain('你')
   })
 
+  // 结算帧紧跟在最后一杆后面。排在动画前面的话，
+  // 会先盖一条「谁赢下这一局」再继续放最后一杆的球，看着像结算抢跑。
+  it('动画没播完时结算排在后面', async () => {
+    const { wrapper, push } = await mountPage()
+    push({ type: 'state', ts: 0, data: snapshot() })
+    await flushPromises()
+
+    push({ type: 'shot', ts: 0, data: shotFrame() })
+    push({ type: 'result', ts: 0, data: { winner: 1, reason: 'leave', elo_delta_0: 0, elo_delta_1: 0 } })
+    await flushPromises()
+
+    expect(wrapper.find('.wt__end').exists()).toBe(false)
+
+    expect(mocks.playCalls).toHaveLength(1)
+    mocks.playCalls[0].options.onDone?.()
+    await flushPromises()
+
+    expect(wrapper.find('.wt__end').text()).toBe('小满 赢下这一局')
+  })
+
+  // 换人快照紧跟在 shot 帧后面。动画没播完就套新快照的话，
+  // 球会先跳到这一杆的终局位置，再被动画拽回开头重放一遍。
+  it('动画没播完时换人快照排在后面', async () => {
+    const { wrapper, push } = await mountPage()
+    push({ type: 'state', ts: 0, data: snapshot() })
+    await flushPromises()
+
+    push({ type: 'shot', ts: 0, data: shotFrame() })
+    push({ type: 'state', ts: 0, data: snapshot({ turn: 1 }) })
+    await flushPromises()
+
+    // 动画还在播：轮次不该变。
+    expect(wrapper.find('.wt__turn').text()).toContain('轮到 阿泽')
+
+    expect(mocks.playCalls).toHaveLength(1)
+    mocks.playCalls[0].options.onDone?.()
+    await flushPromises()
+
+    expect(wrapper.find('.wt__turn').text()).toContain('轮到 小满')
+  })
+
   it('重连窗口走完时给一个重新连接，点了会再连一次', async () => {
     const { wrapper, setState } = await mountPage()
     setState('gaveup')
@@ -143,10 +241,73 @@ describe('观战页', () => {
     expect(mocks.connects).toBe(2)
   })
 
+  // 名额在握手与进房之间被抢走时，服务端关连接会带 4001。
+  // 这种情况下重试必然还是同一个结果，只能给个台阶回大厅。
+  it('名额被抢走时说明原因，只给回大厅', async () => {
+    const { wrapper, fatal, setState } = await mountPage()
+    fatal(4001)
+    setState('gaveup')
+    await flushPromises()
+
+    expect(wrapper.find('.wt__hint').text()).toContain('观战人数已满')
+    const button = wrapper.find('.wt__retry')
+    expect(button.text()).toBe('回大厅')
+  })
+
   it('还没拿到快照时提示正在进入，不提前画空球台', async () => {
     const { wrapper } = await mountPage()
 
     expect(wrapper.find('.wt__hint').text()).toContain('正在进入对局')
     expect(wrapper.find('.wt__turn').text()).toBe('正在进入对局…')
   })
+
+  // 手里有旧快照时掉线，画面会停在最后一帧：
+  // 不提示的话看起来就像两个人一起不动了。
+  it('已经看到球台之后掉线，仍然要提示正在重连', async () => {
+    const { wrapper, push, setState } = await mountPage()
+    push({ type: 'state', ts: 0, data: snapshot() })
+    await flushPromises()
+    expect(wrapper.find('.wt__hint').exists()).toBe(false)
+
+    setState('closed')
+    await flushPromises()
+
+    expect(wrapper.find('.wt__hint').text()).toContain('正在重连')
+  })
+
+  // 大厅里点开了自己那一局：服务端把自己安排到座位上。
+  // 留在观战页等于用第二条连接顶掉自己那条对局连接。
+  it('自己就是当事人时让位回对局页', async () => {
+    const { push } = await mountPage()
+    push({
+      type: 'joined',
+      ts: 0,
+      data: { match_id: 7, room_code: '123456', seat: 0, practice: false },
+    })
+    await flushPromises()
+
+    expect(mocks.replace).toHaveBeenCalledWith('/pool/match/7')
+  })
 })
+
+// shotFrame 造一杆最小可播的轨迹：一帧、两颗球。
+function shotFrame() {
+  return {
+    seq: 4,
+    seat: 0 as const,
+    params: { phi: 1.5, power: 0.6, theta: 0, a: 0, b: 0 },
+    duration: 1,
+    events: [],
+    frames: [
+      {
+        t: 0,
+        balls: [
+          ['cue', 0.5, 0.5, 0],
+          ['1', 0.6, 1.0, 0],
+        ] as Array<[string, number, number, number]>,
+      },
+    ],
+    final: [],
+    sim_ms: 10,
+  }
+}

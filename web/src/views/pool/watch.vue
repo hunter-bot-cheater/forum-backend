@@ -38,8 +38,11 @@
 
     <footer class="wt__foot">
       <span class="wt__turn">{{ turnText }}</span>
+      <!-- 连不上就一直退避重连没有意义：对局没了或名额被抢走，
+           重试一万次也是同一个结果，给个台阶回大厅。 -->
+      <button v-if="fatalText" class="wt__retry" type="button" @click="back">回大厅</button>
       <button
-        v-if="connState === 'gaveup'"
+        v-else-if="connState === 'gaveup'"
         class="wt__retry"
         type="button"
         @click="retryConnect"
@@ -66,8 +69,16 @@ import { ArrowLeft } from '@element-plus/icons-vue'
 import PoolTable from '@/components/pool/PoolTable.vue'
 import SeatCard from '@/components/pool/SeatCard.vue'
 import { applySample, playShot, type PlayHandle } from '@/game/animator'
-import { GameSocket, type ConnectionState, type DownMessage, type ShotData } from '@/game/protocol'
+import {
+  CLOSE_SPECTATOR_FULL,
+  GameSocket,
+  type ConnectionState,
+  type DownMessage,
+  type ResultData,
+  type ShotData,
+} from '@/game/protocol'
 import { remainingOf } from '@/game/score'
+import { SEAT_SPECTATOR } from '@/game/types'
 import type { BallState, MatchSnapshot, Seat } from '@/game/types'
 import { getToken } from '@/utils/auth'
 import { goBack } from '@/utils/nav'
@@ -85,6 +96,9 @@ const turn = ref<Seat>(0)
 const connState = ref<ConnectionState>('connecting')
 // finishedText 有值表示对局结束了，画面上盖一条结果。
 const finishedText = ref('')
+// fatalText 是「再看也看不到」的说明（名额被抢、这一局没有了）。
+// 有值时不再给重试按钮：重试必然还是同一个结果。
+const fatalText = ref('')
 // notice 是犯规之类的短提示，3 秒后自己消失。
 const notice = ref('')
 
@@ -100,6 +114,9 @@ let noticeTimer: ReturnType<typeof setTimeout> | null = null
 // 一杆的 shot 帧与随后的 state 帧是连着来的，动画没播完就套用新快照，
 // 球会先跳到终局位置再倒回动画开头。
 let pendingState: { snap: MatchSnapshot; deadlineAt: number } | null = null
+// pendingResult 同理：结算帧紧跟在最后一杆之后，
+// 排在动画前面就会先盖一条结果再继续放球，看起来像结算抢跑。
+let pendingResult: ResultData | null = null
 let disposed = false
 
 const seats = computed(() => {
@@ -146,16 +163,21 @@ const turnText = computed(() => {
 
 // hintText 是盖在球台上的说明条，只在这几种「画面还不对」的时候出现。
 const hintText = computed(() => {
+  if (fatalText.value) {
+    return fatalText.value
+  }
   if (connState.value === 'gaveup') {
     return '与对局的连接已断开'
+  }
+  // 掉线时即使手里有旧快照也要说一声：画面会停在最后一次收到的位置，
+  // 不说的话看起来就像两个人一起不动了。
+  if (connState.value === 'closed') {
+    return '连接断开，正在重连…'
   }
   if (snapshot.value) {
     return ''
   }
-  if (connState.value === 'connecting') {
-    return '正在进入对局…'
-  }
-  return '连接断开，正在重连…'
+  return '正在进入对局…'
 })
 
 // applySnapshot 用快照重建场面。
@@ -198,6 +220,11 @@ function playShotFrame(data: ShotData) {
         if (disposed) {
           return
         }
+        const queuedResult = pendingResult
+        pendingResult = null
+        if (queuedResult) {
+          finishWith(queuedResult)
+        }
         const queued = pendingState
         pendingState = null
         if (queued) {
@@ -225,6 +252,16 @@ function onMessage(msg: DownMessage) {
   if (disposed) {
     return
   }
+  if (msg.type === 'joined') {
+    // 服务端按「是不是局中人」决定座位。观战页却收到了一个真座位，
+    // 说明自己就是这一局的当事人（大厅里点开了自己那场）。
+    // 这时必须让位：继续留在这里等于用第二条连接顶掉自己那条对局连接。
+    if (msg.data.seat !== SEAT_SPECTATOR) {
+      fatalText.value = '这一局你是当事人，正在回到对局页…'
+      void router.replace('/pool/match/' + props.id)
+    }
+    return
+  }
   if (msg.type === 'state') {
     const entry = {
       snap: msg.data,
@@ -246,13 +283,24 @@ function onMessage(msg: DownMessage) {
     return
   }
   if (msg.type === 'result') {
-    const snap = snapshot.value
-    if (snap) {
-      showFinished(msg.data.winner, snap.players)
+    if (animating) {
+      pendingResult = msg.data
+      return
     }
+    finishWith(msg.data)
+    return
   }
-  // joined / turn / error 在观战这边都不需要额外动作：
-  // 座位是 -1，joined 没有可用的东西；换人已经包含在随后的快照里。
+  // turn / error 在观战这边不需要额外动作：
+  // 换人已经包含在随后的快照里，而观战者本来就不发命令，收不到业务错误。
+}
+
+// finishWith 记下结算结果，名字从快照里取。
+function finishWith(data: ResultData) {
+  const snap = snapshot.value
+  if (!snap) {
+    return
+  }
+  showFinished(data.winner, snap.players)
 }
 
 // connect 建一条观战连接。断开由 GameSocket 自己退避重连。
@@ -263,7 +311,14 @@ function connect() {
     onMessage,
     onState: (state) => {
       connState.value = state
-      // 重连成功后服务端会补一份完整快照，这里不做任何本地修补。
+    },
+    onFatal: (code) => {
+      // 只有「名额被抢」会在握手之后被告知，其余（对局没了、不是你的局）
+      // 服务端在 Upgrade 之前就拒了，浏览器这里只看到一次普通失败，
+      // 于是会走完重连窗口再给一个「重新连接」——那也不算错，只是慢。
+      if (code === CLOSE_SPECTATOR_FULL) {
+        fatalText.value = '这场对局的观战人数已满，换一场看吧。'
+      }
     },
   })
   socket.connect()
