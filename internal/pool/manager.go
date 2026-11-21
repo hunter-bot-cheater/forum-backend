@@ -79,6 +79,22 @@ func (m *Manager) Count() int {
 	return len(m.matches)
 }
 
+// List 返回当前内存里的全部对局，供观战列表枚举。
+//
+// 返回 *Match 而不是快照：调用方要自己决定用哪个视角取状态。
+// 拿到的指针只用来发命令（Snapshot / SpectatorCount），不直接读字段，
+// 状态仍然只在 actor 协程里。
+func (m *Manager) List() []*Match {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	matches := make([]*Match, 0, len(m.matches))
+	for _, match := range m.matches {
+		matches = append(matches, match)
+	}
+	return matches
+}
+
 // CloseAll 停掉全部对局，供进程退出时调用。
 func (m *Manager) CloseAll() {
 	m.mu.Lock()

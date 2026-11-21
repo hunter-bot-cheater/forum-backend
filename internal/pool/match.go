@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"forum-backend/internal/model"
@@ -20,8 +21,16 @@ var (
 	ErrSeatTaken     = errors.New("seat already taken by another connection")
 	ErrNotBallInHand = errors.New("ball in hand is not available")
 	ErrMustPlaceCue  = errors.New("cue ball must be placed first")
+	ErrSpectatorFull = errors.New("too many spectators")
 	ErrMatchClosed   = errors.New("match is closed")
 )
+
+// maxSpectators 是一局最多同时挂着的观战连接数。
+//
+// 限的是连接不是人：同一个人开两个标签页就是两条。
+// 上限的意义是别让一场热门对局把整个进程的连接与发件箱预算吃光——
+// 每条观战连接都要收完整的 shot 帧（一杆约 60KB），十条就是 600KB 一次广播。
+const maxSpectators = 10
 
 // Conn 是对局连接的最小接口。
 //
@@ -104,6 +113,7 @@ const (
 	cmdReady
 	cmdLeave
 	cmdDisconnect
+	cmdWatch
 	cmdClose
 )
 
@@ -132,8 +142,14 @@ type Match struct {
 	closeOnce sync.Once
 
 	// 只由 run() 访问，外面读状态一律走 Snapshot（命令往返）。
-	state MatchState
-	conns [2]Conn
+	state      MatchState
+	conns      [2]Conn
+	spectators []Conn
+
+	// spectatorCount 是 spectators 的原子镜像，只给「观战是不是满了」这个判断用。
+	// 走命令往返当然也行，但握手前的预检每来一个人就要排一次队，
+	// 而这个数只用于「明显满了就早点拒掉」，读到略旧的值无害。
+	spectatorCount int32
 
 	// 结束时间给 Manager 的清扫用。单独加锁而不是走命令往返：
 	// 后台清扫每秒扫一遍全部对局，为一局多排一次命令没有意义。
@@ -168,6 +184,18 @@ func NewMatch(state MatchState, opts Options) *Match {
 // Join 把一条连接绑到座位上。同一座位重连会顶掉旧连接。
 func (m *Match) Join(seat Seat, conn Conn) error {
 	return m.call(command{kind: cmdJoin, seat: seat, conn: conn})
+}
+
+// Watch 把一条连接挂成观战者：能收全部广播，不能上行任何操作。
+//
+// 观战不占座位、不参与读秒，也不影响对局是否可以开始。
+func (m *Match) Watch(conn Conn) error {
+	return m.call(command{kind: cmdWatch, conn: conn})
+}
+
+// SpectatorCount 返回当前观战连接数。握手前的容量预检用它。
+func (m *Match) SpectatorCount() int {
+	return int(atomic.LoadInt32(&m.spectatorCount))
 }
 
 // Shoot 出一杆。会一直阻塞到这一杆算完（开球约 1.5 秒）。
@@ -305,6 +333,8 @@ func (m *Match) handle(cmd command) {
 	switch cmd.kind {
 	case cmdJoin:
 		cmd.reply <- m.handleJoin(cmd)
+	case cmdWatch:
+		cmd.reply <- m.handleWatch(cmd)
 	case cmdShoot:
 		cmd.reply <- m.handleShoot(cmd)
 	case cmdPlaceCue:
@@ -346,6 +376,40 @@ func (m *Match) handleJoin(cmd command) error {
 		peer.Send(m.wrap(MsgPeer, PeerData{Event: PeerJoined, Seat: cmd.seat}))
 	}
 	return nil
+}
+
+// handleWatch 接纳一名观战者：先回 joined（座位是 SeatSpectator）再发快照。
+//
+// 快照的视角同样用 SeatSpectator：观战者若拿到某一方的视角，
+// 界面上会把那一方的球当成「我的球」，看起来像坐错了座位。
+func (m *Match) handleWatch(cmd command) error {
+	if len(m.spectators) >= maxSpectators {
+		return ErrSpectatorFull
+	}
+	m.spectators = append(m.spectators, cmd.conn)
+	atomic.StoreInt32(&m.spectatorCount, int32(len(m.spectators)))
+
+	cmd.conn.Send(m.wrap(MsgJoined, JoinedData{
+		MatchID:  m.state.MatchID,
+		RoomCode: m.state.RoomCode,
+		Seat:     SeatSpectator,
+	}))
+	cmd.conn.Send(m.wrap(MsgState, m.state.snapshot(SeatSpectator, time.Now())))
+	return nil
+}
+
+// removeSpectator 按连接身份摘掉一个观战者。
+//
+// 不按下标删：同一个人重连时旧连接的回调可能晚到，
+// 那时它在切片里的位置已经被别人占了，按下标删会误伤后来者。
+func (m *Match) removeSpectator(conn Conn) {
+	for index, item := range m.spectators {
+		if item == conn {
+			m.spectators = append(m.spectators[:index], m.spectators[index+1:]...)
+			break
+		}
+	}
+	atomic.StoreInt32(&m.spectatorCount, int32(len(m.spectators)))
 }
 
 // handleShoot 算一杆并应用规则结论。这是整个 actor 里唯一会阻塞的地方。
@@ -555,6 +619,13 @@ func (m *Match) handleReady(cmd command) error {
 
 // handleDisconnect 处理掉线：摘掉连接并通知对手。
 func (m *Match) handleDisconnect(cmd command) error {
+	// 观战者走了跟对局无关：既不判负，也不用通知玩家。
+	// 观战名单里全是连接，靠 cmd.seat 分不出来是哪一位，只能按连接身份摘。
+	if cmd.seat == SeatSpectator {
+		m.removeSpectator(cmd.conn)
+		return nil
+	}
+
 	// 只摘掉还登记着的这条：玩家可能已经用新连接重连上来，
 	// 旧连接的退出回调晚到一步，不能把新连接一起清掉。
 	if m.conns[cmd.seat] == cmd.conn {
@@ -636,6 +707,11 @@ func (m *Match) shutdown() {
 			m.conns[index] = nil
 		}
 	}
+	for _, conn := range m.spectators {
+		conn.Close()
+	}
+	m.spectators = nil
+	atomic.StoreInt32(&m.spectatorCount, 0)
 }
 
 // remainingMS 返回这一杆还剩多少毫秒。
@@ -655,16 +731,19 @@ func (m *Match) wrap(kind string, data any) Message {
 	return Message{Type: kind, TS: time.Now().UnixMilli(), Data: data}
 }
 
-// broadcast 发给所有已连接的座位。
+// broadcast 发给所有已连接的座位与观战者。
 func (m *Match) broadcast(msg Message) {
 	for _, conn := range m.conns {
 		if conn != nil {
 			conn.Send(msg)
 		}
 	}
+	for _, conn := range m.spectators {
+		conn.Send(msg)
+	}
 }
 
-// broadcastState 给每个座位发它自己视角的快照。
+// broadcastState 给每个座位发它自己视角的快照，观战者发中立视角。
 //
 // 快照里带 seat（看的人坐哪），所以不能算一份发给两个人：
 // 那样其中一方会把自己认成对手，界面直接左右翻转。
@@ -673,6 +752,14 @@ func (m *Match) broadcastState() {
 		if conn := m.conns[seat]; conn != nil {
 			conn.Send(m.wrap(MsgState, m.state.snapshot(seat, time.Now())))
 		}
+	}
+	if len(m.spectators) == 0 {
+		return
+	}
+	// 观战者共用一份中立快照：它们的视角完全一样，不必每人都算一遍。
+	spectatorView := m.wrap(MsgState, m.state.snapshot(SeatSpectator, time.Now()))
+	for _, conn := range m.spectators {
+		conn.Send(spectatorView)
 	}
 }
 

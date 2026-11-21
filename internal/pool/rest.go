@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -547,6 +548,50 @@ func (h *Handler) Replay(c *gin.Context) {
 		})
 	}
 	response.OK(c, resp)
+}
+
+// Live godoc
+// @Summary      正在进行的对局
+// @Description  观战入口用。只列内存里正在打的对局，房间与已结束的不出现。
+// @Tags         pool
+// @Produce      json
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=[]pool.liveMatchResp}
+// @Failure      401  {string}  string  "未登录"
+// @Security     Bearer
+// @Router       /pool/live [get]
+// Live 处理 GET /api/pool/live。
+func (h *Handler) Live(c *gin.Context) {
+	matches := h.manager.List()
+	list := make([]liveMatchResp, 0, len(matches))
+
+	for _, match := range matches {
+		// 用观战视角取快照：它与玩家视角只差一个 seat，其余字段一样。
+		snapshot, err := match.Snapshot(SeatSpectator)
+		if err != nil {
+			// 这一局刚好被回收：跳过，不能让一条对不上号的记录拖垮整页。
+			continue
+		}
+		if snapshot.Status != model.PoolStatusPlaying {
+			continue
+		}
+
+		item := liveMatchResp{
+			MatchID:       snapshot.MatchID,
+			Status:        snapshot.Status,
+			Turn:          snapshot.Turn,
+			ShotSeq:       snapshot.ShotSeq,
+			Spectators:    match.SpectatorCount(),
+			SpectatorsMax: maxSpectators,
+		}
+		for seat := Seat0; seat <= Seat1; seat++ {
+			item.Players[seat] = toPlayerResp(snapshot.Players[seat])
+		}
+		list = append(list, item)
+	}
+
+	// 新开的局排前面：观战的人多半想看刚开始的，中途进去看不懂局面。
+	sort.Slice(list, func(i, j int) bool { return list[i].MatchID > list[j].MatchID })
+	response.OK(c, list)
 }
 
 // pageParams 读分页参数，非法值一律退回默认，不报错。

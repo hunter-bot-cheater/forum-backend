@@ -70,10 +70,16 @@ func (h *WSHandler) Serve(c *gin.Context) {
 		return
 	}
 
-	seat, ok := seatOf(match, userID)
-	if !ok {
-		response.Error(c, http.StatusForbidden, "你不在这一局里")
-		return
+	seat, isPlayer := seatOf(match, userID)
+	if !isPlayer {
+		// 观战名额满了要在握手前就拒：WebSocket 里拿不到 HTTP 状态码，
+		// 升级之后再发一条 error 帧再关闭，浏览器只会看到一次莫名其妙的断连。
+		// 这里读到的是略旧的计数，真正的上限由 handleWatch 在 actor 里再判一次。
+		if match.SpectatorCount() >= maxSpectators {
+			response.Error(c, http.StatusConflict, "这场对局观战人数已满，稍后再来")
+			return
+		}
+		seat = SeatSpectator
 	}
 
 	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -86,7 +92,14 @@ func (h *WSHandler) Serve(c *gin.Context) {
 	wsConn := newWSConn(conn)
 	go wsConn.writeLoop()
 
-	if err := match.Join(seat, wsConn); err != nil {
+	if isPlayer {
+		if err := match.Join(seat, wsConn); err != nil {
+			wsConn.Close()
+			return
+		}
+	} else if err := match.Watch(wsConn); err != nil {
+		// 预检通过、actor 里却又满了：并发抢位的结果，直接关掉。
+		// 前端会看到一次「连接断开」，重连一次通常就有位置了。
 		wsConn.Close()
 		return
 	}
@@ -94,8 +107,9 @@ func (h *WSHandler) Serve(c *gin.Context) {
 	// 读循环占住当前协程，直到连接断开。
 	wsConn.readLoop(func(msg ClientMessage) { h.dispatch(match, seat, wsConn, msg) })
 
-	// 走到这里说明连接断了。不调 Leave：网络抖动不该直接判负，
+	// 走到这里说明连接断了。玩家不调 Leave：网络抖动不该直接判负，
 	// 对局继续按读秒走，重连上来会拿到一份完整快照。
+	// 观战者只是从观战名单里摘掉（handleDisconnect 里按座位区分）。
 	_ = match.NotifyDisconnect(seat, wsConn)
 }
 
@@ -104,6 +118,13 @@ func (h *WSHandler) Serve(c *gin.Context) {
 // 所有校验都在 actor 里做（轮次、参数区间、是否手中球），这里只解包：
 // 两边都判一遍的话，规则一变就要改两处。
 func (h *WSHandler) dispatch(match *Match, seat Seat, conn *wsConn, msg ClientMessage) {
+	// 观战者只能看。所有上行命令一律回同一句，
+	// 而不是放它进规则层被拒成「还没轮到你出杆」——观战者本来就没有回合。
+	if seat == SeatSpectator {
+		conn.Send(errorMessage(msg.Seq, ErrCodeNotYourTurn, "观战中不能操作"))
+		return
+	}
+
 	switch msg.Type {
 	case CmdShoot:
 		var payload struct {

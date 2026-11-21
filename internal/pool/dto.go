@@ -113,6 +113,21 @@ type replayResp struct {
 	Shots   []replayShotResp `json:"shots"`
 }
 
+// liveMatchResp 是观战列表里的一条。
+//
+// 只带「要不要点进去看」需要的信息：谁在打、打到第几杆、还有没有位置。
+// 不带球位——那是点进去之后由 WebSocket 快照给的，
+// 列表每次刷新都拖着 16 颗球的坐标没有意义，还会让人误以为列表是实时的。
+type liveMatchResp struct {
+	MatchID       uint          `json:"match_id"`
+	Status        string        `json:"status"`
+	Turn          Seat          `json:"turn"`
+	Players       [2]playerResp `json:"players"`
+	ShotSeq       int           `json:"shot_seq"`
+	Spectators    int           `json:"spectators"`
+	SpectatorsMax int           `json:"spectators_max"`
+}
+
 // toRoomResp 把对局状态裁成房间页需要的形状。
 func toRoomResp(snapshot Snapshot) roomResp {
 	resp := roomResp{

@@ -17,6 +17,9 @@ type Seat int
 const (
 	Seat0 Seat = 0
 	Seat1 Seat = 1
+	// SeatSpectator 是不占座位的观战者。快照里的 seat 为它时，
+	// 客户端应当只渲染不出杆：观战者没有回合，也不参与结算。
+	SeatSpectator Seat = -1
 )
 
 // Other 返回对面的座位。

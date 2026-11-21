@@ -63,6 +63,17 @@ func readMessage(t *testing.T, conn *websocket.Conn) Message {
 	return msg
 }
 
+// mustMatch 从 Manager 里取一局，取不到直接让用例失败。
+func mustMatch(t *testing.T, manager *Manager, matchID uint) *Match {
+	t.Helper()
+
+	match, ok := manager.Get(matchID)
+	if !ok {
+		t.Fatalf("对局 %d 不在 manager 里", matchID)
+	}
+	return match
+}
+
 // startMatch 造一局并登记到 Manager 里，两个座位分别是用户 1 与 2。
 func startMatch(t *testing.T, shot *sim.Shot) (*Manager, uint) {
 	t.Helper()
@@ -112,19 +123,141 @@ func TestGameWSRejectsUnknownMatch(t *testing.T) {
 	}
 }
 
-// 不是这一局里的人：403，别把对局内容泄露给路人。
-func TestGameWSRejectsOutsider(t *testing.T) {
+// 不是这一局里的人：不拒，改成观战。
+//
+// 曾经这里是 403。改成观战之后必须验两点：
+// 座位是 SeatSpectator（前端据此关掉所有操作入口），
+// 且拿到的是同一份快照——观战页正是靠它把局面画出来的。
+func TestGameWSTreatsOutsiderAsSpectator(t *testing.T) {
 	manager, matchID := startMatch(t, quietShot())
 	baseURL, jwtManager := newTestServer(t, manager)
 
 	token, _ := jwtManager.SignAccess(3)
+	conn, _, err := dialGame(t, baseURL, token, matchID)
+	if err != nil {
+		t.Fatalf("观战连接失败：%v", err)
+	}
+	defer conn.Close()
+
+	joined := readMessage(t, conn)
+	if joined.Type != MsgJoined {
+		t.Fatalf("第一条应当是 joined，实际 %s", joined.Type)
+	}
+	data, _ := json.Marshal(joined.Data)
+	var joinedData JoinedData
+	_ = json.Unmarshal(data, &joinedData)
+	if joinedData.Seat != SeatSpectator {
+		t.Errorf("观战者的座位 = %d，期望 %d", joinedData.Seat, SeatSpectator)
+	}
+
+	state := readMessage(t, conn)
+	if state.Type != MsgState {
+		t.Fatalf("第二条应当是 state，实际 %s", state.Type)
+	}
+	snapshotData, _ := json.Marshal(state.Data)
+	var snapshot Snapshot
+	_ = json.Unmarshal(snapshotData, &snapshot)
+	if snapshot.Seat != SeatSpectator {
+		t.Errorf("快照里的座位 = %d，期望 %d", snapshot.Seat, SeatSpectator)
+	}
+	if len(snapshot.Balls) != len(StandardRack) {
+		t.Errorf("观战快照的球数 = %d，期望 %d", len(snapshot.Balls), len(StandardRack))
+	}
+}
+
+// 观战者发操作：回一条 error，且不进规则层。
+//
+// 不进规则层的理由：规则层会把观战者当成「没轮到的那个人」，
+// 提示变成「还没轮到你出杆」——他永远也轮不到，这句话等于叫他一直等。
+func TestGameWSSpectatorCannotShoot(t *testing.T) {
+	manager, matchID := startMatch(t, quietShot())
+	baseURL, jwtManager := newTestServer(t, manager)
+
+	token, _ := jwtManager.SignAccess(3)
+	conn, _, err := dialGame(t, baseURL, token, matchID)
+	if err != nil {
+		t.Fatalf("观战连接失败：%v", err)
+	}
+	defer conn.Close()
+
+	readMessage(t, conn)
+	readMessage(t, conn)
+
+	shoot := `{"type":"shoot","seq":12,"data":{"phi":1.5,"power":0.6}}`
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(shoot)); err != nil {
+		t.Fatalf("发送 shoot 失败：%v", err)
+	}
+
+	msg := readMessage(t, conn)
+	if msg.Type != MsgError {
+		t.Fatalf("应当收到 error，实际 %s", msg.Type)
+	}
+	if msg.Seq != 12 {
+		t.Errorf("seq = %d，期望 12", msg.Seq)
+	}
+	data, _ := json.Marshal(msg.Data)
+	var errData ErrorData
+	_ = json.Unmarshal(data, &errData)
+	if errData.Code != ErrCodeNotYourTurn {
+		t.Errorf("错误码 = %s，期望 %s", errData.Code, ErrCodeNotYourTurn)
+	}
+
+	// 观战者的这一杆不能真的打出去。
+	snapshot, err := mustMatch(t, manager, matchID).Snapshot(SeatSpectator)
+	if err != nil {
+		t.Fatalf("取快照失败：%v", err)
+	}
+	if snapshot.ShotSeq != 0 {
+		t.Errorf("观战者把球打出去了：shot_seq = %d", snapshot.ShotSeq)
+	}
+}
+
+// 观战名额满了：握手前就 409。
+//
+// WS 里拿不到 HTTP 状态码，所以这条拒绝必须发生在 Upgrade 之前，
+// 否则浏览器只会看到一次连上又断开的抖动，前端也没法显示「人数已满」。
+func TestGameWSRejectsWhenSpectatorsFull(t *testing.T) {
+	manager, matchID := startMatch(t, quietShot())
+	match := mustMatch(t, manager, matchID)
+	for index := 0; index < maxSpectators; index += 1 {
+		if err := match.Watch(&fakeConn{}); err != nil {
+			t.Fatalf("第 %d 个观战者进不来：%v", index+1, err)
+		}
+	}
+
+	baseURL, jwtManager := newTestServer(t, manager)
+	token, _ := jwtManager.SignAccess(3)
 	conn, resp, err := dialGame(t, baseURL, token, matchID)
 	if err == nil {
 		conn.Close()
-		t.Fatal("局外人不该连上")
+		t.Fatal("观战名额满了不该连上")
 	}
-	if resp == nil || resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("状态码应当 403，实际 %+v", resp)
+	if resp == nil || resp.StatusCode != http.StatusConflict {
+		t.Fatalf("状态码应当 409，实际 %+v", resp)
+	}
+}
+
+// 两名玩家自己的座位不受观战名额影响：满了也照样能进房。
+func TestGameWSPlayersIgnoreSpectatorCap(t *testing.T) {
+	manager, matchID := startMatch(t, quietShot())
+	match := mustMatch(t, manager, matchID)
+	for index := 0; index < maxSpectators; index += 1 {
+		if err := match.Watch(&fakeConn{}); err != nil {
+			t.Fatalf("第 %d 个观战者进不来：%v", index+1, err)
+		}
+	}
+
+	baseURL, jwtManager := newTestServer(t, manager)
+	token, _ := jwtManager.SignAccess(1)
+	conn, _, err := dialGame(t, baseURL, token, matchID)
+	if err != nil {
+		t.Fatalf("观战满了之后玩家自己反而进不来：%v", err)
+	}
+	defer conn.Close()
+
+	joined := readMessage(t, conn)
+	if joined.Type != MsgJoined {
+		t.Fatalf("第一条应当是 joined，实际 %s", joined.Type)
 	}
 }
 

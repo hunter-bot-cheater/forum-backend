@@ -392,6 +392,8 @@ func New(deps Deps) (*gin.Engine, error) {
 			// 对局结束后五分钟内存就回收了，战绩页必须还能翻到那一局。
 			auth.GET("/pool/records", poolRest.Records)
 			auth.GET("/pool/matches/:id/replay", poolRest.Replay)
+			// 观战列表读的是内存里的 actor（正在打的对局），与上面的读库两条路。
+			auth.GET("/pool/live", poolRest.Live)
 
 			// ——读接口—— 封禁只限制「制造内容」，不限制看内容：
 			// 把人也一并挡在外面，等于让他连自己以前发的东西都翻不到。
