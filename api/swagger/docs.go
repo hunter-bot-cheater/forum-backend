@@ -2121,6 +2121,133 @@ const docTemplate = `{
                 }
             }
         },
+        "/pool/matches/{id}/replay": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "只有这局的两位玩家能看，且必须已经结算。frames 与对局时的 shot 帧同形。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "pool"
+                ],
+                "summary": "对局回放",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "对局 ID",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "结构见 docs/12 的 12.6：players + shots[]，每杆带 frames",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "type": "object"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "403": {
+                        "description": "你不在这一局里",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "404": {
+                        "description": "对局不存在",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    "409": {
+                        "description": "对局还没结束",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
+        "/pool/records": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "返回积分、胜负总数与最近的对局，最近的在前。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "pool"
+                ],
+                "summary": "我的战绩",
+                "parameters": [
+                    {
+                        "type": "integer",
+                        "description": "页码，从 1 开始",
+                        "name": "page",
+                        "in": "query"
+                    },
+                    {
+                        "type": "integer",
+                        "description": "每页条数，默认 10，上限 50",
+                        "name": "size",
+                        "in": "query"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "$ref": "#/definitions/pool.recordsResp"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/pool/rooms/{id}": {
             "get": {
                 "security": [
@@ -3760,11 +3887,71 @@ const docTemplate = `{
                 }
             }
         },
+        "pool.ratingResp": {
+            "type": "object",
+            "properties": {
+                "elo": {
+                    "type": "integer"
+                },
+                "losses": {
+                    "type": "integer"
+                },
+                "wins": {
+                    "type": "integer"
+                }
+            }
+        },
         "pool.readyReq": {
             "type": "object",
             "properties": {
                 "ready": {
                     "type": "boolean"
+                }
+            }
+        },
+        "pool.recordResp": {
+            "type": "object",
+            "properties": {
+                "ended_at": {
+                    "type": "string"
+                },
+                "match_id": {
+                    "type": "integer"
+                },
+                "opponent": {
+                    "$ref": "#/definitions/pool.playerResp"
+                },
+                "shot_count": {
+                    "type": "integer"
+                },
+                "win_reason": {
+                    "type": "string"
+                },
+                "won": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "pool.recordsResp": {
+            "type": "object",
+            "properties": {
+                "list": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/pool.recordResp"
+                    }
+                },
+                "page": {
+                    "type": "integer"
+                },
+                "rating": {
+                    "$ref": "#/definitions/pool.ratingResp"
+                },
+                "size": {
+                    "type": "integer"
+                },
+                "total": {
+                    "type": "integer"
                 }
             }
         },

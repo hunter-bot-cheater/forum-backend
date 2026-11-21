@@ -47,6 +47,11 @@ var testTables = []string{
 	// reports 没有任何外键（目标用 target_type + target_id 表达多态），
 	// 放在 users 前面只是为了保持「业务表在前、用户表在后」的既有顺序。
 	"reports",
+	// 台球三张表用 GORM 默认的复数表名（模型上没有 TableName 覆盖）。
+	// pool_shots 语义上是 pool_matches 的子表，放在前面。
+	"pool_shots",
+	"pool_matches",
+	"pool_ratings",
 	"articles",
 	"users",
 }
@@ -188,6 +193,9 @@ func connectAndMigrate(dsn string) (*gorm.DB, error) {
 		&model.Conversation{},
 		&model.Message{},
 		&model.Report{},
+		&model.PoolMatch{},
+		&model.PoolShot{},
+		&model.PoolRating{},
 	); err != nil {
 		return nil, fmt.Errorf("迁移测试库失败: %w", err)
 	}

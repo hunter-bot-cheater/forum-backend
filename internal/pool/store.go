@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"gorm.io/gorm/clause"
 
 	"forum-backend/internal/model"
+	"forum-backend/internal/pool/sim"
 )
 
 // Store 是对局的持久化层：建房、开局、每杆记录、结算、以及「能不能邀请这个人」。
@@ -202,6 +204,87 @@ func (s *Store) ratingOf(tx *gorm.DB, userID uint) (*model.PoolRating, error) {
 	return nil, fmt.Errorf("load pool rating: %w", err)
 }
 
+// Rating 载入一个用户的战绩，没有记录时返回初始值（Elo 1000、零胜零负）。
+//
+// 读不到不写库：绝大多数人只是打开看一眼战绩，为一次只读操作插一行没有意义，
+// 而且并发首访还会撞主键。
+func (s *Store) Rating(ctx context.Context, userID uint) (model.PoolRating, error) {
+	rating, err := s.ratingOf(s.db.WithContext(ctx), userID)
+	if err != nil {
+		return model.PoolRating{}, err
+	}
+	return *rating, nil
+}
+
+// RecentMatches 分页读这个人参与过且已结算的对局，最近的在前。
+//
+// 只认 finished：waiting 还没打成，expired 是房间没人来，
+// 把它们混进战绩列表会让「我赢了 3 局」和列表条数对不上。
+func (s *Store) RecentMatches(ctx context.Context, userID uint, offset, limit int) ([]model.PoolMatch, int64, error) {
+	// 条件构造两遍而不是复用同一条链：Count 之后接着 Order/Find 会带上 Count 改写过的
+	// Statement（Select 被换成 count(*)），拿到的行里字段全是零值。
+	scope := func() *gorm.DB {
+		return s.db.WithContext(ctx).Model(&model.PoolMatch{}).
+			Where("(p0_id = ? OR p1_id = ?)", userID, userID).
+			Where("status = ?", model.PoolStatusFinished)
+	}
+
+	var total int64
+	if err := scope().Count(&total).Error; err != nil {
+		return nil, 0, fmt.Errorf("count pool matches: %w", err)
+	}
+
+	var matches []model.PoolMatch
+	// id 兜在排序里：同一秒结束的两局，光按 ended_at 排出来的顺序在分页之间会飘，
+	// 第二页可能重复第一页的最后一条。
+	err := scope().Order("ended_at DESC, id DESC").Offset(offset).Limit(limit).Find(&matches).Error
+	if err != nil {
+		return nil, 0, fmt.Errorf("list pool matches: %w", err)
+	}
+	return matches, total, nil
+}
+
+// MatchShots 读一局的全部杆，按 seq 升序，并把 gzip 过的帧解回结构。
+//
+// 回放是唯一调用方：它不需要参数与事件，只把轨迹画出来，
+// 所以这里只取 seq / seat / duration / frames 四列——
+// 一局几十杆，每杆多读几十 KB 的 events 纯属浪费。
+func (s *Store) MatchShots(ctx context.Context, matchID uint) ([]ShotReplay, error) {
+	var rows []model.PoolShot
+	err := s.db.WithContext(ctx).
+		Select("seq", "seat", "duration_ms", "frames").
+		Where("match_id = ?", matchID).
+		Order("seq ASC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list pool shots: %w", err)
+	}
+
+	shots := make([]ShotReplay, 0, len(rows))
+	for _, row := range rows {
+		var frames []sim.Frame
+		if err := gunzipJSON(row.Frames, &frames); err != nil {
+			// 一杆解不开不该让整局回放打不开：跳过它，其余照放。
+			return nil, fmt.Errorf("decode frames of shot %d: %w", row.Seq, err)
+		}
+		shots = append(shots, ShotReplay{
+			Seq:      row.Seq,
+			Seat:     Seat(row.Seat),
+			Duration: float64(row.DurationMS) / 1000,
+			Frames:   frames,
+		})
+	}
+	return shots, nil
+}
+
+// ShotReplay 是回放里的一杆：只留前端画得出来的东西。
+type ShotReplay struct {
+	Seq      int
+	Seat     Seat
+	Duration float64
+	Frames   []sim.Frame
+}
+
 // gzipJSON 把任意结构压成 gzip 后的 JSON。
 func gzipJSON(value any) ([]byte, error) {
 	raw, err := json.Marshal(value)
@@ -218,6 +301,27 @@ func gzipJSON(value any) ([]byte, error) {
 		return nil, fmt.Errorf("close gzip writer: %w", err)
 	}
 	return buffer.Bytes(), nil
+}
+
+// gunzipJSON 是 gzipJSON 的反向操作，供回放解帧用。
+func gunzipJSON(data []byte, out any) error {
+	reader, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("open gzip frames: %w", err)
+	}
+	// 先读完再关：Read 出错时也得把 reader 关掉，否则解压状态泄漏。
+	raw, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil {
+		return fmt.Errorf("read gzip frames: %w", readErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close gzip reader: %w", closeErr)
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("unmarshal frames: %w", err)
+	}
+	return nil
 }
 
 // 编译期确认 Store 满足 Recorder。

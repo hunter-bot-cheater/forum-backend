@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 
 	"forum-backend/internal/httputil"
 	"forum-backend/internal/model"
@@ -382,6 +383,205 @@ func (h *Handler) Ready(c *gin.Context) {
 		}
 	}
 	response.OK(c, toRoomResp(snapshot))
+}
+
+// Records godoc
+// @Summary      我的战绩
+// @Description  返回积分、胜负总数与最近的对局，最近的在前。
+// @Tags         pool
+// @Produce      json
+// @Param        page  query  int  false  "页码，从 1 开始"
+// @Param        size  query  int  false  "每页条数，默认 10，上限 50"
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=pool.recordsResp}
+// @Failure      401  {string}  string  "未登录"
+// @Security     Bearer
+// @Router       /pool/records [get]
+// Records 处理 GET /api/pool/records。
+func (h *Handler) Records(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := httputil.CurrentUserID(c)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "未登录")
+		return
+	}
+
+	page, size := pageParams(c)
+	rating, err := h.store.Rating(ctx, userID)
+	if err != nil {
+		httputil.LogRequestError(c, "load pool rating", err)
+		response.Error(c, http.StatusInternalServerError, "服务暂时不可用")
+		return
+	}
+
+	matches, total, err := h.store.RecentMatches(ctx, userID, (page-1)*size, size)
+	if err != nil {
+		httputil.LogRequestError(c, "list pool matches", err)
+		response.Error(c, http.StatusInternalServerError, "服务暂时不可用")
+		return
+	}
+
+	// 对手 id 一次凑齐批量取资料，不按行发请求：一页十行就是十次往返。
+	opponents := make([]uint, 0, len(matches))
+	for _, match := range matches {
+		opponents = append(opponents, opponentOf(match, userID))
+	}
+	briefs := map[uint]user.Brief{}
+	if len(opponents) > 0 {
+		briefs, err = h.users.Briefs(ctx, opponents)
+		if err != nil {
+			// 取不到昵称不该让整页失败：战绩本身是数据，昵称只是装饰。
+			slog.WarnContext(ctx, "load opponent briefs", "error", err)
+			briefs = map[uint]user.Brief{}
+		}
+	}
+
+	resp := recordsResp{
+		Rating: ratingResp{Elo: rating.Elo, Wins: rating.Wins, Losses: rating.Losses},
+		List:   make([]recordResp, 0, len(matches)),
+		Total:  total,
+		Page:   page,
+		Size:   size,
+	}
+	for _, match := range matches {
+		opponentID := opponentOf(match, userID)
+		won := match.WinnerID != nil && *match.WinnerID == userID
+		resp.List = append(resp.List, recordResp{
+			MatchID:   match.ID,
+			Opponent:  toPlayerResp(briefOf(briefs, opponentID)),
+			Won:       won,
+			WinReason: match.WinReason,
+			ShotCount: match.ShotCount,
+			EndedAt:   match.EndedAt,
+		})
+	}
+	response.OK(c, resp)
+}
+
+// Replay godoc
+// @Summary      对局回放
+// @Description  只有这局的两位玩家能看，且必须已经结算。frames 与对局时的 shot 帧同形。
+// @Tags         pool
+// @Produce      json
+// @Param        id   path  int  true  "对局 ID"
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=object}  "结构见 docs/12 的 12.6：players + shots[]，每杆带 frames"
+// @Failure      401  {string}  string  "未登录"
+// @Failure      403  {string}  string  "你不在这一局里"
+// @Failure      404  {string}  string  "对局不存在"
+// @Failure      409  {string}  string  "对局还没结束"
+// @Security     Bearer
+// @Router       /pool/matches/{id}/replay [get]
+// Replay 处理 GET /api/pool/matches/:id/replay。
+func (h *Handler) Replay(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := httputil.CurrentUserID(c)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "未登录")
+		return
+	}
+
+	matchID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || matchID == 0 {
+		response.Error(c, http.StatusBadRequest, "对局编号不合法")
+		return
+	}
+
+	// 回放读库而不是读内存：对局结束后 actor 会被回收，
+	// 五分钟后再点进战绩页，内存里早就没有这一局了。
+	match, err := h.store.Match(ctx, uint(matchID))
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			response.Error(c, http.StatusNotFound, "对局不存在")
+			return
+		}
+		httputil.LogRequestError(c, "load pool match", err)
+		response.Error(c, http.StatusInternalServerError, "服务暂时不可用")
+		return
+	}
+
+	// 不在这一局里的人不给看：回放里有双方的完整对局过程，
+	// 第一版不做观战，也就不该从这里漏出去。
+	if _, ok := seatInMatch(match, userID); !ok {
+		response.Error(c, http.StatusForbidden, "你不在这一局里")
+		return
+	}
+
+	if match.Status != model.PoolStatusFinished || match.WinnerID == nil {
+		response.Error(c, http.StatusConflict, "对局还没结束")
+		return
+	}
+
+	shots, err := h.store.MatchShots(ctx, uint(matchID))
+	if err != nil {
+		httputil.LogRequestError(c, "load pool shots", err)
+		response.Error(c, http.StatusInternalServerError, "服务暂时不可用")
+		return
+	}
+
+	briefs, err := h.users.Briefs(ctx, []uint{match.P0ID, match.P1ID})
+	if err != nil {
+		slog.WarnContext(ctx, "load replay briefs", "error", err)
+		briefs = map[uint]user.Brief{}
+	}
+
+	winner := Seat0
+	if *match.WinnerID == match.P1ID {
+		winner = Seat1
+	}
+
+	resp := replayResp{
+		MatchID: match.ID,
+		Players: [2]playerResp{
+			toPlayerResp(briefOf(briefs, match.P0ID)),
+			toPlayerResp(briefOf(briefs, match.P1ID)),
+		},
+		Winner: winner,
+		Reason: match.WinReason,
+		Shots:  make([]replayShotResp, 0, len(shots)),
+	}
+	for _, shot := range shots {
+		resp.Shots = append(resp.Shots, replayShotResp{
+			Seq:      shot.Seq,
+			Seat:     shot.Seat,
+			Duration: shot.Duration,
+			Frames:   shot.Frames,
+		})
+	}
+	response.OK(c, resp)
+}
+
+// pageParams 读分页参数，非法值一律退回默认，不报错。
+//
+// 列表页的分页参数是用户手改或旧链接带过来的，为一个 page=abc 返回 400
+// 不如直接给第一页——用户看到的东西才是他想要的。
+func pageParams(c *gin.Context) (int, int) {
+	page := 1
+	size := 10
+	if value, err := strconv.Atoi(c.DefaultQuery("page", "1")); err == nil && value > 0 {
+		page = value
+	}
+	if value, err := strconv.Atoi(c.DefaultQuery("size", "10")); err == nil && value > 0 && value <= 50 {
+		size = value
+	}
+	return page, size
+}
+
+// opponentOf 返回这条对局里「不是 userID」的那一方。
+func opponentOf(match model.PoolMatch, userID uint) uint {
+	if match.P0ID == userID {
+		return match.P1ID
+	}
+	return match.P0ID
+}
+
+// seatInMatch 判断这个用户在库里那条对局中坐哪边。
+func seatInMatch(match *model.PoolMatch, userID uint) (Seat, bool) {
+	if match.P0ID == userID {
+		return Seat0, true
+	}
+	if match.P1ID == userID {
+		return Seat1, true
+	}
+	return 0, false
 }
 
 // usableInvite 读出当前用户能处理的邀请，不能处理时已写好响应。

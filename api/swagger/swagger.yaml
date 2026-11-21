@@ -598,10 +598,49 @@ definitions:
       user_id:
         type: integer
     type: object
+  pool.ratingResp:
+    properties:
+      elo:
+        type: integer
+      losses:
+        type: integer
+      wins:
+        type: integer
+    type: object
   pool.readyReq:
     properties:
       ready:
         type: boolean
+    type: object
+  pool.recordResp:
+    properties:
+      ended_at:
+        type: string
+      match_id:
+        type: integer
+      opponent:
+        $ref: '#/definitions/pool.playerResp'
+      shot_count:
+        type: integer
+      win_reason:
+        type: string
+      won:
+        type: boolean
+    type: object
+  pool.recordsResp:
+    properties:
+      list:
+        items:
+          $ref: '#/definitions/pool.recordResp'
+        type: array
+      page:
+        type: integer
+      rating:
+        $ref: '#/definitions/pool.ratingResp'
+      size:
+        type: integer
+      total:
+        type: integer
     type: object
   pool.roomResp:
     properties:
@@ -2154,6 +2193,81 @@ paths:
       security:
       - Bearer: []
       summary: 我收到的待处理邀请
+      tags:
+      - pool
+  /pool/matches/{id}/replay:
+    get:
+      description: 只有这局的两位玩家能看，且必须已经结算。frames 与对局时的 shot 帧同形。
+      parameters:
+      - description: 对局 ID
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: 结构见 docs/12 的 12.6：players + shots[]，每杆带 frames
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  type: object
+              type: object
+        "401":
+          description: 未登录
+          schema:
+            type: string
+        "403":
+          description: 你不在这一局里
+          schema:
+            type: string
+        "404":
+          description: 对局不存在
+          schema:
+            type: string
+        "409":
+          description: 对局还没结束
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 对局回放
+      tags:
+      - pool
+  /pool/records:
+    get:
+      description: 返回积分、胜负总数与最近的对局，最近的在前。
+      parameters:
+      - description: 页码，从 1 开始
+        in: query
+        name: page
+        type: integer
+      - description: 每页条数，默认 10，上限 50
+        in: query
+        name: size
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  $ref: '#/definitions/pool.recordsResp'
+              type: object
+        "401":
+          description: 未登录
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 我的战绩
       tags:
       - pool
   /pool/rooms/{id}:
