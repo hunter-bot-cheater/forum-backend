@@ -2,7 +2,9 @@ package pool
 
 import (
 	"strconv"
+	"time"
 
+	"forum-backend/internal/model"
 	"forum-backend/internal/pool/sim"
 )
 
@@ -117,4 +119,157 @@ var StandardRack = []RackBall{
 	{ID: "11", X: 0.495296, Y: 1.684069},
 	{ID: "14", X: 0.438113, Y: 1.684064},
 	{ID: "6", X: 0.380883, Y: 1.68409},
+}
+
+// PlayerBrief 是一名玩家在快照里的公开信息。
+// 只带展示需要的三样，不把整份用户资料塞进每一条消息——一局要广播几十次快照。
+type PlayerBrief struct {
+	UserID   uint   `json:"user_id"`
+	Nickname string `json:"nickname"`
+	Avatar   string `json:"avatar"`
+}
+
+// Snapshot 是给前端的完整对局快照，字段与 web/src/game/types.ts 的 MatchSnapshot 一致。
+//
+// Balls 用切片而不是 map：前端按 id 找球，而 map 的遍历顺序随机，
+// 每次快照的球顺序都不一样会让 reconcile 无谓地抖动。
+type Snapshot struct {
+	MatchID    uint             `json:"match_id"`
+	Status     string           `json:"status"`
+	Seat       Seat             `json:"seat"`
+	Turn       Seat             `json:"turn"`
+	DeadlineMS int              `json:"deadline_ms"`
+	Balls      []sim.ResultBall `json:"balls"`
+	Group      [2]BallGroup     `json:"group"`
+	Ready      [2]bool          `json:"ready"`
+	BallInHand bool             `json:"ball_in_hand"`
+	ShotSeq    int              `json:"shot_seq"`
+	Players    [2]PlayerBrief   `json:"players"`
+	Winner     *Seat            `json:"winner"`
+	WinReason  string           `json:"win_reason"`
+}
+
+// MatchState 是一局对局的全部状态。字段只在 actor 协程里改。
+type MatchState struct {
+	MatchID  uint
+	RoomCode string
+	Status   string
+	Players  [2]PlayerBrief
+
+	Turn      Seat
+	BreakDone bool
+	Groups    [2]BallGroup
+	Balls     []sim.ResultBall
+
+	Ready      [2]bool
+	BallInHand bool
+	ShotSeq    int
+	// Timeouts 记录每个座位连续超时的次数，进一次球或换一次人就清零。
+	Timeouts [2]int
+
+	// Deadline 是本杆的读秒截止时间，零值表示不计时（房间还没开局）。
+	Deadline  time.Time
+	Winner    *Seat
+	WinReason string
+}
+
+// newMatchState 按开局摆球造一份初始状态。
+//
+// 母球也在 Balls 里：把它单独拎出来会让「hand in ball 时母球不在台面上」这类
+// 中间态需要两套表示，而规则与渲染都只需要「一颗在台面上的球」。
+func newMatchState(matchID uint, roomCode string, players [2]PlayerBrief) MatchState {
+	balls := make([]sim.ResultBall, 0, len(StandardRack))
+	for _, item := range StandardRack {
+		balls = append(balls, sim.ResultBall{ID: item.ID, X: item.X, Y: item.Y, OnTable: true})
+	}
+
+	return MatchState{
+		MatchID:  matchID,
+		RoomCode: roomCode,
+		Status:   model.PoolStatusPlaying,
+		Players:  players,
+		Turn:     Seat0,
+		Balls:    balls,
+		Ready:    [2]bool{true, true},
+	}
+}
+
+// ballByID 按球号找球。找不到返回 ok=false，调用方决定是忽略还是报错。
+func (s *MatchState) ballByID(id string) (sim.ResultBall, bool) {
+	for _, item := range s.Balls {
+		if item.ID == id {
+			return item, true
+		}
+	}
+	return sim.ResultBall{}, false
+}
+
+// setBall 覆盖一颗球的球位。不存在的球号直接忽略：
+// 能走到这里的球号都来自 pool-sim 的终局列表，与我们的球集合同源。
+func (s *MatchState) setBall(ball sim.ResultBall) {
+	for index := range s.Balls {
+		if s.Balls[index].ID == ball.ID {
+			s.Balls[index] = ball
+			return
+		}
+	}
+}
+
+// onTable 返回击球前台面上的球号集合，给规则判定用。
+func (s *MatchState) onTable() map[string]bool {
+	set := make(map[string]bool, len(s.Balls))
+	for _, item := range s.Balls {
+		if item.OnTable {
+			set[item.ID] = true
+		}
+	}
+	return set
+}
+
+// ruleState 把对局状态裁成规则需要的那几项。
+func (s *MatchState) ruleState() RuleState {
+	return RuleState{
+		Shooter:   s.Turn,
+		BreakDone: s.BreakDone,
+		Groups:    s.Groups,
+		OnTable:   s.onTable(),
+	}
+}
+
+// simBalls 造出发给 pool-sim 的球位：只有还在台面上的球参与计算。
+func (s *MatchState) simBalls() []sim.RequestBall {
+	balls := make([]sim.RequestBall, 0, len(s.Balls))
+	for _, item := range s.Balls {
+		if !item.OnTable {
+			continue
+		}
+		balls = append(balls, sim.RequestBall{ID: item.ID, X: item.X, Y: item.Y, Z: item.Z})
+	}
+	return balls
+}
+
+// snapshot 生成给某个视角的快照。Seat 是「看的人坐在哪」，观战时传 -1。
+func (s *MatchState) snapshot(viewer Seat, now time.Time) Snapshot {
+	snapshot := Snapshot{
+		MatchID:    s.MatchID,
+		Status:     s.Status,
+		Seat:       viewer,
+		Turn:       s.Turn,
+		Balls:      append([]sim.ResultBall(nil), s.Balls...),
+		Group:      s.Groups,
+		Ready:      s.Ready,
+		BallInHand: s.BallInHand,
+		ShotSeq:    s.ShotSeq,
+		Players:    s.Players,
+		Winner:     s.Winner,
+		WinReason:  s.WinReason,
+	}
+	if !s.Deadline.IsZero() {
+		left := int(s.Deadline.Sub(now) / time.Millisecond)
+		if left < 0 {
+			left = 0
+		}
+		snapshot.DeadlineMS = left
+	}
+	return snapshot
 }
