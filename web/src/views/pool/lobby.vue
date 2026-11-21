@@ -5,6 +5,7 @@
         <h1 class="pl__title">台球对战</h1>
         <p class="pl__sub">中式八球，一局定胜负。选一个你关注的人，等他进房间。</p>
       </div>
+      <router-link class="pl__records" to="/pool/records">我的战绩</router-link>
     </header>
 
     <!-- 等待对方接受。这条卡片比列表更重要，放在最上面：
@@ -286,6 +287,20 @@ onBeforeUnmount(stopWaitTimer)
   margin: 0;
   font-size: 13px;
   color: var(--fs-text-2);
+}
+
+/* 战绩入口做成描边按钮：它和「邀请」是同一条业务线上的两个动作，
+   但一个是「看过去的」，不该抢走视线。 */
+.pl__records {
+  flex: none;
+  height: 32px;
+  padding: 0 14px;
+  font-size: 13px;
+  line-height: 30px;
+  color: var(--fs-text-2);
+  text-decoration: none;
+  border: 1px solid var(--fs-line);
+  border-radius: var(--fs-radius-sm);
 }
 
 .pl__waiting {

@@ -26,7 +26,10 @@
 <script setup lang="ts">
 // 对局结算。文案全部在前端定，服务端只给机读码：
 // 改一句中文不该牵动后端发版，样式分支也不该依赖中文串。
+//
+// 正文来自 game/reasons.ts：战绩列表要同一段话，两处各写一份迟早分叉。
 import { computed } from 'vue'
+import { reasonLabel } from '@/game/reasons'
 
 const props = defineProps<{
   // won 是「查看者赢了」而不是「谁赢了」，服务端给的 winner 是座位号，
@@ -47,23 +50,7 @@ const emit = defineEmits<{
   lobby: []
 }>()
 
-// REASONS 把机读码翻成一句人话。
-// 未登记的原因不加兜底猜测，直接说「本局结束」：编一句可能错的原因更糟。
-const REASONS: Record<string, string> = {
-  eight_legal: '打进黑八，赢下这一局',
-  eight_early: '黑八提前落袋',
-  eight_with_foul: '犯规同时打进黑八',
-  timeout: '连续两次超时，判负',
-  leave: '中途离开，判负',
-}
-
-const reasonText = computed(() => {
-  const text = REASONS[props.reason]
-  if (text) {
-    return text
-  }
-  return '本局结束'
-})
+const reasonText = computed(() => reasonLabel(props.reason, props.won))
 </script>
 
 <style scoped>

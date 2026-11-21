@@ -121,6 +121,13 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '准备中' },
         props: true,
       },
+      {
+        // 战绩页。数据全在库里，所以它也能单独刷新与从分享链接直接打开。
+        path: 'pool/records',
+        name: 'PoolRecords',
+        component: () => import('@/views/pool/records.vue'),
+        meta: { title: '我的战绩' },
+      },
     ],
   },
   {
@@ -132,6 +139,14 @@ const routes: RouteRecordRaw[] = [
     name: 'PoolMatch',
     component: () => import('@/views/pool/match.vue'),
     meta: { title: '台球对局' },
+    props: true,
+  },
+  {
+    // 回放页与对局页同理：全屏球台，不套 Layout。
+    path: '/pool/replay/:id',
+    name: 'PoolReplay',
+    component: () => import('@/views/pool/replay.vue'),
+    meta: { title: '对局回放' },
     props: true,
   },
   { path: '/:pathMatch(.*)*', redirect: '/articles' },

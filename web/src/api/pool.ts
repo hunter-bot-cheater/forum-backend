@@ -1,5 +1,6 @@
 import request from '@/utils/request'
-import type { PlayerBrief, RoomSnapshot } from '@/game/types'
+import type { PlayerBrief, RoomSnapshot, Seat } from '@/game/types'
+import type { ShotFrame } from '@/game/animator'
 
 // 本文件是后端 internal/pool/dto.go 的镜像，字段名保持 snake_case。
 //
@@ -96,5 +97,67 @@ export function setReady(matchId: number | string, ready: boolean) {
     url: '/pool/rooms/' + String(matchId) + '/ready',
     method: 'post',
     data: { ready },
+  })
+}
+
+// PoolRating 是战绩汇总。胜率不在这里算：它是派生值，
+// 后端只给胜负场次，页面上那一个百分比就不可能和列表对不上。
+export interface PoolRating {
+  elo: number
+  wins: number
+  losses: number
+}
+
+// PoolRecord 是战绩列表里的一行。
+export interface PoolRecord {
+  match_id: number
+  // opponent 是对手；列表里没有「我」的资料，也不需要判断哪一份是自己。
+  opponent: PlayerBrief
+  won: boolean
+  win_reason: string
+  shot_count: number
+  // ended_at 可能为空（早期数据没有结束时间），渲染时兜一下。
+  ended_at: string | null
+}
+
+export interface RecordsResp {
+  rating: PoolRating
+  list: PoolRecord[]
+  total: number
+  page: number
+  size: number
+}
+
+// ReplayShot 是回放里的一杆。frames 与对局时的 shot 帧同形，
+// 复用同一个 animator 播放，不需要第二套解码。
+export interface ReplayShot {
+  seq: number
+  seat: Seat
+  duration: number
+  frames: ShotFrame[]
+}
+
+export interface ReplayResp {
+  match_id: number
+  players: [PlayerBrief, PlayerBrief]
+  winner: Seat
+  win_reason: string
+  shots: ReplayShot[]
+}
+
+// getRecords 拉我的战绩。分页参数异常时由后端退回默认值，前端不必校验。
+export function getRecords(page = 1, size = 10) {
+  return request<RecordsResp>({
+    url: '/pool/records',
+    method: 'get',
+    params: { page, size },
+  })
+}
+
+// getReplay 拉一局的回放。只有这一局的两位玩家能取到，其余返回 403。
+export function getReplay(matchId: number | string) {
+  return request<ReplayResp>({
+    url: '/pool/matches/' + String(matchId) + '/replay',
+    method: 'get',
   })
 }
