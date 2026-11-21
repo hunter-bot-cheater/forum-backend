@@ -13,7 +13,12 @@ export type BallGroup = 'solids' | 'stripes'
 // waiting 是房间已建、还有一方没进；playing 才允许出杆。
 export type MatchStatus = 'waiting' | 'playing' | 'finished' | 'abandoned'
 
-// BallState 是一颗球在某一时刻的状态，单位米、z 为球心离台面高度。
+// BallState 是一颗球在某一时刻的状态，单位米。
+//
+// z 是球底离台面的腾空高度，静止球为 0。它不是球心高度：
+// pooltool 里球心静止时本来就在一个半径高处，直接序列化会让每颗球
+// 都被当成跳球，渲染时全都放大、影子全都拉远。
+//
 // on_table 为 false 的球已经落袋，渲染时要跳过。
 export interface BallState {
   id: string
@@ -73,4 +78,12 @@ export interface RoomSnapshot {
   seat: Seat
   ready: [boolean, boolean]
   players: PlayerBrief[]
+}
+
+// PoolDrag 是一次画布拖动。dx / dy 是相对按下位置的累计位移（CSS 像素），
+// 不是逐帧增量：用累计值算角度不会把每一帧的小误差累加成偏移。
+export interface PoolDrag {
+  phase: 'start' | 'move' | 'end'
+  dx: number
+  dy: number
 }

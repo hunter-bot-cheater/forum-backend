@@ -47,17 +47,26 @@ export function ballLookOf(ballId: string): BallLook {
   return { color: SOLID_COLORS[key], striped: n > 8, number: n }
 }
 
-// 纹理缓存。key 是「球号@边长」，值是一张已经画好高光与号码的正方形位图。
-const textureCache = new Map<string, HTMLCanvasElement>()
+// 纹理缓存。只缓存「当前尺寸」这一套，尺寸一变就整批丢掉重建。
+//
+// 不按尺寸分桶：同一时刻画面里只有一种球直径，分桶只会让每次拖动窗口都
+// 多留一份 16 张位图，一局下来几十张，且再也没有机会被访问到。
+let cachedSide = 0
+let textureCache = new Map<string, HTMLCanvasElement>()
 
 // ballTexture 取（必要时生成）一颗球的位图，边长以物理像素为单位。
 //
 // 传入的 size 应当已经乘过 devicePixelRatio：贴图按物理像素生成，
 // 绘制时再缩到 CSS 尺寸，这样在 2x 屏上号码也是清晰的。
 export function ballTexture(ballId: string, size: number): HTMLCanvasElement {
+  // 最小 8px：再小球台上的球只剩一个点，号码画上去也是糊的。
   const side = Math.max(8, Math.round(size))
-  const key = ballId + '@' + String(side)
-  const cached = textureCache.get(key)
+  if (side !== cachedSide) {
+    cachedSide = side
+    textureCache = new Map()
+  }
+
+  const cached = textureCache.get(ballId)
   if (cached) {
     return cached
   }
@@ -70,14 +79,8 @@ export function ballTexture(ballId: string, size: number): HTMLCanvasElement {
     paintBall(ctx, side, ballLookOf(ballId))
   }
 
-  textureCache.set(key, canvas)
+  textureCache.set(ballId, canvas)
   return canvas
-}
-
-// clearBallTextureCache 在 DPR 变化或主题改动时清空缓存。
-// 不清会一直持有旧尺寸的位图，长时间开关窗口会积累几十张没用的 canvas。
-export function clearBallTextureCache(): void {
-  textureCache.clear()
 }
 
 // paintBall 把一颗球画进正方形画布。分四层：底色、花色带、球面明暗、号码。

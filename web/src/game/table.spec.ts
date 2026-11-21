@@ -94,14 +94,26 @@ describe('八球摆球', () => {
     }
   })
 
-  it('8 号球在三角框中心，母球在开球线另一侧', () => {
+  it('8 号球在三角框中心，母球在开球线之后', () => {
     const eight = RACK_EIGHTBALL.find((b) => b.id === '8')
     const cue = RACK_EIGHTBALL.find((b) => b.id === 'cue')
     expect(eight).toBeDefined()
     expect(cue).toBeDefined()
+    // 8 号在第三排正中，比三角中心略靠远端。
     expect(eight!.x).toBeCloseTo(0.4953, 3)
-    expect(cue!.y).toBeLessThan(TABLE_LENGTH / 2)
-    expect(eight!.y).toBeGreaterThan(TABLE_LENGTH / 2)
+    expect(eight!.y).toBeGreaterThan(1.55)
+    expect(eight!.y).toBeLessThan(1.62)
+    // 开球线在世界 y = 1/4 长处，母球必须在线后（更靠近开球端）。
+    expect(cue!.y).toBeLessThan(TABLE_LENGTH * 0.25)
+  })
+
+  it('球堆整个落在台面远端那半边', () => {
+    for (const ball of RACK_EIGHTBALL) {
+      if (ball.id === 'cue') {
+        continue
+      }
+      expect(ball.y).toBeGreaterThan(TABLE_LENGTH * 0.7)
+    }
   })
 })
 

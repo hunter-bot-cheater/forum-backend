@@ -7,7 +7,7 @@ import {
   screenToWorld,
   worldToScreen,
 } from './geometry'
-import { CUSHION_WIDTH, TABLE_LENGTH, TABLE_WIDTH } from './table'
+import { CUSHION_WIDTH, RAIL_WIDTH, TABLE_LENGTH, TABLE_WIDTH } from './table'
 
 // 这层是所有绘制的公共分母，测的是三个不变量：
 // 等比（不拉伸）、居中（留白对称）、可逆（点回去还是原来的地方）。
@@ -86,10 +86,20 @@ describe('worldToScreen / screenToWorld', () => {
   const view = { width: 390, height: 844 }
   const t = fitTable(view, 8)
 
-  it('世界原点落在屏幕左下角，y 翻转后起点在下方', () => {
+  it('世界原点落在屏幕左下角，偏移含库边与木框', () => {
     const p = worldToScreen(t, 0, 0)
-    expect(p.x).toBeCloseTo(t.offsetX + CUSHION_WIDTH * t.scale, 9)
-    expect(p.y).toBeCloseTo(t.offsetY + (TABLE_LENGTH + CUSHION_WIDTH) * t.scale, 9)
+    const margin = CUSHION_WIDTH + RAIL_WIDTH
+    expect(p.x).toBeCloseTo(t.offsetX + margin * t.scale, 9)
+    expect(p.y).toBeCloseTo(t.offsetY + (TABLE_LENGTH + margin) * t.scale, 9)
+  })
+
+  it('木框右边缘正好落在右侧留白处，不会被裁掉', () => {
+    const pad = 12
+    const t = fitTable({ width: 390, height: 844 }, pad)
+    // 这条能抓住「缩放漏算木框」：漏掉 RAIL_WIDTH 时 scale 会偏大，
+    // 木框右边缘就会推到画布外，圆角被裁成直角。
+    const right = worldToScreen(t, TABLE_WIDTH + CUSHION_WIDTH + RAIL_WIDTH, 0).x
+    expect(right).toBeCloseTo(390 - pad, 6)
   })
 
   it('台面两个对角在屏幕上的跨度等于台面尺寸乘缩放', () => {

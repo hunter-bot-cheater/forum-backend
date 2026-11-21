@@ -1,18 +1,34 @@
 <template>
-  <div ref="host" class="pt">
+  <div
+    ref="host"
+    class="pt"
+    @pointerdown="onPointerDown"
+    @pointermove="onPointerMove"
+    @pointerup="onPointerUp"
+    @pointercancel="onPointerUp"
+  >
     <canvas ref="canvas" class="pt__canvas"></canvas>
   </div>
 </template>
 
 <script setup lang="ts">
 // 对局与练习共用的画布容器。只做三件事：跟住容器尺寸、按 DPR 配好位图、
-// 球位变了就重画一帧。几何与绘制都在 @/game 里，这里不掺业务逻辑。
+// 内容变了就重画一帧。几何与绘制都在 @/game 里，这里不掺业务逻辑。
+//
+// 指针拖动也只负责「换算成相对起点的位移」再抛给父级，
+// 具体是旋转瞄准还是拖动母球由页面决定：同一个画布以后还要支持手中球落位。
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { AimLayer } from '@/game/renderer'
 import { drawScene } from '@/game/renderer'
-import type { BallState } from '@/game/types'
+import type { BallState, PoolDrag } from '@/game/types'
 
 const props = defineProps<{
   balls: BallState[]
+  aim?: AimLayer | null
+}>()
+
+const emit = defineEmits<{
+  drag: [payload: PoolDrag]
 }>()
 
 const host = ref<HTMLDivElement | null>(null)
@@ -20,9 +36,17 @@ const canvas = ref<HTMLCanvasElement | null>(null)
 
 // ResizeObserver 只在浏览器里有，组件卸载时必须断开，否则容器被移除后回调仍会触发。
 let observer: ResizeObserver | null = null
-// 合帧句柄。球位一帧内可能变多次（动画播放时每帧都变），
-// 直接重画会把一帧的工作重复做几遍。
+// DPR 查询。把窗口从笔记本屏拖到外接屏时容器尺寸不变，ResizeObserver 不触发，
+// 但位图会停在旧倍率上变糊。matchMedia 能捕获这种变化。
+let dprQuery: MediaQueryList | null = null
+// 合帧句柄。拖动时球位与瞄准线一帧内可能改多次，直接重画会把工作重复做几遍。
 let frame = 0
+
+// 按下时的坐标与按下状态。pointermove 在鼠标没按下时也会触发，
+// 不判这个标志会把「鼠标划过」当成拖动，瞄准线会跟着光标乱转。
+let pressing = false
+let originX = 0
+let originY = 0
 
 // dprOf 读当前像素比并封顶到 3。
 // 4K 屏上 devicePixelRatio 能到 4，位图面积翻倍但肉眼已经看不出差别，
@@ -32,19 +56,22 @@ function dprOf(): number {
   return Math.min(Math.max(raw, 1), 3)
 }
 
-// syncSize 把位图尺寸对齐到「CSS 尺寸 × DPR」。
+// syncSize 把位图尺寸对齐到「CSS 尺寸 × DPR」，返回当前的 CSS 尺寸。
 //
 // canvas 有两套尺寸：style 上的 CSS 尺寸与 width/height 属性上的位图尺寸。
 // 只设 CSS 会让位图按默认 300×150 拉伸，画面糊成一片；
 // 只设属性又不会跟着容器走。两边都要同步。
-function syncSize(): boolean {
-  const el = canvas.value
-  if (!el) {
-    return false
+//
+// 容器在 display:none 或路由切换的瞬间尺寸是 0，这时返回 null 跳过这一帧，
+// 而不是把位图设成 0：0 宽的画布之后再往上画会被静默丢弃，且不报错。
+function syncSize(el: HTMLCanvasElement): { width: number; height: number } | null {
+  const cssWidth = el.clientWidth
+  const cssHeight = el.clientHeight
+  if (cssWidth <= 0 || cssHeight <= 0) {
+    return null
   }
+
   const dpr = dprOf()
-  const cssWidth = Math.max(1, el.clientWidth)
-  const cssHeight = Math.max(1, el.clientHeight)
   const bufWidth = Math.round(cssWidth * dpr)
   const bufHeight = Math.round(cssHeight * dpr)
 
@@ -52,14 +79,18 @@ function syncSize(): boolean {
     el.width = bufWidth
     el.height = bufHeight
   }
-  return true
+  return { width: cssWidth, height: cssHeight }
 }
 
 // paint 画一帧。ctx 先按 DPR 缩放，之后 drawScene 全程按 CSS 像素算，
 // 绘制代码里不用再关心屏幕是几倍图。
 function paint(): void {
   const el = canvas.value
-  if (!el || !syncSize()) {
+  if (!el) {
+    return
+  }
+  const size = syncSize(el)
+  if (!size) {
     return
   }
   const ctx = el.getContext('2d')
@@ -68,7 +99,7 @@ function paint(): void {
   }
   const dpr = dprOf()
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  drawScene(ctx, { width: el.clientWidth, height: el.clientHeight }, { balls: props.balls }, dpr)
+  drawScene(ctx, size, { balls: props.balls, aim: props.aim }, dpr)
 }
 
 // schedule 把多次重画请求压到下一帧，避免同一帧里画好几遍。
@@ -84,7 +115,61 @@ function schedule(): void {
 
 // 球位是数组里的对象，浅比较会在原地修改坐标时漏掉变化，所以用 deep。
 // 16 颗球的 deep 遍历成本远低于一次重绘，不值得为它写更细的脏检查。
-watch(() => props.balls, schedule, { deep: true })
+watch(() => [props.balls, props.aim], schedule, { deep: true })
+
+// onPointerDown 记录起点并捕获指针。
+// 捕获之后手指移出画布甚至移出窗口，move 与 up 仍然会回到这个元素，
+// 否则拖到屏幕边缘松开就会一直卡在「按下」状态。
+function onPointerDown(e: PointerEvent) {
+  if (e.pointerType === 'mouse' && e.button > 0) {
+    return
+  }
+  pressing = true
+  originX = e.clientX
+  originY = e.clientY
+  ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  emit('drag', { phase: 'start', dx: 0, dy: 0 })
+}
+
+// onPointerMove 只在按下之后上报，且始终带相对起点的累计位移。
+function onPointerMove(e: PointerEvent) {
+  if (!pressing) {
+    return
+  }
+  emit('drag', { phase: 'move', dx: e.clientX - originX, dy: e.clientY - originY })
+}
+
+// onPointerUp 结束拖动。用 pressing 兜底：某些浏览器在取消捕获后仍会补发一次 up。
+function onPointerUp(e: PointerEvent) {
+  if (!pressing) {
+    return
+  }
+  pressing = false
+  const target = e.currentTarget as HTMLElement
+  if (target.hasPointerCapture(e.pointerId)) {
+    target.releasePointerCapture(e.pointerId)
+  }
+  emit('drag', { phase: 'end', dx: e.clientX - originX, dy: e.clientY - originY })
+}
+
+// onDprChange 在像素比变化时重画，并重新注册一次查询。
+//
+// 注册一次 { once: true } 而不是常驻监听：dppx 是查询条件的一部分，
+// 倍率变了旧查询就永远不再匹配，必须用新的倍率重新建一个。
+function onDprChange(): void {
+  schedule()
+  watchDpr()
+}
+
+// watchDpr 按当前像素比建一个 matchMedia 查询。老浏览器没有 matchMedia 时跳过，
+// 代价只是「拖到外接屏后画面略糊」，刷新即恢复。
+function watchDpr(): void {
+  if (typeof window.matchMedia !== 'function') {
+    return
+  }
+  dprQuery = window.matchMedia('(resolution: ' + String(window.devicePixelRatio) + 'dppx)')
+  dprQuery.addEventListener('change', onDprChange, { once: true })
+}
 
 onMounted(() => {
   paint()
@@ -92,12 +177,17 @@ onMounted(() => {
     observer = new ResizeObserver(schedule)
     observer.observe(host.value)
   }
+  watchDpr()
 })
 
 onBeforeUnmount(() => {
   if (observer) {
     observer.disconnect()
     observer = null
+  }
+  if (dprQuery) {
+    dprQuery.removeEventListener('change', onDprChange)
+    dprQuery = null
   }
   if (frame) {
     cancelAnimationFrame(frame)

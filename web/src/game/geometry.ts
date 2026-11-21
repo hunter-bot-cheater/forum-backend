@@ -3,11 +3,17 @@
 // 所有绘制与命中判定都必须先过这一层。各画各的缩放是这类项目最常见的错位来源：
 // 台面按一种比例、球按另一种、点击又按第三种，窗口一缩放就会出现
 // 「球看着在袋口、点下去没反应」。统一从这里取 scale，别的地方不许自己乘。
-import { CUSHION_WIDTH, TABLE_LENGTH, TABLE_WIDTH } from './table'
+import { CUSHION_WIDTH, RAIL_WIDTH, TABLE_LENGTH, TABLE_WIDTH } from './table'
 
-// 台面加两侧库边的外沿尺寸，缩放按这个算，库边才不会被裁掉。
-export const TABLE_OUTER_WIDTH = TABLE_WIDTH + CUSHION_WIDTH * 2
-export const TABLE_OUTER_LENGTH = TABLE_LENGTH + CUSHION_WIDTH * 2
+// 从台面内沿到最外层木框边缘的距离。
+//
+// 缩放必须按这个算，不能只按库边算：木框画在库边之外，少算这一圈，
+// 木框的四个圆角就会顶出画布，被裁成直角。
+const MARGIN = CUSHION_WIDTH + RAIL_WIDTH
+
+// 台面加库边加木框的外沿尺寸。
+export const TABLE_OUTER_WIDTH = TABLE_WIDTH + MARGIN * 2
+export const TABLE_OUTER_LENGTH = TABLE_LENGTH + MARGIN * 2
 
 // Viewport 是可绘制区域的 CSS 像素尺寸，由外层容器给出，已扣掉 HUD 占位。
 export interface Viewport {
@@ -53,14 +59,14 @@ export function fitTable(view: Viewport, pad: number): ViewTransform {
 // worldToScreen 把台面上的点（米）换成画布上的点（CSS 像素）。
 //
 // 两处偏移都不是随便加的：
-//  1. 加 CUSHION_WIDTH 因为世界原点在台面内沿，而 offset 记的是外层库边的左上角。
+//  1. 加 MARGIN 因为世界原点在台面内沿，而 offset 记的是最外层木框的左上角。
 //  2. y 要翻转。pooltool 的 y 轴朝远端（y=0 是开球线那一端，y=1981mm 是摆球那一端），
 //     屏幕的 y 轴朝下。直接沿用会让母球（y≈0.46）画在屏幕上方、球堆画在下方，
 //     和玩家的视角正好相反——站在球台这一头看，母球永远在近处、在下面。
 export function worldToScreen(t: ViewTransform, x: number, y: number): Point {
   return {
-    x: t.offsetX + (x + CUSHION_WIDTH) * t.scale,
-    y: t.offsetY + (TABLE_LENGTH - y + CUSHION_WIDTH) * t.scale,
+    x: t.offsetX + (x + MARGIN) * t.scale,
+    y: t.offsetY + (TABLE_LENGTH - y + MARGIN) * t.scale,
   }
 }
 
@@ -69,8 +75,8 @@ export function worldToScreen(t: ViewTransform, x: number, y: number): Point {
 // 否则会出现「看着点在中袋、实际落在中袋另一侧」这种镜像错误。
 export function screenToWorld(t: ViewTransform, x: number, y: number): Point {
   return {
-    x: (x - t.offsetX) / t.scale - CUSHION_WIDTH,
-    y: TABLE_LENGTH - ((y - t.offsetY) / t.scale - CUSHION_WIDTH),
+    x: (x - t.offsetX) / t.scale - MARGIN,
+    y: TABLE_LENGTH - ((y - t.offsetY) / t.scale - MARGIN),
   }
 }
 
