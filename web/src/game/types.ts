@@ -1,0 +1,76 @@
+// 2D 台球的共享类型，与后端 internal/pool/handler/dto.go 的 JSON 字段一一对应。
+//
+// 前端不在这里做校验或补默认值：服务端是唯一权威，缺字段就是协议不一致，
+// 应该立刻在开发期暴露出来，而不是被一层「宽松解析」掩盖掉。
+
+// Seat 是席位号。0 是发起邀请的房主，1 是被邀请方。
+export type Seat = 0 | 1
+
+// BallGroup 是定组结果。开球后、首次合法进球之前两个人都是 undefined。
+export type BallGroup = 'solids' | 'stripes'
+
+// MatchStatus 与 pool_match.status 的取值一致。
+// waiting 是房间已建、还有一方没进；playing 才允许出杆。
+export type MatchStatus = 'waiting' | 'playing' | 'finished' | 'abandoned'
+
+// BallState 是一颗球在某一时刻的状态，单位米、z 为球心离台面高度。
+// on_table 为 false 的球已经落袋，渲染时要跳过。
+export interface BallState {
+  id: string
+  x: number
+  y: number
+  z: number
+  on_table: boolean
+}
+
+// ShotParams 是一次击球的六个参数，服务端只认这六个数。
+//
+// phi 是方位角（弧度，0 指向 +x），power 是 0~1 的力度，
+// theta 是杆头仰角（弧度），a / b 是击球点相对球心的偏移（-1~1）。
+// 手机与电脑算出的都是这六个浮点数，因此两端的物理结果必然一致。
+export interface ShotParams {
+  phi: number
+  power: number
+  theta: number
+  a: number
+  b: number
+}
+
+// PlayerBrief 是对局双方展示用的资料。avatar 可能是站内相对地址，
+// 也可能是空串（没上传过头像），渲染时交给头像工具兜底。
+export interface PlayerBrief {
+  user_id: number
+  nickname: string
+  avatar: string
+}
+
+// MatchSnapshot 是一次完整对局状态。进房、断线重连、观战收到的都是同一份，
+// 客户端拿到它就丢掉本地状态重建场景，不做增量合并。
+export interface MatchSnapshot {
+  match_id: number
+  room_code: string
+  status: MatchStatus
+  seat: Seat
+  turn: Seat
+  deadline_ms: number
+  balls: BallState[]
+  group: Partial<Record<Seat, BallGroup>>
+  // ready 是房间页的两个准备标记，对局开始后恒为 [true, true]。
+  // 能不能出杆只看 status 与 turn，不要拿它反推。
+  ready: [boolean, boolean]
+  ball_in_hand: boolean
+  shot_seq: number
+  players: PlayerBrief[]
+}
+
+// RoomSnapshot 是房间页轮询到的状态，比对局快照少一半字段。
+// 单独声明而不是复用 MatchSnapshot：房间页不该拿到球位，两个结构混用
+// 会让「房间页误读球位」这种 bug 有机会写出来。
+export interface RoomSnapshot {
+  match_id: number
+  room_code: string
+  status: MatchStatus
+  seat: Seat
+  ready: [boolean, boolean]
+  players: PlayerBrief[]
+}
