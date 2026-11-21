@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -566,36 +567,66 @@ func (h *Handler) Replay(c *gin.Context) {
 // Live 处理 GET /api/pool/live。
 func (h *Handler) Live(c *gin.Context) {
 	matches := h.manager.List()
+	if len(matches) == 0 {
+		response.OK(c, []liveMatchResp{})
+		return
+	}
+
+	// 并发问每一局，每局只给 300ms。
+	//
+	// 串行问的话，只要有一局正在算杆（物理调用把 actor 占住一两秒），
+	// 它后面的所有对局都要排队等它算完，而这个列表每十秒拉一次。
+	// 某一局超时就不列它，下一轮自然会回来——比让整页卡住好。
+	const budget = 300 * time.Millisecond
+	snapshots := make([]liveSnapshot, len(matches))
+	var wait sync.WaitGroup
+	for index, match := range matches {
+		wait.Add(1)
+		go func(index int, match *Match) {
+			defer wait.Done()
+			snapshot, ok := match.SnapshotWithin(SeatSpectator, budget)
+			if !ok {
+				return
+			}
+			snapshots[index] = liveSnapshot{
+				snapshot:   snapshot,
+				spectators: match.SpectatorCount(),
+				ok:         true,
+			}
+		}(index, match)
+	}
+	wait.Wait()
+
 	list := make([]liveMatchResp, 0, len(matches))
-
-	for _, match := range matches {
-		// 用观战视角取快照：它与玩家视角只差一个 seat，其余字段一样。
-		snapshot, err := match.Snapshot(SeatSpectator)
-		if err != nil {
-			// 这一局刚好被回收：跳过，不能让一条对不上号的记录拖垮整页。
+	for _, item := range snapshots {
+		if !item.ok || item.snapshot.Status != model.PoolStatusPlaying {
 			continue
 		}
-		if snapshot.Status != model.PoolStatusPlaying {
-			continue
-		}
-
-		item := liveMatchResp{
-			MatchID:       snapshot.MatchID,
-			Status:        snapshot.Status,
-			Turn:          snapshot.Turn,
-			ShotSeq:       snapshot.ShotSeq,
-			Spectators:    match.SpectatorCount(),
+		entry := liveMatchResp{
+			MatchID:       item.snapshot.MatchID,
+			Status:        item.snapshot.Status,
+			Turn:          item.snapshot.Turn,
+			ShotSeq:       item.snapshot.ShotSeq,
+			Spectators:    item.spectators,
 			SpectatorsMax: maxSpectators,
 		}
 		for seat := Seat0; seat <= Seat1; seat++ {
-			item.Players[seat] = toPlayerResp(snapshot.Players[seat])
+			entry.Players[seat] = toPlayerResp(item.snapshot.Players[seat])
 		}
-		list = append(list, item)
+		list = append(list, entry)
 	}
 
 	// 新开的局排前面：观战的人多半想看刚开始的，中途进去看不懂局面。
 	sort.Slice(list, func(i, j int) bool { return list[i].MatchID > list[j].MatchID })
 	response.OK(c, list)
+}
+
+// liveSnapshot 是观战列表里一局的取数结果。
+// ok 为 false 表示这一轮没取到（actor 正忙或已回收），这一局本轮不列出来。
+type liveSnapshot struct {
+	snapshot   Snapshot
+	spectators int
+	ok         bool
 }
 
 // pageParams 读分页参数，非法值一律退回默认，不报错。

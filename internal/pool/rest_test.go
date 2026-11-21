@@ -102,6 +102,98 @@ func decodeData(t *testing.T, body []byte, target any) {
 	}
 }
 
+// blockingSim 会一直卡在 Shoot 里，直到用例放行。
+// 用来模拟「这一局正在算杆」——actor 此时被占住，快照请求只能排队。
+type blockingSim struct {
+	release chan struct{}
+}
+
+func (b *blockingSim) Shoot(context.Context, sim.Request) (*sim.Shot, error) {
+	<-b.release
+	return quietShot(), nil
+}
+
+// 有一局正在算杆时，观战列表不能被它拖住。
+//
+// 串行取快照的话，这一局算一秒，后面的每一局都要等一秒；
+// 五十局就是五十秒，而这个列表每十秒拉一次。现在每局各给 300ms，
+// 忙的那一局这一轮不列出来，其余的照常返回。
+func TestLiveDoesNotWaitForBusyMatch(t *testing.T) {
+	db := testutil.NewDB(t)
+	release := make(chan struct{})
+	manager, err := NewManager(Options{Sim: &blockingSim{release: release}, TurnTimeout: time.Minute})
+	if err != nil {
+		t.Fatalf("构造 manager 失败：%v", err)
+	}
+	t.Cleanup(manager.CloseAll)
+
+	busy := manager.Create(newMatchState(401, "400001", [2]PlayerBrief{{UserID: 21}, {UserID: 22}}))
+	if err := busy.Join(Seat0, &fakeConn{}); err != nil {
+		t.Fatalf("进房失败：%v", err)
+	}
+	idle := manager.Create(newMatchState(402, "400002", [2]PlayerBrief{{UserID: 23}, {UserID: 24}}))
+	if err := idle.Join(Seat0, &fakeConn{}); err != nil {
+		t.Fatalf("进房失败：%v", err)
+	}
+
+	// 让 401 这一局的 actor 卡在 Shoot 里。
+	shotDone := make(chan struct{})
+	go func() {
+		defer close(shotDone)
+		_ = busy.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 1)
+	}()
+	// 等到快照真的取不到，说明 actor 已经进去了（不是还在排队）。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := busy.SnapshotWithin(SeatSpectator, 20*time.Millisecond); !ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	engine := newRestEngine(t, db, manager, nil)
+	startedAt := time.Now()
+
+	// 在协程里发请求：串行取快照的实现会让这条请求一直等下去，
+	// 直接调用的话用例会挂到包级超时，看不出是哪一步卡了。
+	type answer struct {
+		status int
+		body   []byte
+	}
+	done := make(chan answer, 1)
+	go func() {
+		status, body := do(t, engine, "/api/pool/live", 0)
+		done <- answer{status: status, body: body}
+	}()
+
+	var reply answer
+	select {
+	case reply = <-done:
+	case <-time.After(1500 * time.Millisecond):
+		// 先把卡住的那一杆放行，否则 Cleanup 里关对局也会被它挡住。
+		close(release)
+		<-shotDone
+		t.Fatal("观战列表被正在算杆的那一局拖住了")
+	}
+	elapsed := time.Since(startedAt)
+
+	if reply.status != http.StatusOK {
+		t.Fatalf("状态码 = %d：%s", reply.status, reply.body)
+	}
+	if elapsed > 1500*time.Millisecond {
+		t.Errorf("观战列表耗时 %v，被忙的那一局拖住了", elapsed)
+	}
+
+	var list []liveMatchResp
+	decodeData(t, reply.body, &list)
+	if len(list) != 1 || list[0].MatchID != 402 {
+		t.Fatalf("应当只列出空闲的那一局，实际 %+v", list)
+	}
+
+	close(release)
+	<-shotDone
+}
+
 // 观战列表只列正在打的对局，房间与已结束的都不出现。
 //
 // 房间列进去没有意义（还没开打，进去只能看着两个头像）；
