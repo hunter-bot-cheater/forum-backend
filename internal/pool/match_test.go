@@ -440,6 +440,29 @@ func TestDisconnectOfOldConnKeepsNewOne(t *testing.T) {
 	}
 }
 
+// 旧连接的断线回调晚到，不能让对手看到「他掉线了」。
+//
+// 重连之后旧回调才来是常态（close 是异步的）。照样发一条 peer offline，
+// 对方会一直挂着「对手掉线」的提示，直到下一次有人进出房间才被覆盖——
+// 而那期间他其实正坐在对面。
+func TestStaleDisconnectDoesNotAnnounceOffline(t *testing.T) {
+	match, conn0, conn1 := newTestMatch(t, &fakeSim{shot: quietShot()})
+
+	fresh := &fakeConn{}
+	if err := match.Join(Seat0, fresh); err != nil {
+		t.Fatalf("重连失败：%v", err)
+	}
+	before := len(conn1.types())
+
+	if err := match.NotifyDisconnect(Seat0, conn0); err != nil {
+		t.Fatalf("断线通知失败：%v", err)
+	}
+
+	if len(conn1.types()) != before {
+		t.Errorf("对手收到了消息：%v", conn1.types())
+	}
+}
+
 // 主动退出判负。
 func TestLeaveLosesTheMatch(t *testing.T) {
 	match, conn0, _ := newTestMatch(t, &fakeSim{shot: quietShot()})

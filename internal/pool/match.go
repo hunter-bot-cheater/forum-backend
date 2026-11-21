@@ -255,6 +255,34 @@ func (m *Match) Snapshot(viewer Seat) (Snapshot, error) {
 	}
 }
 
+// SnapshotWithin 取一份快照，超时就放弃。
+//
+// 给观战列表这种「一次问几十局、但不能被某一局拖住」的场景用：
+// 一局正在算杆时 actor 是阻塞的（物理调用在协程里），串行问五十局
+// 就可能变成几十秒，而那个列表每十秒就要拉一次。
+// 超时的那一局这一轮先不列出来，下一轮自然会回来。
+//
+// reply 带缓冲，所以超时之后 actor 再回话也不会把它卡住。
+func (m *Match) SnapshotWithin(viewer Seat, timeout time.Duration) (Snapshot, bool) {
+	reply := make(chan Snapshot, 1)
+	select {
+	case m.cmd <- command{kind: cmdSnapshot, seat: viewer, state: reply}:
+	case <-m.done:
+		return Snapshot{}, false
+	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case snapshot := <-reply:
+		return snapshot, true
+	case <-timer.C:
+		return Snapshot{}, false
+	case <-m.done:
+		return Snapshot{}, false
+	}
+}
+
 // Close 停掉 actor 并断开所有连接。
 func (m *Match) Close() {
 	m.closeOnce.Do(func() {
@@ -618,6 +646,11 @@ func (m *Match) handleReady(cmd command) error {
 }
 
 // handleDisconnect 处理掉线：摘掉连接并通知对手。
+//
+// 通知对手这一步必须跟着「真的摘掉了」一起做：
+// 重连之后旧连接的回调才姗姗来迟时，若照样发一条 offline，
+// 双方会看到「对手掉线了」而对手其实正坐在对面——这一条会一直挂着，
+// 直到下一次有人进出房间才被覆盖。
 func (m *Match) handleDisconnect(cmd command) error {
 	// 观战者走了跟对局无关：既不判负，也不用通知玩家。
 	// 观战名单里全是连接，靠 cmd.seat 分不出来是哪一位，只能按连接身份摘。
@@ -627,10 +660,12 @@ func (m *Match) handleDisconnect(cmd command) error {
 	}
 
 	// 只摘掉还登记着的这条：玩家可能已经用新连接重连上来，
-	// 旧连接的退出回调晚到一步，不能把新连接一起清掉。
-	if m.conns[cmd.seat] == cmd.conn {
-		m.conns[cmd.seat] = nil
+	// 旧连接的退出回调晚到一步，不能把新连接一起清掉，也不该说成对手掉线。
+	if m.conns[cmd.seat] != cmd.conn {
+		return nil
 	}
+	m.conns[cmd.seat] = nil
+
 	if peer := m.conns[cmd.seat.Other()]; peer != nil {
 		peer.Send(m.wrap(MsgPeer, PeerData{Event: PeerOffline, Seat: cmd.seat}))
 	}
@@ -760,13 +795,6 @@ func (m *Match) broadcastState() {
 	spectatorView := m.wrap(MsgState, m.state.snapshot(SeatSpectator, time.Now()))
 	for _, conn := range m.spectators {
 		conn.Send(spectatorView)
-	}
-}
-
-// sendTo 只发给某一个座位。错误提示不该让对手看见。
-func (m *Match) sendTo(seat Seat, msg Message) {
-	if conn := m.conns[seat]; conn != nil {
-		conn.Send(msg)
 	}
 }
 

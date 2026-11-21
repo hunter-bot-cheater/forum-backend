@@ -169,6 +169,76 @@ func TestSpectatorCannotShoot(t *testing.T) {
 	}
 }
 
+// 观战者也要收到结算帧，否则观战页打完停在「轮到某人」上。
+func TestWatchReceivesResult(t *testing.T) {
+	match, _, _ := newTestMatch(t, &fakeSim{shot: quietShot()})
+
+	watcher := &fakeConn{}
+	if err := match.Watch(watcher); err != nil {
+		t.Fatalf("观战进房失败：%v", err)
+	}
+
+	if err := match.Leave(Seat0); err != nil {
+		t.Fatalf("退出失败：%v", err)
+	}
+
+	result, ok := watcher.last(MsgResult)
+	if !ok {
+		t.Fatal("观战者没收到结算")
+	}
+	if result.Data.(ResultData).Winner != Seat1 {
+		t.Errorf("赢家 = %d，期望 1", result.Data.(ResultData).Winner)
+	}
+}
+
+// 观战者断线不惊动玩家：玩家那条连接上的 peer 表示「对手掉线了」。
+func TestSpectatorDisconnectDoesNotNotifyPlayers(t *testing.T) {
+	match, conn0, conn1 := newTestMatch(t, &fakeSim{shot: quietShot()})
+
+	watcher := &fakeConn{}
+	if err := match.Watch(watcher); err != nil {
+		t.Fatalf("观战进房失败：%v", err)
+	}
+	before0 := len(conn0.types())
+	before1 := len(conn1.types())
+
+	if err := match.NotifyDisconnect(SeatSpectator, watcher); err != nil {
+		t.Fatalf("观战断线处理失败：%v", err)
+	}
+
+	if len(conn0.types()) != before0 || len(conn1.types()) != before1 {
+		t.Errorf("观战者离开让玩家收到了消息：座位0 %v，座位1 %v", conn0.types(), conn1.types())
+	}
+}
+
+// 对局关闭时要把观战连接一起关掉，否则那些连接会一直挂到读超时。
+func TestShutdownClosesSpectators(t *testing.T) {
+	match, _, _ := newTestMatch(t, &fakeSim{shot: quietShot()})
+
+	watcher := &fakeConn{}
+	if err := match.Watch(watcher); err != nil {
+		t.Fatalf("观战进房失败：%v", err)
+	}
+
+	match.Close()
+	// Close 只是投递命令，actor 退出是异步的。
+	select {
+	case <-match.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("对局没有在 2 秒内关掉")
+	}
+
+	watcher.mu.Lock()
+	closed := watcher.closed
+	watcher.mu.Unlock()
+	if !closed {
+		t.Fatal("对局关闭后观战连接没被关掉")
+	}
+	if count := match.SpectatorCount(); count != 0 {
+		t.Errorf("关闭后观战人数 = %d，期望 0", count)
+	}
+}
+
 // 观战不进房、不算准备：只有观战者时对局仍然停在房间阶段。
 //
 // 准备状态是按座位记的，观战者没有座位，理论上碰不到；
