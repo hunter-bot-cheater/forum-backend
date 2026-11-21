@@ -499,8 +499,12 @@ func (h *Handler) Replay(c *gin.Context) {
 		return
 	}
 
-	// 不在这一局里的人不给看：回放里有双方的完整对局过程，
-	// 第一版不做观战，也就不该从这里漏出去。
+	// 不在这一局里的人不给看。
+	//
+	// 观战是开放的，回放却只给当事人：两者的入口不同——
+	// 观战从「正在进行的对局」进，回放只从「我的战绩」进。
+	// 前端没有第二个入口，接口这边就按当事人限定，免得对局 id 可枚举之后
+	// 有人把别人的历史对局一条条翻出来。
 	if _, ok := seatInMatch(match, userID); !ok {
 		response.Error(c, http.StatusForbidden, "你不在这一局里")
 		return
