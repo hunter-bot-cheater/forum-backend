@@ -2121,6 +2121,52 @@ const docTemplate = `{
                 }
             }
         },
+        "/pool/live": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": []
+                    }
+                ],
+                "description": "观战入口用。只列内存里正在打的对局，房间与已结束的不出现。",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "pool"
+                ],
+                "summary": "正在进行的对局",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/definitions/httputil.SwaggerEnvelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "type": "array",
+                                            "items": {
+                                                "$ref": "#/definitions/pool.liveMatchResp"
+                                            }
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "401": {
+                        "description": "未登录",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/pool/matches/{id}/replay": {
             "get": {
                 "security": [
@@ -3807,11 +3853,13 @@ const docTemplate = `{
             "type": "integer",
             "enum": [
                 0,
-                1
+                1,
+                -1
             ],
             "x-enum-varnames": [
                 "Seat0",
-                "Seat1"
+                "Seat1",
+                "SeatSpectator"
             ]
         },
         "pool.acceptInviteResp": {
@@ -3850,6 +3898,35 @@ const docTemplate = `{
                 },
                 "room_code": {
                     "type": "string"
+                }
+            }
+        },
+        "pool.liveMatchResp": {
+            "type": "object",
+            "properties": {
+                "match_id": {
+                    "type": "integer"
+                },
+                "players": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/pool.playerResp"
+                    }
+                },
+                "shot_seq": {
+                    "type": "integer"
+                },
+                "spectators": {
+                    "type": "integer"
+                },
+                "spectators_max": {
+                    "type": "integer"
+                },
+                "status": {
+                    "type": "string"
+                },
+                "turn": {
+                    "$ref": "#/definitions/pool.Seat"
                 }
             }
         },

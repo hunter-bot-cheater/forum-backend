@@ -547,10 +547,12 @@ definitions:
     enum:
     - 0
     - 1
+    - -1
     type: integer
     x-enum-varnames:
     - Seat0
     - Seat1
+    - SeatSpectator
   pool.acceptInviteResp:
     properties:
       match_id:
@@ -575,6 +577,25 @@ definitions:
         type: integer
       room_code:
         type: string
+    type: object
+  pool.liveMatchResp:
+    properties:
+      match_id:
+        type: integer
+      players:
+        items:
+          $ref: '#/definitions/pool.playerResp'
+        type: array
+      shot_seq:
+        type: integer
+      spectators:
+        type: integer
+      spectators_max:
+        type: integer
+      status:
+        type: string
+      turn:
+        $ref: '#/definitions/pool.Seat'
     type: object
   pool.pendingInviteResp:
     properties:
@@ -2193,6 +2214,32 @@ paths:
       security:
       - Bearer: []
       summary: 我收到的待处理邀请
+      tags:
+      - pool
+  /pool/live:
+    get:
+      description: 观战入口用。只列内存里正在打的对局，房间与已结束的不出现。
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            allOf:
+            - $ref: '#/definitions/httputil.SwaggerEnvelope'
+            - properties:
+                data:
+                  items:
+                    $ref: '#/definitions/pool.liveMatchResp'
+                  type: array
+              type: object
+        "401":
+          description: 未登录
+          schema:
+            type: string
+      security:
+      - Bearer: []
+      summary: 正在进行的对局
       tags:
       - pool
   /pool/matches/{id}/replay:
