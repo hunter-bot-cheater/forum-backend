@@ -114,7 +114,15 @@ import {
 import type { AimLayer } from '@/game/renderer'
 import { remainingOf } from '@/game/score'
 import { BALL_RADIUS, TABLE_LENGTH, TABLE_WIDTH } from '@/game/table'
-import type { BallState, MatchSnapshot, PoolDrag, Seat, ShotParams } from '@/game/types'
+import type {
+  BallState,
+  MatchSnapshot,
+  PoolDrag,
+  Seat,
+  ShotParams,
+  Viewer,
+} from '@/game/types'
+import { SEAT_SPECTATOR } from '@/game/types'
 import { getToken } from '@/utils/auth'
 import { usePoolStore } from '@/store/modules/pool'
 
@@ -284,6 +292,18 @@ const aim = computed<AimLayer | null>(() => {
 
 // ===== 与服务端的交互 =====
 
+// seatOfViewer 把协议里的「看的人坐哪」收窄成座位。
+//
+// 对局页只服务两个座位：观战快照（-1）本该出现在观战页。真收到了说明
+// 走错了入口，返回 null 让调用方跳过这次赋值——把它当成座位 0 的话，
+// 界面会把左边的球当成「我的球」，看着像坐错了位置。
+function seatOfViewer(viewer: Viewer): Seat | null {
+  if (viewer === SEAT_SPECTATOR) {
+    return null
+  }
+  return viewer
+}
+
 // applySnapshot 用服务端快照重建本地场景。
 //
 // 整份替换而不是增量合并：进房与重连拿到的都是完整状态，
@@ -291,7 +311,10 @@ const aim = computed<AimLayer | null>(() => {
 function applySnapshot(snap: MatchSnapshot, deadline: number) {
   const first = snapshot.value === null
   snapshot.value = snap
-  mySeat.value = snap.seat
+  const seat = seatOfViewer(snap.seat)
+  if (seat !== null) {
+    mySeat.value = seat
+  }
   turn.value = snap.turn
   deadlineAt.value = deadline
   // 快照回来了说明落位请求已经有结论（成功会带新球位，失败会有错误帧），
@@ -330,7 +353,10 @@ function onMessage(msg: DownMessage) {
     return
   }
   if (msg.type === 'joined') {
-    mySeat.value = msg.data.seat
+    const seat = seatOfViewer(msg.data.seat)
+    if (seat !== null) {
+      mySeat.value = seat
+    }
     return
   }
   if (msg.type === 'state') {

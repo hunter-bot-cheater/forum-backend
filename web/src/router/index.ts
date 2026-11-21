@@ -149,6 +149,15 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '对局回放' },
     props: true,
   },
+  {
+    // 观战页：也是全屏球台。与对局页分开一条路由而不是复用它，
+    // 因为「能不能操作」决定了整个页面的形态，混在一起每处判断都要多一个分支。
+    path: '/pool/watch/:id',
+    name: 'PoolWatch',
+    component: () => import('@/views/pool/watch.vue'),
+    meta: { title: '观战' },
+    props: true,
+  },
   { path: '/:pathMatch(.*)*', redirect: '/articles' },
 ]
 

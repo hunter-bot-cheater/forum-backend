@@ -1,5 +1,5 @@
 import request from '@/utils/request'
-import type { PlayerBrief, RoomSnapshot, Seat } from '@/game/types'
+import type { MatchStatus, PlayerBrief, RoomSnapshot, Seat } from '@/game/types'
 import type { ShotFrame } from '@/game/animator'
 
 // 本文件是后端 internal/pool/dto.go 的镜像，字段名保持 snake_case。
@@ -158,6 +158,30 @@ export function getRecords(page = 1, size = 10) {
 export function getReplay(matchId: number | string) {
   return request<ReplayResp>({
     url: '/pool/matches/' + String(matchId) + '/replay',
+    method: 'get',
+  })
+}
+
+// LiveMatch 是观战列表里的一条。
+//
+// 只有「要不要点进去看」需要的信息：谁在打、打到第几杆、还有没有位置。
+// 球位不在这里：那是点进去之后由 WebSocket 快照给的，
+// 列表每次都拖着十六颗球的坐标没有意义，还会让人以为列表是实时的。
+export interface LiveMatch {
+  match_id: number
+  status: MatchStatus
+  turn: Seat
+  // players 是定长两项，两个座位按先后顺序固定，前端不做左右翻转。
+  players: [PlayerBrief, PlayerBrief]
+  shot_seq: number
+  spectators: number
+  spectators_max: number
+}
+
+// getLive 拉正在进行的对局。返回的是内存里的对局，已结束的立刻消失。
+export function getLiveMatches() {
+  return request<LiveMatch[]>({
+    url: '/pool/live',
     method: 'get',
   })
 }

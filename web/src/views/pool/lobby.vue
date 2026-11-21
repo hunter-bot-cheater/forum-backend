@@ -21,6 +21,36 @@
       </div>
     </section>
 
+    <!-- 正在进行的对局。没有人在打时整块不出现：
+         一块永远空着的「现在没有对局」比不显示更占地方。 -->
+    <section v-if="live.length > 0" class="pl__panel">
+      <div class="pl__panel-head">
+        <h2 class="pl__panel-title">正在进行的对局</h2>
+        <span class="pl__panel-count">{{ live.length }} 场</span>
+      </div>
+
+      <ul class="pl__list">
+        <li v-for="item in live" :key="item.match_id" class="pl__row">
+          <div class="pl__who">
+            <span class="pl__name">{{ nameOfPlayer(item, 0) }} vs {{ nameOfPlayer(item, 1) }}</span>
+            <span class="pl__handle">
+              第 {{ item.shot_seq }} 杆 · {{ item.spectators }}/{{ item.spectators_max }} 人在看
+            </span>
+          </div>
+          <!-- 名额满了就摆一个不可点的「已满」，而不是让链接把人送进
+               一个必然被 409 拒掉的观战页。 -->
+          <router-link
+            v-if="item.spectators < item.spectators_max"
+            class="pl__watch"
+            :to="'/pool/watch/' + String(item.match_id)"
+          >
+            观战
+          </router-link>
+          <span v-else class="pl__watch is-full">已满</span>
+        </li>
+      </ul>
+    </section>
+
     <section class="pl__panel">
       <div class="pl__panel-head">
         <h2 class="pl__panel-title">我关注的人</h2>
@@ -80,6 +110,7 @@
 // 只列关注的人，不做全站搜索匹配：约球需要一个对方也在场的对话语境，
 // 随机匹配要做排队、超时、段位，那是另一套系统。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { getLiveMatches, type LiveMatch } from '@/api/pool'
 import { listFollows, type FollowItem } from '@/api/user'
 import { usePoolStore } from '@/store/modules/pool'
 import { useUserStore } from '@/store/modules/user'
@@ -98,6 +129,35 @@ const loadFailed = ref(false)
 
 // busyId 是正在发送邀请的那个人的 id，用来只禁用一行而不是整张列表。
 const busyId = ref(0)
+
+// live 是正在进行的对局，观战入口用它。
+const live = ref<LiveMatch[]>([])
+// liveTimer 每 10 秒刷新一次：对局几秒就换一杆，但观战列表只是
+// 「现在有谁在打」，晚十秒知道不影响任何事，反而省下大量请求。
+let liveTimer: ReturnType<typeof setInterval> | null = null
+
+// LIVE_POLL_MS 取得比一杆（约 20 秒）小一档：
+// 一局打完就立刻从列表里消失，不至于点进去发现「对局已结束」。
+const LIVE_POLL_MS = 10 * 1000
+
+// loadLive 拉一次观战列表。失败就保持上一次的内容：
+// 这是一块附加区域，为它显示一条错误提示比不显示更打扰。
+async function loadLive() {
+  try {
+    live.value = await getLiveMatches()
+  } catch {
+    // 拦截器已提示；保留上一份列表。
+  }
+}
+
+// nameOfPlayer 取某一侧昵称，没有资料时说「玩家 1 / 玩家 2」。
+function nameOfPlayer(item: LiveMatch, seat: 0 | 1): string {
+  const player = item.players[seat]
+  if (!player || !player.nickname) {
+    return '玩家 ' + String(seat + 1)
+  }
+  return player.nickname
+}
 
 const outgoing = computed(() => pool.outgoing)
 
@@ -257,9 +317,21 @@ onMounted(() => {
   // 进大厅顺手补拉一次待接受邀请：万一推送在页面还没挂载时就到了，这里能捞回来。
   // 关注列表不在这里拉，交给上面的 watch：它要等 userId 到位。
   void pool.refresh()
+
+  // 观战列表先拉一次再起表：不先拉的话首屏要空等十秒才出现。
+  void loadLive()
+  liveTimer = setInterval(() => {
+    void loadLive()
+  }, LIVE_POLL_MS)
 })
 
-onBeforeUnmount(stopWaitTimer)
+onBeforeUnmount(() => {
+  stopWaitTimer()
+  if (liveTimer) {
+    clearInterval(liveTimer)
+    liveTimer = null
+  }
+})
 </script>
 
 <style scoped>
@@ -301,6 +373,26 @@ onBeforeUnmount(stopWaitTimer)
   text-decoration: none;
   border: 1px solid var(--fs-line);
   border-radius: var(--fs-radius-sm);
+}
+
+/* 观战入口做成实心小按钮：同一块面板里「邀请」是主动作，
+   而「观战」是看一眼别人的对局，属于次要动作。 */
+.pl__watch {
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+  line-height: 28px;
+  color: #fff;
+  text-decoration: none;
+  background: var(--fs-primary);
+  border-radius: var(--fs-radius-sm);
+}
+
+/* 名额满了：与按钮同尺寸，但不可点也不像按钮。 */
+.pl__watch.is-full {
+  color: var(--fs-text-3);
+  background: var(--fs-line-soft);
 }
 
 .pl__waiting {

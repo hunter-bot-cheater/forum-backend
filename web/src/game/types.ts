@@ -6,6 +6,15 @@
 // Seat 是席位号。0 是发起邀请的房主，1 是被邀请方。
 export type Seat = 0 | 1
 
+// 观战者不占座位，协议里用 -1 表示。
+//
+// 单独抽一个常量而不是到处写 -1：观战页与对局页都要靠它判断
+// 「这份快照里有没有'我'」，写错一个数字就会把观战者当成座位 0。
+export const SEAT_SPECTATOR = -1
+
+// Viewer 是「看的人在哪个位置」：某一方，或者观战。
+export type Viewer = Seat | typeof SEAT_SPECTATOR
+
 // BallGroup 是定组结果。
 //
 // 未定组在协议里是**空串**，不是 'none'：后端 GroupNone 用的是 Go 零值，
@@ -63,7 +72,9 @@ export interface MatchSnapshot {
   match_id: number
   room_code: string
   status: MatchStatus
-  seat: Seat
+  // seat 是「看的人坐哪」。观战时是 SEAT_SPECTATOR(-1)：
+  // 观战页据此知道没有「我」这一侧，绝不能用它去下标 players / group。
+  seat: Viewer
   turn: Seat
   deadline_ms: number
   balls: BallState[]

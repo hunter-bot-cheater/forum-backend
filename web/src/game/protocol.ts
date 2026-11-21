@@ -1,4 +1,4 @@
-import type { MatchSnapshot, Seat, ShotParams } from './types'
+import type { MatchSnapshot, Seat, ShotParams, Viewer } from './types'
 import type { ShotFrame } from './animator'
 import { wsURL } from '@/utils/ws'
 
@@ -18,7 +18,9 @@ import { wsURL } from '@/utils/ws'
 export interface JoinedData {
   match_id: number
   room_code: string
-  seat: Seat
+  // seat 是 Viewer 而不是 Seat：观战进房时服务端给 -1，
+  // 对局页拿它当座位用之前必须先收窄（见 match.vue 的 seatOfViewer）。
+  seat: Viewer
   practice: boolean
 }
 
