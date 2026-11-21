@@ -14,12 +14,12 @@
         <span v-if="isMe" class="sc__me">你</span>
         <!-- 剩余颗数是这一栏最重要的数字：判断「再进两颗就到我打黑八」
              靠的就是它，比一排小球点更快读。 -->
-        <span v-if="group !== 'none'" class="sc__count">{{ remaining.length }}</span>
+        <span v-if="assigned" class="sc__count">{{ remaining.length }}</span>
       </div>
 
       <!-- 球点用真实球色，花色球画成白底加一圈色环：
            光看数字要在 1~15 里找，带颜色一眼就能分出全色与花色。 -->
-      <div v-if="group === 'none'" class="sc__group">{{ groupLabel(group) }}</div>
+      <div v-if="!assigned" class="sc__group">{{ groupLabel(group) }}</div>
       <div v-else class="sc__dots">
         <span
           v-for="id in remaining"
@@ -43,7 +43,7 @@
 // 这样「谁该打」只有对局页一个判断源，卡片不会自己算出第二套结论。
 import { computed } from 'vue'
 import { ballLookOf } from '@/game/balls'
-import { groupLabel } from '@/game/score'
+import { groupLabel, hasGroup } from '@/game/score'
 import type { BallGroup, PlayerBrief } from '@/game/types'
 import { avatarColor } from '@/utils/avatar'
 import { initials } from '@/utils/format'
@@ -58,6 +58,11 @@ const props = defineProps<{
   active: boolean
   isMe: boolean
 }>()
+
+// assigned 表示这一侧已经定组。
+// 「清完自己组」与「还没定组」的 remaining 都是空数组，
+// 靠组别区分：前者该提示打黑八，后者什么都不该显示。
+const assigned = computed(() => hasGroup(props.group))
 
 const initial = computed(() => {
   if (!props.player.nickname) {

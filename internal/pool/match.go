@@ -409,6 +409,17 @@ func (m *Match) handleShoot(cmd command) error {
 		}))
 	}
 
+	// 再补一份完整快照。
+	//
+	// 上面那几条帧只带增量：shot 有轨迹，foul 有文案，turn 有读秒，
+	// 都不含「定组结果」与「手中球」这两项。少了这份快照，
+	// 前端在第一次进球之后仍然显示「未定组」，犯了规也拿不到 ball_in_hand，
+	// 于是没法落位母球，只能反复出杆被服务端拒掉——对局就卡死在这里。
+	//
+	// 前端在动画播放期间会把这条快照压住，播完再应用（见 match.vue 的缓冲队列）：
+	// 直接应用会把球瞬移到终局位置，看起来像跳帧。
+	m.broadcastState()
+
 	// 落库失败不影响对局继续：玩家已经在打下一杆了，
 	// 这里只记日志，回放缺一杆比当场卡住轻得多。
 	if err := m.opts.Recorder.SaveShot(context.Background(), ShotRecord{

@@ -71,12 +71,12 @@ function last(ws: FakeWS): { type: string; seq: number; data: Record<string, unk
 }
 
 // newSocket 建一个带记录回调的连接。
-function newSocket() {
+function newSocket(tokenValue = 'tok') {
   const messages: DownMessage[] = []
   const states: string[] = []
   const socket = new GameSocket({
     matchId: 42,
-    token: 'tok',
+    token: () => tokenValue,
     onMessage: (msg) => messages.push(msg),
     onState: (state) => states.push(state),
   })
@@ -232,6 +232,43 @@ describe('GameSocket', () => {
       vi.advanceTimersByTime(20000)
     }
 
+    expect(states[states.length - 1]).toBe('gaveup')
+  })
+
+  it('重连时重新取一次 token，不沿用建连时那个', () => {
+    vi.useFakeTimers()
+    // 第一次用旧 token，之后换成新的：真实场景是 access 过期后被刷新换掉了。
+    let current = 'old'
+    const states: string[] = []
+    const socket = new GameSocket({
+      matchId: 42,
+      token: () => current,
+      onMessage: () => {},
+      onState: (state) => states.push(state),
+    })
+    socket.connect()
+    expect(FakeWS.instances[0].url).toContain('token=old')
+
+    FakeWS.instances[0].open()
+    current = 'new'
+    FakeWS.instances[0].serverClose()
+    vi.advanceTimersByTime(2000)
+
+    expect(FakeWS.instances).toHaveLength(2)
+    expect(FakeWS.instances[1].url).toContain('token=new')
+  })
+
+  it('token 取不到时不再重连，直接宣告放弃', () => {
+    const states: string[] = []
+    const socket = new GameSocket({
+      matchId: 42,
+      token: () => '',
+      onMessage: () => {},
+      onState: (state) => states.push(state),
+    })
+    socket.connect()
+
+    expect(FakeWS.instances).toHaveLength(0)
     expect(states[states.length - 1]).toBe('gaveup')
   })
 

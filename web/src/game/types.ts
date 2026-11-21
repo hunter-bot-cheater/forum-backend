@@ -6,11 +6,15 @@
 // Seat 是席位号。0 是发起邀请的房主，1 是被邀请方。
 export type Seat = 0 | 1
 
-// BallGroup 是定组结果。'none' 表示还没定组（开球后、首次合法进球之前）。
+// BallGroup 是定组结果。
+//
+// 未定组在协议里是**空串**，不是 'none'：后端 GroupNone 用的是 Go 零值，
+// 这样「没赋值」与「故意置空」是同一件事，零值的 RuleState 天然就是未定组。
+// 前端必须按空串判断——写成 'none' 会让未定组走进「已清台、该打黑八」的展示分支。
 //
 // 服务端给的是 [2]BallGroup 定长数组而不是稀疏对象：两个座位永远各有一份，
-// 用 'none' 占位比「缺 key」好处理——前端读 group[seat] 不必判 undefined。
-export type BallGroup = 'none' | 'solids' | 'stripes'
+// 前端读 group[seat] 不必判 undefined。
+export type BallGroup = '' | 'solids' | 'stripes'
 
 // MatchStatus 与 pool_match.status 的取值一致。
 // waiting 是房间已建、还有一方没进；playing 才允许出杆；

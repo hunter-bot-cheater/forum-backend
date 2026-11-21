@@ -167,6 +167,35 @@ func TestShootBroadcastsShotAndPassesTurn(t *testing.T) {
 	}
 }
 
+// 一杆结束后必须再补一份完整快照。
+//
+// 这条用例守的是「增量帧不带定组与手中球」这个坑：只发 shot/foul/turn 时，
+// 前端进球之后仍显示未定组、犯规之后拿不到 ball_in_hand，
+// 于是没法落位母球，对局就卡在「出杆被拒」上。
+func TestShootBroadcastsSnapshotAfterShot(t *testing.T) {
+	fake := &fakeSim{shot: quietShot()}
+	match, conn0, _ := newTestMatch(t, fake)
+
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0); err != nil {
+		t.Fatalf("出杆失败：%v", err)
+	}
+
+	kinds := conn0.types()
+	last := kinds[len(kinds)-1]
+	if last != MsgState {
+		t.Fatalf("一杆的最后一条消息应当是 state，实际是 %q（全部：%v）", last, kinds)
+	}
+
+	snapshot, ok := conn0.last(MsgState)
+	if !ok {
+		t.Fatal("没有 state 消息")
+	}
+	// 快照里的轮次要与 turn 帧一致，否则前端按快照重建场景会得到另一个人。
+	if snapshot.Data.(Snapshot).Turn != Seat1 {
+		t.Errorf("快照里的轮次 = %d，期望 1", snapshot.Data.(Snapshot).Turn)
+	}
+}
+
 // 发给 pool-sim 的球位只含台面上的球，母球也在里面。
 func TestShootSendsOnlyBallsOnTable(t *testing.T) {
 	fake := &fakeSim{shot: quietShot()}

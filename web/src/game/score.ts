@@ -13,10 +13,17 @@ import type { BallGroup, MatchSnapshot, Seat } from './types'
 export const SOLIDS: ReadonlyArray<string> = ['1', '2', '3', '4', '5', '6', '7']
 export const STRIPES: ReadonlyArray<string> = ['9', '10', '11', '12', '13', '14', '15']
 
-// EIGHT_BALL 是黑八的球号，单独列出来免得各处散落一个 '8'。
-export const EIGHT_BALL = '8'
+// GROUP_NONE 是「还没定组」。协议里就是空串（后端用 Go 零值当哨兵），
+// 给个名字是为了让下面几处判断读起来是「有没有组」而不是「是不是空串」。
+export const GROUP_NONE: BallGroup = ''
 
-// ballsOfGroup 返回某个分组的全部球号。'none' 返回空数组。
+// hasGroup 判断这一侧是否已经定组。
+// 页面用这个而不是 `group === ''`：以后哨兵若改成别的值，只改这里。
+export function hasGroup(group: BallGroup): boolean {
+  return group !== GROUP_NONE
+}
+
+// ballsOfGroup 返回某个分组的全部球号。未定组返回空数组。
 export function ballsOfGroup(group: BallGroup): ReadonlyArray<string> {
   if (group === 'solids') {
     return SOLIDS
@@ -44,7 +51,7 @@ export function onTableIds(snapshot: MatchSnapshot): Set<string> {
 // 画一排无法归属的球点只会让人以为分组已经定了。
 export function remainingOf(snapshot: MatchSnapshot, seat: Seat): string[] {
   const group = snapshot.group[seat]
-  if (group === 'none') {
+  if (!hasGroup(group)) {
     return []
   }
   const alive = onTableIds(snapshot)
@@ -66,10 +73,4 @@ export function groupLabel(group: BallGroup): string {
     return '花色'
   }
   return '未定组'
-}
-
-// isSolid 判断一个球号是不是全色球，用于给球点选颜色。
-// 黑八与母球都返回 false，由调用方单独处理。
-export function isSolid(id: string): boolean {
-  return SOLIDS.includes(id)
 }

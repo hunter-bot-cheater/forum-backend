@@ -18,6 +18,10 @@ const mocks = vi.hoisted(() => {
     acceptInvite: vi.fn(),
     declineInvite: vi.fn(),
     onLogout: vi.fn(),
+    // frameRegistrations 记录 onFrame 被调用了几次。
+    // 「注册两次会不会重复处理」不能靠推送结果去验：Map 按 key 存，
+    // 第二次注册是覆盖而不是追加，推一条照样只处理一遍，断言永远绿。
+    frameRegistrations: 0,
   }
 })
 
@@ -34,6 +38,7 @@ vi.mock('@/utils/auth', () => ({
 
 vi.mock('@/utils/ws', () => ({
   onFrame: (type: string, fn: (data: unknown) => void) => {
+    mocks.frameRegistrations += 1
     mocks.frames.set(type, fn)
     return () => {
       mocks.frames.delete(type)
@@ -76,6 +81,7 @@ beforeEach(() => {
   mocks.acceptInvite.mockReset()
   mocks.declineInvite.mockReset()
   mocks.onLogout.mockReset()
+  mocks.frameRegistrations = 0
 })
 
 describe('pool store 的邀请推送', () => {
@@ -84,10 +90,8 @@ describe('pool store 的邀请推送', () => {
     store.initWS()
     store.initWS()
 
-    // 注册两遍时后一次会覆盖前一次（Map 按 key 存），
-    // 体现在行为上是「同一条邀请被处理两次」，这里用一条推送验证。
-    fire('pool_invite', invite('a'))
-    expect(store.pending).toHaveLength(1)
+    // 三个帧类型各注册一次，重复调用不该再加倍。
+    expect(mocks.frameRegistrations).toBe(3)
   })
 
   it('同一条邀请被推两次只留一条', () => {
@@ -207,7 +211,6 @@ describe('pool store 的刷新与清理', () => {
     await store.refresh()
 
     expect(store.pending).toHaveLength(2)
-    expect(store.loaded).toBe(true)
   })
 
   it('refresh 失败时保留上一次的列表', async () => {

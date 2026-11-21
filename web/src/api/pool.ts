@@ -1,5 +1,5 @@
 import request from '@/utils/request'
-import type { PlayerBrief, RoomSnapshot, Seat } from '@/game/types'
+import type { PlayerBrief, RoomSnapshot } from '@/game/types'
 
 // 本文件是后端 internal/pool/dto.go 的镜像，字段名保持 snake_case。
 //
@@ -97,13 +97,4 @@ export function setReady(matchId: number | string, ready: boolean) {
     method: 'post',
     data: { ready },
   })
-}
-
-// seatLabel 是座位的中文称呼，服务端只给 0 与 1，文案在前端定。
-// 对局里还有「你」，那是相对于查看者的说法，不放在这里。
-export function seatLabel(seat: Seat): string {
-  if (seat === 0) {
-    return '房主'
-  }
-  return '对手'
 }

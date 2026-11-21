@@ -43,8 +43,6 @@ export const usePoolStore = defineStore('pool', () => {
   const acceptedRoom = ref<AcceptInviteResp | null>(null)
   // notice 是一次性提示文案（对方拒绝、邀请过期等），读走即清。
   const notice = ref('')
-  const loading = ref(false)
-  const loaded = ref(false)
 
   // wsBound 保证帧处理只注册一次。store 是单例，但 initWS 会被多个入口调用。
   let wsBound = false
@@ -60,22 +58,16 @@ export const usePoolStore = defineStore('pool', () => {
     return null
   })
 
-  const pendingCount = computed(() => pending.value.length)
-
   // refresh 拉一次待接受邀请，与本地列表对齐。
   //
   // 它覆盖两类 WebSocket 补不回来的情况：刷新页面后推送期间漏掉的邀请，
   // 以及弹层被关闭后想重新找回入口。失败不提示：
   // 邀请是「有就弹、没有就算了」的东西，为一次静默失败弹红条只会干扰阅读。
   async function refresh() {
-    loading.value = true
     try {
       pending.value = await listPendingInvites()
-      loaded.value = true
     } catch {
       // 保持上一次的列表，等下一轮刷新。
-    } finally {
-      loading.value = false
     }
   }
 
@@ -190,8 +182,6 @@ export const usePoolStore = defineStore('pool', () => {
     outgoing.value = null
     acceptedRoom.value = null
     notice.value = ''
-    loading.value = false
-    loaded.value = false
   }
 
   onLogout(reset)
@@ -199,12 +189,9 @@ export const usePoolStore = defineStore('pool', () => {
   return {
     pending,
     incoming,
-    pendingCount,
     outgoing,
     acceptedRoom,
     notice,
-    loading,
-    loaded,
     refresh,
     invite,
     cancelOutgoing,

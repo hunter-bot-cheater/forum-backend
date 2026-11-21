@@ -93,10 +93,14 @@ describe('房间页', () => {
     expect(wrapper.find('.pr__hint').text()).toContain('双方都点准备')
   })
 
-  it('座位号是 1 时自己同样排在左边', async () => {
+  it('座位号是 1 时自己同样排在左边，准备标记也跟着座位走', async () => {
+    // ready 故意反过来：只有座位 1（我）准备了，座位 0（房主）没准备。
+    // 如果代码按「界面上的第几项」去取 ready，这一条就会红——
+    // 只验名字的话，把 ready 的下标写错也看不出来。
     const wrapper = await mountPage(
       room({
         seat: 1,
+        ready: [false, true],
         players: [
           { user_id: 9, nickname: '房主', avatar: '' },
           { user_id: 1, nickname: '甲', avatar: '' },
@@ -107,7 +111,9 @@ describe('房间页', () => {
     const seats = wrapper.findAll('.pr__seat')
     expect(seats[0].classes()).toContain('is-me')
     expect(seats[0].text()).toContain('甲')
+    expect(seats[0].classes()).toContain('is-ready')
     expect(seats[1].text()).toContain('房主')
+    expect(seats[1].classes()).not.toContain('is-ready')
   })
 
   it('准备状态画在对应那一侧', async () => {

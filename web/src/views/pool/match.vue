@@ -145,20 +145,37 @@ const bannerSubtitle = ref('')
 // 结算
 const result = ref<{ won: boolean; reason: string; delta: number | null } | null>(null)
 
+// shotPending 表示「已经发出去一杆，还没收到 shot 帧」。
+//
+// 不能只靠 shooting：它要等服务端算完（开球 700~1500ms）才有第一帧可播，
+// 这段空窗期里力度条已经解禁，连点两下就会发两杆——
+// 第二杆的 seq 更小、服务端按「不是你的回合」拒掉，玩家看到一句莫名其妙的报错。
+const shotPending = ref(false)
+
+// placing 表示「已经点了落点，等服务端回快照」。
+// 落位不做乐观更新：越界或落点在球上时服务端会拒，本地先挪过去还得再挪回来，
+// 一次往返只有几毫秒，等权威结果更省事。
+const placing = ref(false)
+
 // 动画句柄与后置消息队列。
 //
-// 犯规与换人帧会在一杆的动画还在播的时候到达（服务端是连着发的），
-// 直接显示会让「球还在滚」和「已经换人」同时出现在屏幕上。
-// 所以先存起来，等动画播完再放出去。
+// 一杆的结果是一串连着的帧：shot → foul → turn/result → state。
+// 动画要播好几秒，后面几条在动画期间就到了。直接应用会让「球还在滚」
+// 和「已经换人」同时出现在屏幕上，state 更糟——它会把球瞬移到终局位置。
+// 所以除了 shot（用来驱动动画）之外，其余一律先存起来，播完再放出去。
 let handle: PlayHandle | null = null
 let pendingFoul: FoulData | null = null
 let pendingTurn: TurnData | null = null
+let pendingState: { snap: MatchSnapshot; deadlineAt: number } | null = null
+let pendingResult: ResultData | null = null
 
 // 拖动起点的角度。整个拖动过程都基于它加总位移，
 // 逐帧累加会把浮点误差攒起来，拖久了瞄准线会慢慢偏。
 let dragBase = 0
 
 let socket: GameSocket | null = null
+// disposed 在卸载时置位，用来挡住在途帧。
+let disposed = false
 // 读秒用的 1Hz 计时器。
 let tickTimer: ReturnType<typeof setInterval> | null = null
 let bannerTimer: ReturnType<typeof setTimeout> | null = null
@@ -182,8 +199,10 @@ const mustPlace = computed(() => {
 })
 
 // canShoot 是「现在能不能出杆」的唯一判据。
-// 三个条件缺一不可：轮到我、不在播放动画、没有手中球。
-const canShoot = computed(() => isMyTurn.value && !shooting.value && !mustPlace.value)
+// 四个条件缺一不可：轮到我、没有一杆在路上、不在播动画、没有手中球。
+const canShoot = computed(
+  () => isMyTurn.value && !shotPending.value && !shooting.value && !mustPlace.value,
+)
 
 // canAim 只影响瞄准线与微调尺：动画期间不该让瞄准线跟着手指跑。
 const canAim = computed(() => isMyTurn.value && !shooting.value)
@@ -252,11 +271,20 @@ const aim = computed<AimLayer | null>(() => {
 //
 // 整份替换而不是增量合并：进房与重连拿到的都是完整状态，
 // 合并还要处理「哪些球被删了、位置要不要保留」，而重建是零风险的。
-function applySnapshot(snap: MatchSnapshot) {
+function applySnapshot(snap: MatchSnapshot, deadline: number) {
+  const first = snapshot.value === null
   snapshot.value = snap
   mySeat.value = snap.seat
   turn.value = snap.turn
-  deadlineAt.value = snap.deadline_ms > 0 ? Date.now() + snap.deadline_ms : 0
+  deadlineAt.value = deadline
+  // 快照回来了说明落位请求已经有结论（成功会带新球位，失败会有错误帧），
+  // 这个标记只在「点了台面到服务端答复」之间有用。
+  placing.value = false
+  // 第一次拿到快照时才知道母球在哪，瞄准角要在这之后算：
+  // 组件挂载那一刻 balls 还是空的，算出来恒为 0（永远指向 +x）。
+  if (first) {
+    phi.value = initialPhi()
+  }
 
   const list: BallState[] = []
   for (const ball of snap.balls) {
@@ -275,12 +303,27 @@ function applySnapshot(snap: MatchSnapshot) {
 // 首次快照不弹换人横幅：刚进房就滑一条「你的回合」出来，
 // 会让人以为中间漏看了一段。只在后面收到 turn 帧时弹。
 function onMessage(msg: DownMessage) {
+  // 卸载之后还可能收到在途的帧（close 是异步的），
+  // 继续往下走会往已经销毁的组件里写 ref，动画也可能被重新拉起来。
+  if (disposed) {
+    return
+  }
   if (msg.type === 'joined') {
     mySeat.value = msg.data.seat
     return
   }
   if (msg.type === 'state') {
-    applySnapshot(msg.data)
+    // 读秒按「收到这一刻」算：服务端给的是发送时的剩余毫秒，
+    // 动画播完再套用会把上限往后推四五秒，界面上的读秒就和真实读秒错开。
+    const entry = {
+      snap: msg.data,
+      deadlineAt: msg.data.deadline_ms > 0 ? Date.now() + msg.data.deadline_ms : 0,
+    }
+    if (shooting.value) {
+      pendingState = entry
+      return
+    }
+    applySnapshot(entry.snap, entry.deadlineAt)
     return
   }
   if (msg.type === 'shot') {
@@ -288,18 +331,26 @@ function onMessage(msg: DownMessage) {
     return
   }
   if (msg.type === 'foul') {
-    pendingFoul = msg.data
+    if (shooting.value) {
+      pendingFoul = msg.data
+      return
+    }
+    showNotice(msg.data.reason)
     return
   }
   if (msg.type === 'turn') {
-    pendingTurn = msg.data
-    // 没有动画在播（比如重连后收到的第一条就是 turn），直接放出去。
-    if (!shooting.value) {
-      flushAfterShot()
+    if (shooting.value) {
+      pendingTurn = msg.data
+      return
     }
+    applyTurn(msg.data)
     return
   }
   if (msg.type === 'result') {
+    if (shooting.value) {
+      pendingResult = msg.data
+      return
+    }
     applyResult(msg.data)
     return
   }
@@ -308,7 +359,7 @@ function onMessage(msg: DownMessage) {
     return
   }
   if (msg.type === 'error') {
-    showNotice(msg.data.message)
+    onServerError(msg.data)
   }
 }
 
@@ -321,9 +372,13 @@ function playShotFrame(data: ShotData) {
     handle.stop()
     handle = null
   }
+  // 服务端已经收下这一杆并算完了，在途标记可以放开：
+  // 从这里开始由 shooting 接管，直到动画播完都不允许再出杆。
+  shotPending.value = false
+  placing.value = false
   shooting.value = true
-  // 出杆后力度归零：下一杆要从头拖，留着上一次的满力容易误出杆。
-  power.value = 0
+  // 力度在发出去的那一刻就清零了，这里不再重复：
+  // 两处都清会让人以为「播放帧」也要负责界面状态。
 
   handle = playShot(
     { frames: data.frames, duration: data.duration },
@@ -344,6 +399,9 @@ function playShotFrame(data: ShotData) {
 }
 
 // applyFinal 把球位对齐到服务端给的终局。
+//
+// 紧接着应用的 state 快照会再对齐一次（两份数据同源），
+// 这里保留是因为 state 有可能因为断线丢包，而 shot 帧已经到手了。
 function applyFinal(data: ShotData) {
   const byId = new Map<string, BallState>()
   for (const ball of balls.value) {
@@ -361,8 +419,20 @@ function applyFinal(data: ShotData) {
   }
 }
 
-// flushAfterShot 在动画播完之后把攒下的犯规与换人放出去。
+// flushAfterShot 在动画播完之后把攒下的消息依次放出去。
+//
+// 顺序是有讲究的：
+//   1. 先应用 state —— 它是权威，球位、定组、手中球、轮次都按它对齐；
+//   2. 再提示犯规 —— 文案来自 foul 帧，服务端已经写好，前端不拼；
+//   3. 然后才是换人横幅 —— 它必须弹在「回合已经变了」之后，
+//      否则横幅写着「你的回合」，界面上的可出杆状态还是旧的；
+//   4. 最后结算 —— 结算面板会盖住球台，放在最后不影响前几步的动画收尾。
 function flushAfterShot() {
+  if (pendingState) {
+    const next = pendingState
+    pendingState = null
+    applySnapshot(next.snap, next.deadlineAt)
+  }
   if (pendingFoul) {
     const foul = pendingFoul
     pendingFoul = null
@@ -371,10 +441,22 @@ function flushAfterShot() {
   if (pendingTurn) {
     const next = pendingTurn
     pendingTurn = null
-    turn.value = next.seat
-    deadlineAt.value = next.deadline_ms > 0 ? Date.now() + next.deadline_ms : 0
-    showBanner(next.seat)
+    applyTurn(next)
   }
+  if (pendingResult) {
+    const next = pendingResult
+    pendingResult = null
+    applyResult(next)
+  }
+}
+
+// applyTurn 应用换人：轮次、读秒、横幅。
+// 只在没有后续 state 帧时才需要它来改 turn；
+// 有 state 时两者一致，重复应用同一个值没有副作用。
+function applyTurn(data: TurnData) {
+  turn.value = data.seat
+  deadlineAt.value = data.deadline_ms > 0 ? Date.now() + data.deadline_ms : 0
+  showBanner(data.seat)
 }
 
 // applyResult 结算。
@@ -402,6 +484,17 @@ function onPeer(event: string) {
   if (event === 'joined') {
     showNotice('对手已进入对局')
   }
+}
+
+// onServerError 处理服务端的业务错误。
+//
+// 除了显示文案，还必须解开本地在途标记：出杆被拒时不会再有 shot 帧回来，
+// 标记不解开力度条会永久变灰，玩家只能刷新页面才能继续。
+// 「球桌算不动」这类暂时性错误也一样，重试由玩家自己决定。
+function onServerError(data: { code: string; message: string }) {
+  shotPending.value = false
+  placing.value = false
+  showNotice(data.message)
 }
 
 // showNotice 显示一条提示，3 秒后自动消失。
@@ -483,21 +576,21 @@ function onNudge(deltaDeg: number) {
 }
 
 // onTap 处理台面点按。只在手中球时有用：落位母球。
+//
+// 不做乐观更新：服务端落位成功会广播一份完整快照，母球位置从那里来。
+// 先在本地挪过去的话，一旦被判越界（或落点在别的球上）就得再挪回来，
+// 中间那一帧「球压在别的球上」看起来像渲染错乱。
 function onTap(point: Point) {
-  if (!mustPlace.value) {
+  if (!mustPlace.value || placing.value) {
     return
   }
   const spot = clampIntoCueArea(point)
-  // 先把母球摆到本地再发给服务端：不等确认能避免「点了没反应」的错觉。
-  // 服务端若判定非法会回 error，那条提示会盖过这次乐观更新，
-  // 而下一份快照会把位置纠正回来。
-  const cue = balls.value.find((b) => b.id === 'cue')
-  if (cue) {
-    cue.x = spot.x
-    cue.y = spot.y
-    cue.on_table = true
+  const seq = socket?.placeCue(spot.x, spot.y) ?? 0
+  if (seq === 0) {
+    showNotice('连接已断开，正在重连')
+    return
   }
-  socket?.placeCue(spot.x, spot.y)
+  placing.value = true
 }
 
 // clampIntoCueArea 把落点收进台面内沿。
@@ -540,7 +633,16 @@ function shoot() {
     a: 0,
     b: 0,
   }
-  socket?.shoot(params)
+  // 连接已经断了时 shoot 返回 0，那就别把在途标记立起来——
+  // 立了之后没有 shot 帧回来解锁，力度条会永久变灰。
+  const seq = socket?.shoot(params) ?? 0
+  if (seq === 0) {
+    showNotice('连接已断开，正在重连')
+    return
+  }
+  shotPending.value = true
+  // 出杆之后力度归零，下一杆从头拖。
+  power.value = 0
 }
 
 // leave 离开对局页。对局还在进行时先确认：中途离开会被判负。
@@ -570,6 +672,7 @@ function backToLobby() {
 // cleanup 停止动画、计时器与连接。
 // 卸载与「回大厅」都走它，避免两处各写一份收尾逻辑漏掉一样东西。
 function cleanup() {
+  disposed = true
   if (handle) {
     handle.stop()
     handle = null
@@ -604,7 +707,9 @@ onMounted(() => {
 
   socket = new GameSocket({
     matchId: props.id,
-    token,
+    // 传函数而不是当时的字符串：重连时它会重新取一次，
+    // access 过期后由 request 层刷新令牌，这里拿到的是新的那个。
+    token: () => getToken() || '',
     onMessage,
     onState: (state) => {
       connState.value = state

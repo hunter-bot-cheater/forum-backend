@@ -281,6 +281,25 @@ func New(deps Deps) (*gin.Engine, error) {
 		return nil, err
 	}
 
+	// WebSocket 升级单独一个桶，理由不是「放宽额度」而是「429 在浏览器里看不见」：
+	// WebSocket 构造失败只会触发一次 error 事件，拿不到状态码，
+	// 客户端分不清是被限流还是网络断了，重连几次照样撞在同一个桶上。
+	//
+	// 触发场景是真实存在的：房间页每 1.5 秒轮询一次，状态翻成 playing 的瞬间
+	// 就要开对局连接，那时候全局桶（突发 10、每秒补 2）大概率已经被页面加载
+	// 那十几次请求用光了，表现就是「刚进对局页一直显示重连中」。
+	//
+	// 容量给到 30、每秒补 5 个：一个人多开几个标签页同时挂着连接是正常的，
+	// 而这条路径的代价只是一次握手，不查库。
+	wsLimit, err := middleware.RateLimit(deps.Redis, middleware.RateLimitConfig{
+		Capacity:  30,
+		Rate:      5,
+		KeyPrefix: deps.RateLimit.KeyPrefix + "ws:",
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	// 上传的图片由后端直接吐，本机开发够用。
 	// 生产是 Nginx 读同一个目录（见 deploy/prod/locations.conf），请求根本不会到这里，
 	// 但仍然注册：单机部署、或者 Nginx 漏配 /uploads 时，图还能显示出来。
@@ -298,6 +317,19 @@ func New(deps Deps) (*gin.Engine, error) {
 	uploads := r.Group("/api/uploads")
 	uploads.Use(limitBody(uploadHandler.BodyLimit()))
 	uploads.Use(rateLimit)
+
+	// WebSocket 单独建组，不挂在 api 组下面：那组的 rateLimit 是给普通接口用的，
+	// 升级请求混在里面会被「页面加载时的十几次请求」挤掉额度。
+	//
+	// 三条都自己从查询参数读 token，所以不能挂 JWTAuth；
+	// 鉴权在各自的 handler 里做，而且必须在 Upgrade 之前做完——
+	// 升级之后响应头已经发出去了，再想返回 401 已经来不及。
+	wsGroup := r.Group("/api/ws")
+	wsGroup.Use(limitBody(1 << 20))
+	wsGroup.Use(wsLimit)
+	wsGroup.GET("/notifications", wsHandler.Notifications)
+	wsGroup.GET("/stats", wsHandler.Stats)
+	wsGroup.GET("/game", poolHandler.Serve)
 	uploads.Use(middleware.JWTAuth(deps.JWT))
 	// 封禁限制的是「制造内容」，上传头像是个人资料的一部分，
 	// 但头像是公开可见的展示位，被封的人不该还能往上放图。
@@ -342,12 +374,8 @@ func New(deps Deps) (*gin.Engine, error) {
 		// 活动详情公开：中奖名单本来就是要给人看的。
 		api.GET("/floor-events/:id", floorHandler.Detail)
 
-		// WebSocket 握手带不了自定义头，token 由 handler 自己从查询参数读，
-		// 所以这两条放在公开组里，不能挂 JWTAuth。
-		api.GET("/ws/notifications", wsHandler.Notifications)
-		api.GET("/ws/stats", wsHandler.Stats)
-		// 对局连接同样自己从查询参数读 token。
-		api.GET("/ws/game", poolHandler.Serve)
+		// 三条 WebSocket 路由不在这里注册：它们挂在下面的 /api/ws 组上，
+		// 用单独一个限流桶（见 wsLimit 的注释）。
 
 		// 下面这个子组路径是空的（""），表示沿用 /api 前缀，只是多挂一个登录校验。
 		// 挂在这个组上的接口，handler 里一定能取到 userID；上面公开组的接口则取不到。

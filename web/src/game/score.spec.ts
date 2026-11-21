@@ -1,11 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import {
-  ballsOfGroup,
-  groupLabel,
-  isSolid,
-  onTableIds,
-  remainingOf,
-} from '@/game/score'
+import { ballsOfGroup, groupLabel, hasGroup, onTableIds, remainingOf } from '@/game/score'
 import type { BallState, MatchSnapshot } from '@/game/types'
 
 // snapshot 造一份最小快照。只填 score.ts 会读到的字段，
@@ -48,7 +42,7 @@ describe('ballsOfGroup', () => {
   })
 
   it('未定组时没有任何「我的球」', () => {
-    expect(ballsOfGroup('none')).toEqual([])
+    expect(ballsOfGroup('')).toEqual([])
   })
 })
 
@@ -70,8 +64,10 @@ describe('remainingOf', () => {
     expect(remainingOf(snap, 1)).toEqual(['9'])
   })
 
+  // 未定组在协议里是空串（后端用 Go 零值当哨兵），不是 'none'。
+  // 这条用例就是钉住这一点：写成 'none' 的话这里会红。
   it('未定组时返回空，不把台面上所有的球都算成自己的', () => {
-    const snap = snapshot([ball('cue'), ball('1'), ball('9')], ['none', 'none'])
+    const snap = snapshot([ball('cue'), ball('1'), ball('9')], ['', ''])
     expect(remainingOf(snap, 0)).toEqual([])
   })
 
@@ -86,17 +82,18 @@ describe('remainingOf', () => {
   })
 })
 
-describe('groupLabel / isSolid', () => {
+describe('hasGroup', () => {
+  it('空串表示还没定组，两个非空值都算已定组', () => {
+    expect(hasGroup('')).toBe(false)
+    expect(hasGroup('solids')).toBe(true)
+    expect(hasGroup('stripes')).toBe(true)
+  })
+})
+
+describe('groupLabel', () => {
   it('三个组别各有一句中文', () => {
     expect(groupLabel('solids')).toBe('全色')
     expect(groupLabel('stripes')).toBe('花色')
-    expect(groupLabel('none')).toBe('未定组')
-  })
-
-  it('1 到 7 是全色，8 与花色球不是', () => {
-    expect(isSolid('1')).toBe(true)
-    expect(isSolid('7')).toBe(true)
-    expect(isSolid('8')).toBe(false)
-    expect(isSolid('9')).toBe(false)
+    expect(groupLabel('')).toBe('未定组')
   })
 })

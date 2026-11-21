@@ -93,7 +93,9 @@ export type ConnectionState = 'connecting' | 'open' | 'closed' | 'gaveup'
 
 export interface GameSocketOptions {
   matchId: number | string
-  token: string
+  // token 是个 getter 不是字符串：access 只有 15 分钟，断线重连往往发生在
+  // 很久以后，建连时就把 token 定死会让重连一直用过期凭证被服务端拒掉。
+  token: () => string
   // onMessage 每收到一条合法下行消息调用一次。
   onMessage: (msg: DownMessage) => void
   // onState 连接状态变化。gaveup 时页面应该提示「对局已结束」并回大厅。
@@ -185,11 +187,15 @@ export class GameSocket {
   }
 
   // open 真正发起一次握手。
-  //
-  // 每次握手都重新取 token：access 只有 15 分钟，
-  // 断线重连往往发生在很久以后，沿用建连时那个会被服务端拒掉。
   private open() {
-    const token = this.opts.token
+    const token = this.opts.token()
+    if (!token) {
+      // 已经登出（另一个标签页退出、刷新令牌失败）就别再重连了，
+      // 继续重试只会拿着空 token 在服务端门口转圈。
+      this.manualClose = true
+      this.opts.onState('gaveup')
+      return
+    }
     let ws: WebSocket
     try {
       ws = new WebSocket(

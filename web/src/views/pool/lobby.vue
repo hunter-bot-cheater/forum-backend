@@ -23,12 +23,19 @@
     <section class="pl__panel">
       <div class="pl__panel-head">
         <h2 class="pl__panel-title">我关注的人</h2>
-        <span v-if="loaded" class="pl__panel-count">{{ total }} 人</span>
+        <span v-if="items.length > 0" class="pl__panel-count">{{ total }} 人</span>
       </div>
 
       <div v-if="loading && items.length === 0" class="pl__skeleton">
         <el-skeleton :rows="4" animated />
       </div>
+
+      <!-- 拉失败与「真的没关注人」必须分开说。
+           只看 items 是否为空的话，请求失败时会写「你还没有关注任何人」，
+           用户明明关注了一堆人，看到这句只会去查自己是不是点错了。 -->
+      <p v-else-if="loadFailed" class="pl__empty">
+        关注列表没加载出来。<button class="pl__retry" type="button" @click="load">重试</button>
+      </p>
 
       <p v-else-if="items.length === 0" class="pl__empty">
         你还没有关注任何人。先去
@@ -84,7 +91,9 @@ const user = useUserStore()
 const items = ref<FollowItem[]>([])
 const total = ref(0)
 const loading = ref(false)
-const loaded = ref(false)
+// loadFailed 表示关注列表这一次请求失败了。
+// 与 items.length === 0 分开存：空列表是「关注了 0 个人」，失败是「不知道有几个人」。
+const loadFailed = ref(false)
 
 // busyId 是正在发送邀请的那个人的 id，用来只禁用一行而不是整张列表。
 const busyId = ref(0)
@@ -108,6 +117,20 @@ function stopWaitTimer() {
 
 // 每次出现新的等待卡都重新起表。收到 accepted 推送时 outgoing 会被清空，
 // 这里跟着停表并把「已发送」标记一起复位。
+//
+// immediate 不能省：profile 是异步拉的，进页面那一刻 userId 还是 0，
+// 关注列表要等它落地才拉得到。不标 immediate 时这条 watch 永远不会被叫到，
+// 大厅会一直显示「你还没有关注任何人」——哪怕关注了几十个人。
+watch(
+  () => user.userId,
+  (id) => {
+    if (id !== 0) {
+      void load()
+    }
+  },
+  { immediate: true },
+)
+
 watch(outgoing, (value) => {
   stopWaitTimer()
   if (!value) {
@@ -142,20 +165,59 @@ function initialOf(person: FollowItem): string {
 // 只拉 20 条：大厅是「约一个人」而不是「管理关注关系」，
 // 关注上百人的账号也不需要滚动找，直接去个人主页的关注列表看就行。
 async function load() {
+  // 资料没到位就先补一次：关注列表的地址要用自己的 id 拼，
+  // 首屏 fetchMe 若被限流打过，userId 会一直是 0。
+  // 不补的话「重试」按钮点了没有任何反应——比不显示按钮更让人困惑。
   if (user.userId === 0) {
+    await user.fetchMe()
+  }
+  if (user.userId === 0) {
+    loadFailed.value = true
     return
   }
   loading.value = true
+  loadFailed.value = false
   try {
     const resp = await listFollows(user.userId, 'following', 1, 20)
     items.value = resp.list
     total.value = resp.total
-    loaded.value = true
-  } catch {
-    // 请求失败已经由拦截器提示过，这里保留空列表，页面自己会显示空状态。
+  } catch (err) {
+    // 撞上限流时自动再试一次。
+    //
+    // 大厅是首屏一次发出六七个请求的页面，最后那两条最容易被令牌桶拒掉
+    // （见 middleware.RateLimit：容量 10、每秒补 2 个）。这里等一会儿再要一次，
+    // 比直接让用户点「重试」体验好，也不需要把桶调大——桶调大等于给整站放水。
+    if (statusOf(err) === 429) {
+      await sleep(1200)
+      try {
+        const retry = await listFollows(user.userId, 'following', 1, 20)
+        items.value = retry.list
+        total.value = retry.total
+        return
+      } catch {
+        // 还是失败，落到下面的失败态。
+      }
+    }
+    // 拦截器已经弹过提示，这里只记下失败：页面要显示重试入口而不是空状态。
+    loadFailed.value = true
   } finally {
     loading.value = false
   }
+}
+
+// sleep 只给上面那一次限流退避用，不抽到 utils：
+// 全站只有这一处需要「等一秒再重试」的语义，抽出去反而要维护一个通用工具。
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// statusOf 从 axios 错误里取 HTTP 状态码，取不到返回 0。
+function statusOf(err: unknown): number {
+  const resp = (err as { response?: { status?: number } })?.response
+  if (resp && typeof resp.status === 'number') {
+    return resp.status
+  }
+  return 0
 }
 
 // onInvite 发邀请。成功就把这一行标成「已发送」，
@@ -176,8 +238,8 @@ async function onInvite(person: FollowItem) {
 }
 
 onMounted(() => {
-  void load()
   // 进大厅顺手补拉一次待接受邀请：万一推送在页面还没挂载时就到了，这里能捞回来。
+  // 关注列表不在这里拉，交给上面的 watch：它要等 userId 到位。
   void pool.refresh()
 })
 
@@ -301,6 +363,15 @@ onBeforeUnmount(stopWaitTimer)
 
 .pl__link {
   color: var(--fs-primary);
+}
+
+.pl__retry {
+  padding: 0;
+  font-size: 13px;
+  color: var(--fs-primary);
+  background: none;
+  border: none;
+  cursor: pointer;
 }
 
 .pl__list {
