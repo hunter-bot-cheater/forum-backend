@@ -162,13 +162,28 @@ const LIVE_POLL_MS = 10 * 1000
 // LIVE_MAX_MISSES 是连续失败几次就停表。两次是「网络抖一下」与「真的不通」的分界。
 const LIVE_MAX_MISSES = 2
 
+// liveSeq 是请求代际。弱网下请求会叠起来（一次超过 10 秒就会），
+// 只认最新一次的结果，迟到的旧响应不能把新列表盖回去。
+let liveSeq = 0
+// liveDisposed 在卸载时置位，挡住卸载之后才回来的响应。
+let liveDisposed = false
+
 // loadLive 拉一次观战列表。
 async function loadLive() {
+  const seq = liveSeq + 1
+  liveSeq = seq
   try {
-    live.value = await getLiveMatches()
+    const list = await getLiveMatches()
+    if (liveDisposed || seq !== liveSeq) {
+      return
+    }
+    live.value = list
     liveFailed.value = false
     liveMisses = 0
   } catch {
+    if (liveDisposed || seq !== liveSeq) {
+      return
+    }
     // 拦截器已经弹过提示。保留上一份列表（总比整块消失好），
     // 但连续失手两次就停下来，等用户自己点重试。
     liveMisses += 1
@@ -186,16 +201,27 @@ function stopLiveTimer() {
   }
 }
 
+// startLive 起表。资料还没回来之前不起：
+// 「哪一局是我在打」要靠 user.userId，而它是异步拉的——
+// 冷启动就轮询的话，自己的局会被当成别人的局摆上「观战」，
+// 点进去等于用第二条连接顶掉自己那条对局连接。
+function startLive() {
+  if (liveTimer) {
+    return
+  }
+  void loadLive()
+  liveTimer = setInterval(() => {
+    void loadLive()
+  }, LIVE_POLL_MS)
+}
+
 // retryLive 手动重试观战列表：重置计数并重新起表。
+//
+// 不先清 liveFailed：面板是 v-if="live.length > 0 || liveFailed"，
+// 先清会让空列表时整块消失几百毫秒再回来。等这次请求成功了再清。
 function retryLive() {
   liveMisses = 0
-  liveFailed.value = false
-  void loadLive()
-  if (!liveTimer) {
-    liveTimer = setInterval(() => {
-      void loadLive()
-    }, LIVE_POLL_MS)
-  }
+  startLive()
 }
 
 // isMine 判断这一局里有没有自己。List 里的 players 是按座位排的定长数组。
@@ -261,6 +287,19 @@ watch(
   (id) => {
     if (id !== 0) {
       void load()
+    }
+  },
+  { immediate: true },
+)
+
+// 观战列表等个人资料拉过一次再起表：见 startLive 里的说明。
+// 用 profileLoaded 而不是 userId——资料拉失败时 userId 也是 0，
+// 但那时「哪一局是我在打」同样没有答案，一样不能起表。
+watch(
+  () => user.profileLoaded,
+  (loaded) => {
+    if (loaded) {
+      startLive()
     }
   },
   { immediate: true },
@@ -378,14 +417,10 @@ onMounted(() => {
   // 关注列表不在这里拉，交给上面的 watch：它要等 userId 到位。
   void pool.refresh()
 
-  // 观战列表先拉一次再起表：不先拉的话首屏要空等十秒才出现。
-  void loadLive()
-  liveTimer = setInterval(() => {
-    void loadLive()
-  }, LIVE_POLL_MS)
 })
 
 onBeforeUnmount(() => {
+  liveDisposed = true
   stopWaitTimer()
   stopLiveTimer()
 })

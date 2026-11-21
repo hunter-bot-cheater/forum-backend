@@ -163,6 +163,12 @@ const turnText = computed(() => {
 
 // hintText 是盖在球台上的说明条，只在这几种「画面还不对」的时候出现。
 const hintText = computed(() => {
+  // 已经出结果就把位置让给结果条：两个盒子都在球台正中，
+  // 同时出现的结果是「谁赢下这一局」四周露出半截「正在重连…」。
+  // 结束后断线本来也没必要说——对局已经打完了，说什么都不会再变。
+  if (finishedText.value) {
+    return ''
+  }
   if (fatalText.value) {
     return fatalText.value
   }
@@ -208,7 +214,14 @@ function showFinished(winner: Seat, players: MatchSnapshot['players']) {
 
 // playShotFrame 播一杆。动画期间到达的快照先存着，播完再套。
 function playShotFrame(data: ShotData) {
-  animating?.stop()
+  if (animating) {
+    // 上一杆还没播完就来了下一杆（后台标签页、慢设备上会出现）：
+    // 先把上一杆排队的快照与结算放行，否则它们会挂到这一杆播完才生效，
+    // 轮次与读秒会倒退一格。放行之后再从新一杆的起点重画。
+    animating.stop()
+    animating = null
+    flushQueued()
+  }
   animating = playShot(
     { frames: data.frames, duration: data.duration },
     {
@@ -220,19 +233,27 @@ function playShotFrame(data: ShotData) {
         if (disposed) {
           return
         }
-        const queuedResult = pendingResult
-        pendingResult = null
-        if (queuedResult) {
-          finishWith(queuedResult)
-        }
-        const queued = pendingState
-        pendingState = null
-        if (queued) {
-          applySnapshot(queued.snap, queued.deadlineAt)
-        }
+        flushQueued()
       },
     },
   )
+}
+
+// flushQueued 把动画期间攒下的结算与快照依次生效。
+//
+// 结算先套：它只改顶部那一句，套完再套快照，快照里的 status 是 finished 时
+// 还会再写一次同样的话，重复无害。
+function flushQueued() {
+  const queuedResult = pendingResult
+  pendingResult = null
+  if (queuedResult) {
+    finishWith(queuedResult)
+  }
+  const queued = pendingState
+  pendingState = null
+  if (queued) {
+    applySnapshot(queued.snap, queued.deadlineAt)
+  }
 }
 
 // showNotice 显示一条短提示。
@@ -258,6 +279,10 @@ function onMessage(msg: DownMessage) {
     // 这时必须让位：继续留在这里等于用第二条连接顶掉自己那条对局连接。
     if (msg.data.seat !== SEAT_SPECTATOR) {
       fatalText.value = '这一局你是当事人，正在回到对局页…'
+      // 先把这条连接关掉再跳：跳转是异步的，导航窗口里它仍占着你的座位，
+      // 一旦它先断，对手就会收到一条「他掉线了」。
+      socket?.close()
+      socket = null
       void router.replace('/pool/match/' + props.id)
     }
     return
@@ -298,6 +323,11 @@ function onMessage(msg: DownMessage) {
 function finishWith(data: ResultData) {
   const snap = snapshot.value
   if (!snap) {
+    // 手里还没有快照就收到结算（正常流程下不会：state 永远排在 result 前面，
+    // 重连也会先给一份快照）。真出现了也别把它咽掉——
+    // 不知道名字就只说输赢已定，总比停在「轮到某人」上强。
+    finishedText.value = '对局已结束'
+    deadlineAt.value = 0
     return
   }
   showFinished(data.winner, snap.players)
@@ -313,12 +343,13 @@ function connect() {
       connState.value = state
     },
     onFatal: (code) => {
-      // 只有「名额被抢」会在握手之后被告知，其余（对局没了、不是你的局）
-      // 服务端在 Upgrade 之前就拒了，浏览器这里只看到一次普通失败，
-      // 于是会走完重连窗口再给一个「重新连接」——那也不算错，只是慢。
+      // 只有升级之后才说得清的两种拒绝会走到这里。
+      // 名额满了与这一局没了给的话不一样：前者还会有人走，后者再点也没用。
       if (code === CLOSE_SPECTATOR_FULL) {
         fatalText.value = '这场对局的观战人数已满，换一场看吧。'
+        return
       }
+      fatalText.value = '这一局已经结束了，回大厅看看别的对局吧。'
     },
   })
   socket.connect()

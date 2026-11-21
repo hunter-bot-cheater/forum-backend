@@ -67,13 +67,18 @@
          但给一个「重新连接」：断网超过四十秒才会走到这里，
          而人多半只是切了一下网，直接赶回大厅等于这局白打。 -->
     <div v-if="connState === 'gaveup'" class="pm__gone" role="dialog" aria-modal="true">
-      <p class="pm__gone-text">与对局的连接已断开</p>
-      <p class="pm__gone-sub">网络恢复后可以重试；对局还在服务端等你。</p>
+      <p class="pm__gone-text">{{ fatalText || '与对局的连接已断开' }}</p>
+      <p class="pm__gone-sub">
+        {{ fatalText ? '这一局已经结算，回大厅可以再开一局。' : '网络恢复后可以重试；对局还在服务端等你。' }}
+      </p>
       <div class="pm__gone-actions">
         <button class="pm__gone-btn pm__gone-btn--ghost" type="button" @click="backToLobby">
           回大厅
         </button>
-        <button class="pm__gone-btn" type="button" @click="retryConnect">重新连接</button>
+        <!-- 对局已经没了的时候不给重连：点一百次也都是同一个 4004。 -->
+        <button v-if="!fatalText" class="pm__gone-btn" type="button" @click="retryConnect">
+          重新连接
+        </button>
       </div>
     </div>
   </div>
@@ -138,13 +143,19 @@ const pool = usePoolStore()
 const snapshot = ref<MatchSnapshot | null>(null)
 // balls 是本地渲染用的球位。动画期间被逐帧改写，动画结束按 final 对齐。
 const balls = ref<BallState[]>([])
-const mySeat = ref<Seat>(0)
+// mySeat 是「我坐哪」。null 表示还没确定——收到观战快照时会让位跳走，
+// 那一瞬间不能默认成座位 0，否则界面会把左边的球当成自己的、
+// 还把力度条点亮，看上去能出杆。
+const mySeat = ref<Seat | null>(null)
 const turn = ref<Seat>(0)
 // deadlineAt 是本杆读秒的本地截止时刻（毫秒时间戳）。
 // 服务端给的是「还剩多少毫秒」，换成绝对时刻本地才能自己倒数。
 const deadlineAt = ref(0)
 const nowTick = ref(Date.now())
 const connState = ref<ConnectionState>('connecting')
+// fatalText 有值表示服务端明确说了「这一局不在了」（关闭码 4004）。
+// 与普通断线分开：普通断线该给重连，这一种给重连只是让人白点。
+const fatalText = ref('')
 
 // ===== 本地状态 =====
 
@@ -212,7 +223,7 @@ let noticeTimer: ReturnType<typeof setTimeout> | null = null
 // ===== 派生状态 =====
 
 const isMyTurn = computed(() => {
-  if (!snapshot.value) {
+  if (!snapshot.value || mySeat.value === null) {
     return false
   }
   return snapshot.value.status === 'playing' && turn.value === mySeat.value
@@ -242,6 +253,9 @@ const seats = computed(() => {
     return []
   }
   const me = mySeat.value
+  if (me === null) {
+    return []
+  }
   const other: Seat = me === 0 ? 1 : 0
   // 显式标 Seat[]：不标的话数组字面量会被推成 number[]，
   // 后面 group[seat] / players[seat] 都要按座位号取，类型对不上。
@@ -544,7 +558,7 @@ function applyTurn(data: TurnData, deadline: number) {
 function applyResult(data: ResultData) {
   let delta: number | null = null
   if (data.elo_delta_0 !== 0 || data.elo_delta_1 !== 0) {
-    delta = mySeat.value === 0 ? data.elo_delta_0 : data.elo_delta_1
+    delta = (mySeat.value ?? 0) === 0 ? data.elo_delta_0 : data.elo_delta_1
   }
   result.value = { won: data.winner === mySeat.value, reason: data.reason, delta }
 }
@@ -764,7 +778,7 @@ async function leave() {
 // 重开一局必须走「邀请 → 对方接受 → 新房间」这条完整链路。
 async function rematch() {
   const snap = snapshot.value
-  const other: Seat = mySeat.value === 0 ? 1 : 0
+  const other: Seat = (mySeat.value ?? 0) === 0 ? 1 : 0
   const target = snap ? snap.players[other].user_id : 0
   backToLobby()
   if (target === 0) {
@@ -840,6 +854,11 @@ onMounted(() => {
     onMessage,
     onState: (state) => {
       connState.value = state
+    },
+    onFatal: () => {
+      // 服务端在升级之后用关闭码说的那类拒绝：这一局已经不在了。
+      // 不写具体文案区分，玩家这一侧只有「打完了」一种可能。
+      fatalText.value = '这一局已经结束'
     },
   })
   socket.connect()
