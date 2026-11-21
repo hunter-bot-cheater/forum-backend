@@ -211,6 +211,9 @@ func New(deps Deps) (*gin.Engine, error) {
 	// 对局连接与通知连接分开两个 handler：它们上行语义不同（对局要读客户端消息），
 	// 但共用同一份 Origin 白名单与 JWT 校验。
 	poolHandler := pool.NewWSHandler(deps.Pool, deps.JWT, deps.WSOrigins)
+	// 邀请与房间走 REST：邀请卡片要能被通知中心拉取，刷新页面、换设备都不该丢。
+	poolInvites := pool.NewInvites()
+	poolRest := pool.NewHandler(deps.Pool, poolInvites, pool.NewStore(deps.DB), userSvc, deps.Hub)
 
 	// 私信的展示信息同样走 user.Briefs，所以只要 userSvc，不需要 follow。
 	messageSvc := message.NewService(deps.DB, userSvc)
@@ -350,6 +353,14 @@ func New(deps Deps) (*gin.Engine, error) {
 		// 挂在这个组上的接口，handler 里一定能取到 userID；上面公开组的接口则取不到。
 		auth := api.Group("", middleware.JWTAuth(deps.JWT))
 		{
+			// ——台球—— 邀请与房间：对局过程不在 HTTP 上，只有这三组。
+			auth.GET("/pool/invites/pending", poolRest.PendingInvites)
+			auth.POST("/pool/invites", poolRest.CreateInvite)
+			auth.POST("/pool/invites/:id/accept", poolRest.AcceptInvite)
+			auth.POST("/pool/invites/:id/decline", poolRest.DeclineInvite)
+			auth.GET("/pool/rooms/:id", poolRest.Room)
+			auth.POST("/pool/rooms/:id/ready", poolRest.Ready)
+
 			// ——读接口—— 封禁只限制「制造内容」，不限制看内容：
 			// 把人也一并挡在外面，等于让他连自己以前发的东西都翻不到。
 			//

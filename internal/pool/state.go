@@ -135,6 +135,7 @@ type PlayerBrief struct {
 // 每次快照的球顺序都不一样会让 reconcile 无谓地抖动。
 type Snapshot struct {
 	MatchID    uint             `json:"match_id"`
+	RoomCode   string           `json:"room_code"`
 	Status     string           `json:"status"`
 	Seat       Seat             `json:"seat"`
 	Turn       Seat             `json:"turn"`
@@ -192,6 +193,18 @@ func newMatchState(matchID uint, roomCode string, players [2]PlayerBrief) MatchS
 		Balls:    balls,
 		Ready:    [2]bool{true, true},
 	}
+}
+
+// newRoomState 造一个还没开局的房间：双方都没准备，不计时。
+//
+// 房间与对局共用同一个 actor：准备状态要能被两边同时观察，
+// 分开存会让「我刚点准备、对手正好点准备」这类交错出现两份真相。
+func newRoomState(matchID uint, roomCode string, players [2]PlayerBrief) MatchState {
+	state := newMatchState(matchID, roomCode, players)
+	state.Status = model.PoolStatusWaiting
+	state.Ready = [2]bool{false, false}
+	state.Deadline = time.Time{}
+	return state
 }
 
 // ballByID 按球号找球。找不到返回 ok=false，调用方决定是忽略还是报错。
@@ -252,6 +265,7 @@ func (s *MatchState) simBalls() []sim.RequestBall {
 func (s *MatchState) snapshot(viewer Seat, now time.Time) Snapshot {
 	snapshot := Snapshot{
 		MatchID:    s.MatchID,
+		RoomCode:   s.RoomCode,
 		Status:     s.Status,
 		Seat:       viewer,
 		Turn:       s.Turn,

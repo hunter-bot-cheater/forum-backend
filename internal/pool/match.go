@@ -53,9 +53,14 @@ type ShotRecord struct {
 }
 
 // MatchRecord 是结算的落库内容。
+//
+// 带的是赢家与输家的用户 id 而不是座位号：落库与算分都只认用户，
+// 座位号出了这一局就没有意义了。
 type MatchRecord struct {
 	MatchID   uint
 	Winner    Seat
+	WinnerID  uint
+	LoserID   uint
 	WinReason string
 	Shots     int
 	EndedAt   time.Time
@@ -96,6 +101,7 @@ const (
 	cmdShoot
 	cmdPlaceCue
 	cmdSnapshot
+	cmdReady
 	cmdLeave
 	cmdDisconnect
 	cmdClose
@@ -177,6 +183,22 @@ func (m *Match) PlaceCue(seat Seat, x, y float64) error {
 // Leave 主动退出，判负。
 func (m *Match) Leave(seat Seat) error {
 	return m.call(command{kind: cmdLeave, seat: seat})
+}
+
+// SetReady 设置某个座位的准备状态。双方都准备好时对局自动开局。
+//
+// 只允许在 waiting 阶段改：开局之后再点准备没有意义，
+// 放过去会让「准备」这个动作看起来能撤销，实际上什么都不做。
+func (m *Match) SetReady(seat Seat, ready bool) error {
+	return m.call(command{kind: cmdReady, seat: seat, x: boolToFloat(ready)})
+}
+
+// boolToFloat 把准备标记塞进命令的 x 字段，省一个只用于一个命令的字段。
+func boolToFloat(value bool) float64 {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 // NotifyDisconnect 告诉对局某个座位的连接断了。
@@ -291,6 +313,8 @@ func (m *Match) handle(cmd command) {
 		cmd.state <- m.state.snapshot(cmd.seat, time.Now())
 	case cmdLeave:
 		cmd.reply <- m.handleLeave(cmd)
+	case cmdReady:
+		cmd.reply <- m.handleReady(cmd)
 	case cmdDisconnect:
 		cmd.reply <- m.handleDisconnect(cmd)
 	}
@@ -491,6 +515,28 @@ func (m *Match) handleLeave(cmd command) error {
 	return nil
 }
 
+// handleReady 处理准备。双方齐了就把房间推进成对局。
+func (m *Match) handleReady(cmd command) error {
+	if m.state.Status != model.PoolStatusWaiting {
+		return ErrNotPlaying
+	}
+	if !cmd.seat.Valid() {
+		return ErrBadParams
+	}
+
+	m.state.Ready[cmd.seat] = cmd.x > 0
+	if !m.state.Ready[Seat0] || !m.state.Ready[Seat1] {
+		return nil
+	}
+
+	// 双方都准备：开局。读秒从现在开始算，不是从进房开始。
+	m.state.Status = model.PoolStatusPlaying
+	m.state.Deadline = time.Now().Add(m.opts.TurnTimeout)
+	m.broadcastState()
+	m.broadcast(m.wrap(MsgTurn, TurnData{Seat: m.state.Turn, DeadlineMS: m.remainingMS()}))
+	return nil
+}
+
 // handleDisconnect 处理掉线：摘掉连接并通知对手。
 func (m *Match) handleDisconnect(cmd command) error {
 	// 只摘掉还登记着的这条：玩家可能已经用新连接重连上来，
@@ -553,6 +599,8 @@ func (m *Match) finish(reason string) {
 	}
 	if m.state.Winner != nil {
 		record.Winner = *m.state.Winner
+		record.WinnerID = m.state.Players[*m.state.Winner].UserID
+		record.LoserID = m.state.Players[m.state.Winner.Other()].UserID
 	}
 	if err := m.opts.Recorder.FinishMatch(context.Background(), record); err != nil {
 		m.log.Error("finish match", "error", err)
