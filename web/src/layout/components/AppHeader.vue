@@ -2,8 +2,15 @@
   <header class="hdr">
     <div class="hdr__inner">
       <router-link to="/articles" class="hdr__brand">
-        <span class="hdr__logo">论</span>
-        <span class="hdr__name">论坛</span>
+        <!-- 品牌标记与 favicon 同源，30px 方块里只保留两个元素。
+             实测三元素版本在这个尺寸下屋顶与楼身会糊成一块，简化后轮廓才清楚。 -->
+        <span class="hdr__logo">
+          <svg viewBox="0 0 32 32" width="20" height="20" aria-hidden="true">
+            <path d="M16 4 L27.5 14 L4.5 14 Z" fill="currentColor" />
+            <rect x="8" y="17.5" width="16" height="6" rx="1.5" fill="currentColor" opacity="0.75" />
+          </svg>
+        </span>
+        <span class="hdr__name">楼顶</span>
       </router-link>
 
       <!-- 主导航只放两个内容入口。私信和通知做成右侧图标：

@@ -5,8 +5,13 @@
            窄屏直接隐藏，把宽度全留给输入框——手机上没人愿意先划过一个广告位。 -->
       <aside class="auth__aside">
         <div class="auth__brand">
-          <span class="auth__logo">论</span>
-          <span class="auth__name">论坛</span>
+          <span class="auth__logo">
+            <svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true">
+              <path d="M16 4 L27.5 14 L4.5 14 Z" fill="currentColor" />
+              <rect x="8" y="17.5" width="16" height="6" rx="1.5" fill="currentColor" opacity="0.75" />
+            </svg>
+          </span>
+          <span class="auth__name">楼顶</span>
         </div>
 
         <div class="auth__pitch">
@@ -24,8 +29,13 @@
       <main class="auth__main">
         <!-- 窄屏下左栏隐藏，品牌标记在这里补一份，否则整页看不到站名。 -->
         <div class="auth__brand auth__brand--compact">
-          <span class="auth__logo">论</span>
-          <span class="auth__name">论坛</span>
+          <span class="auth__logo">
+            <svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true">
+              <path d="M16 4 L27.5 14 L4.5 14 Z" fill="currentColor" />
+              <rect x="8" y="17.5" width="16" height="6" rx="1.5" fill="currentColor" opacity="0.75" />
+            </svg>
+          </span>
+          <span class="auth__name">楼顶</span>
         </div>
 
         <h1 class="auth__title">{{ title }}</h1>

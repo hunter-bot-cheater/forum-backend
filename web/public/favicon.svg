@@ -1,6 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="论坛">
-  <rect width="64" height="64" rx="14" fill="#1c7dff"/>
-  <text x="32" y="33" text-anchor="middle" dominant-baseline="central"
-        font-family="PingFang SC, Microsoft YaHei, Noto Sans SC, Source Han Sans SC, sans-serif"
-        font-size="38" font-weight="700" fill="#ffffff">论</text>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="楼顶社区">
+  <!-- 图标语义：三角屋顶对应「顶」，两层楼身对应「楼」与抢楼玩法。
+       屋顶与楼身之间留 3px 间隙，保证 16px 渲染时两截不会糊成一块。
+       两层楼身用透明度区分，32px 下能看出楼层分层。 -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF8A00"/>
+      <stop offset="1" stop-color="#FF2D55"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="7" fill="url(#bg)"/>
+  <path d="M16 3.5 L27 13 L5 13 Z" fill="#ffffff"/>
+  <rect x="8" y="16" width="16" height="5.5" rx="1.2" fill="#ffffff" opacity="0.9"/>
+  <rect x="8" y="24" width="16" height="4.5" rx="1.2" fill="#ffffff" opacity="0.55"/>
 </svg>
