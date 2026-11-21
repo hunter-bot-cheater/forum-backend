@@ -6,12 +6,16 @@
 // Seat 是席位号。0 是发起邀请的房主，1 是被邀请方。
 export type Seat = 0 | 1
 
-// BallGroup 是定组结果。开球后、首次合法进球之前两个人都是 undefined。
-export type BallGroup = 'solids' | 'stripes'
+// BallGroup 是定组结果。'none' 表示还没定组（开球后、首次合法进球之前）。
+//
+// 服务端给的是 [2]BallGroup 定长数组而不是稀疏对象：两个座位永远各有一份，
+// 用 'none' 占位比「缺 key」好处理——前端读 group[seat] 不必判 undefined。
+export type BallGroup = 'none' | 'solids' | 'stripes'
 
 // MatchStatus 与 pool_match.status 的取值一致。
-// waiting 是房间已建、还有一方没进；playing 才允许出杆。
-export type MatchStatus = 'waiting' | 'playing' | 'finished' | 'abandoned'
+// waiting 是房间已建、还有一方没进；playing 才允许出杆；
+// expired 是 90 秒没人进齐被自动解散。
+export type MatchStatus = 'waiting' | 'playing' | 'finished' | 'expired'
 
 // BallState 是一颗球在某一时刻的状态，单位米。
 //
@@ -59,13 +63,19 @@ export interface MatchSnapshot {
   turn: Seat
   deadline_ms: number
   balls: BallState[]
-  group: Partial<Record<Seat, BallGroup>>
+  group: [BallGroup, BallGroup]
   // ready 是房间页的两个准备标记，对局开始后恒为 [true, true]。
   // 能不能出杆只看 status 与 turn，不要拿它反推。
   ready: [boolean, boolean]
   ball_in_hand: boolean
   shot_seq: number
-  players: PlayerBrief[]
+  // players 是定长两项：没进房的那一侧 user_id 为 0，昵称与头像为空串。
+  players: [PlayerBrief, PlayerBrief]
+  // winner 只有结算后才有值，进行中的快照是 null。
+  winner: Seat | null
+  // win_reason 是赢法的机读码（eight_legal / eight_early / timeout / leave），
+  // 中文文案在前端定，这样服务端改文案不会影响前端的样式分支。
+  win_reason: string
 }
 
 // RoomSnapshot 是房间页轮询到的状态，比对局快照少一半字段。
@@ -77,7 +87,7 @@ export interface RoomSnapshot {
   status: MatchStatus
   seat: Seat
   ready: [boolean, boolean]
-  players: PlayerBrief[]
+  players: [PlayerBrief, PlayerBrief]
 }
 
 // PoolDrag 是一次画布拖动。dx / dy 是相对按下位置的累计位移（CSS 像素），

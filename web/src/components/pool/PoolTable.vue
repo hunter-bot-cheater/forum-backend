@@ -18,8 +18,9 @@
 // 指针拖动也只负责「换算成相对起点的位移」再抛给父级，
 // 具体是旋转瞄准还是拖动母球由页面决定：同一个画布以后还要支持手中球落位。
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { screenToWorld, fitTable, type Point } from '@/game/geometry'
 import type { AimLayer } from '@/game/renderer'
-import { drawScene } from '@/game/renderer'
+import { drawScene, TABLE_PADDING } from '@/game/renderer'
 import type { BallState, PoolDrag } from '@/game/types'
 
 const props = defineProps<{
@@ -29,6 +30,9 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   drag: [payload: PoolDrag]
+  // tap 是「按下又抬起、几乎没移动」的一次点按，坐标已换成台面世界坐标（米）。
+  // 手中球落位用它，瞄准走 drag，两者用同一个 scale，落点不会偏。
+  tap: [point: Point]
 }>()
 
 const host = ref<HTMLDivElement | null>(null)
@@ -150,6 +154,22 @@ function onPointerUp(e: PointerEvent) {
     target.releasePointerCapture(e.pointerId)
   }
   emit('drag', { phase: 'end', dx: e.clientX - originX, dy: e.clientY - originY })
+
+  // 位移小于 4px 才算点按。手指按下时几乎一定会抖几像素，
+  // 阈值给 0 会让「想点一下」变成「拖了一下」，落位永远不生效。
+  const moved = Math.hypot(e.clientX - originX, e.clientY - originY)
+  if (moved > 4) {
+    return
+  }
+  const el = canvas.value
+  if (!el) {
+    return
+  }
+  const rect = el.getBoundingClientRect()
+  // 变换必须和绘制时一模一样，否则会出现「看着点在中袋、球落在中袋另一侧」。
+  // 两者都从 fitTable + TABLE_PADDING 取，改一处就一起改。
+  const t = fitTable({ width: rect.width, height: rect.height }, TABLE_PADDING)
+  emit('tap', screenToWorld(t, e.clientX - rect.left, e.clientY - rect.top))
 }
 
 // onDprChange 在像素比变化时重画，并重新注册一次查询。

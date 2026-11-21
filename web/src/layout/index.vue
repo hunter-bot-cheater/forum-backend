@@ -6,6 +6,12 @@
     <main class="shell__main" :class="{ 'is-full-bleed': route.meta.fullBleed === true }">
       <router-view />
     </main>
+
+    <!-- 台球邀请弹层。挂在布局里而不是大厅页：邀请到达时用户可能正在读文章，
+         弹层必须到处都在。它是固定定位的，放在最后不影响文档流。
+         对局页不套这个布局，所以打球时不会被邀请打断——那条邀请会留在
+         store 里，回到大厅才弹出来。 -->
+    <InviteRequest />
   </div>
 </template>
 
@@ -13,17 +19,20 @@
 import { onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import AppHeader from './components/AppHeader.vue'
+import InviteRequest from '@/components/pool/InviteRequest.vue'
 import { getToken } from '@/utils/auth'
 import { connectWS } from '@/utils/ws'
 import { useUserStore } from '@/store/modules/user'
 import { useImStore } from '@/store/modules/im'
 import { useNotificationStore } from '@/store/modules/notification'
+import { usePoolStore } from '@/store/modules/pool'
 
 // route 用来判断当前页面要不要「铺满」：私信页要，其它带内边距的页面不要。
 const route = useRoute()
 const user = useUserStore()
 const im = useImStore()
 const notification = useNotificationStore()
+const pool = usePoolStore()
 
 onMounted(() => {
   const token = getToken()
@@ -38,12 +47,16 @@ onMounted(() => {
   // 处理函数还没挂上就会把那一帧丢掉。
   im.initWS()
   notification.initWS()
+  pool.initWS()
   connectWS(token)
   void user.fetchMe()
   void im.refresh()
   // 通知只拉计数（一次 GROUP BY），列表由通知页自己按分类按页拉，
   // 首屏没必要把所有通知正文都取回来。
   void notification.refreshSummary()
+  // 待接受的邀请只靠推送会漏：刷新页面时若正好有邀请在路上，
+  // 那一条推送已经发过了，补拉一次才能把它找回来。
+  void pool.refresh()
 })
 </script>
 

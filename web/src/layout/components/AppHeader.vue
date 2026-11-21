@@ -13,7 +13,7 @@
         <span class="hdr__name">楼顶</span>
       </router-link>
 
-      <!-- 主导航只放两个内容入口。私信和通知做成右侧图标：
+      <!-- 主导航放三个内容入口。私信和通知做成右侧图标：
            它们有未读数、需要常驻可见，但不像「文章/热榜」那样是浏览主线，
            平铺成四个导航项会让主次不分。 -->
       <nav class="hdr__nav">
@@ -95,9 +95,13 @@ const userStore = useUserStore()
 const im = useImStore()
 const notification = useNotificationStore()
 
+// 主导航三项。台球放在最后而不是塞进右侧图标区：
+// 它是一条独立的玩法主线（约人、开局、打完一局），
+// 和「私信/通知」那种「有未读才去看」的入口不是一类东西。
 const navs = [
   { path: '/articles', label: '文章' },
   { path: '/hot', label: '热榜' },
+  { path: '/pool', label: '台球' },
 ]
 
 // 详情页 /articles/:id 也要让「文章」保持选中：

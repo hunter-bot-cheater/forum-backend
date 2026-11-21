@@ -41,13 +41,17 @@ let manualClose = false
 // everConnected 让「首次连上」不触发补拉：首屏本来就在拉数据，补拉纯属重复请求。
 let everConnected = false
 
-// buildURL 把 REST 的 baseURL 翻译成 WebSocket 地址。
+// wsURL 把 REST 的 baseURL 翻译成某个 WebSocket 端点的完整地址。
 //
 // 两个坑：
 //   1. 浏览器不接受相对路径，必须补上协议和 host；
 //   2. 走 vite 代理时 baseURL 是 '/api'，走独立域名时是 'https://x.com/api'，
 //      后者要把 http(s) 换成 ws(s)，否则握手直接被浏览器拒绝。
-function buildURL(token: string): string {
+//
+// 抽出来给通知与对局两处共用：两边各自拼一遍地址，
+// 迟早出现「通知连得上、对局连不上」这种只在生产域名下才暴露的问题。
+// path 传 '/ws/game' 这种以斜杠开头的相对路径。
+export function wsURL(path: string, params: Record<string, string>): string {
   const base = import.meta.env.VITE_API_BASE_URL || '/api'
   let prefix = base
   if (/^https?:\/\//i.test(base)) {
@@ -58,7 +62,18 @@ function buildURL(token: string): string {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     prefix = proto + '//' + location.host + base
   }
-  return prefix.replace(/\/+$/, '') + '/ws/notifications?token=' + encodeURIComponent(token)
+
+  const query: string[] = []
+  for (const key of Object.keys(params)) {
+    query.push(encodeURIComponent(key) + '=' + encodeURIComponent(params[key]))
+  }
+  const tail = query.length > 0 ? '?' + query.join('&') : ''
+  return prefix.replace(/\/+$/, '') + path + tail
+}
+
+// buildURL 是通知连接的地址。
+function buildURL(token: string): string {
+  return wsURL('/ws/notifications', { token })
 }
 
 // connectWS 建立连接，幂等：同一个 token 重复调用不会建第二条。

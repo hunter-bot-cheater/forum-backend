@@ -78,6 +78,11 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      # 只等它启动，不等健康：物理服务首杆要预热七秒，
+      # api 起来时它没就绪也没关系——那时的出杆会拿到 ErrUnavailable，
+      # 玩家重试一次就好，而把 api 一起拖着不启动会连文章都看不了。
+      pool-sim:
+        condition: service_started
     environment:
       MYSQL_HOST: mysql
       MYSQL_PASSWORD: ${MYSQL_PASSWORD}
@@ -87,6 +92,8 @@ services:
       # 没配模型 key 时自动标签整条链路关闭，发布接口不会发外部请求。
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_ENABLED: ${LLM_ENABLED:-false}
+      # 走 compose 的服务名，不用 127.0.0.1：容器里的回环地址是自己。
+      POOL_SIM_URL: http://pool-sim:8000
     # 不映射端口：只让 web 容器通过内部网络访问 8080，
     # 宿主机和公网都碰不到后端，少一个被扫的入口。
     expose:

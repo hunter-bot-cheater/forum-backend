@@ -104,18 +104,34 @@ const routes: RouteRecordRaw[] = [
         // 带 20px 内边距的话，顶部标题和左栏会各缩进一块，看起来不像沉浸式私信页。
         meta: { title: '私信', fullBleed: true },
       },
+      {
+        // 台球大厅：从关注列表里挑一个人约球。
+        // 不设 public：后端所有 pool 接口都要求登录，游客进得来也只是满屏报错。
+        path: 'pool',
+        name: 'PoolLobby',
+        component: () => import('@/views/pool/lobby.vue'),
+        meta: { title: '台球对战' },
+      },
+      {
+        // 房间页。必须能单独刷新——被邀请方常常是「点开链接顺手刷一下」，
+        // 所以它的全部状态都来自 GET /api/pool/rooms/:id，不依赖内存态。
+        path: 'pool/room/:id',
+        name: 'PoolRoom',
+        component: () => import('@/views/pool/room.vue'),
+        meta: { title: '准备中' },
+        props: true,
+      },
     ],
   },
   {
     // 对局页不套 Layout：顶栏与内容区留白在全屏球台里都是干扰，
     // 页面自己画一条窄操作栏就够了。
     //
-    // M1 阶段标 public 是为了能在未登录状态直接开地址验收画面；
-    // 接入真实对局（M5）时要去掉这一行，让游客先登录。
+    // 不设 public：对局连接要带 token 认人，游客连不上只会看到一片黑。
     path: '/pool/match/:id',
     name: 'PoolMatch',
     component: () => import('@/views/pool/match.vue'),
-    meta: { title: '台球对局', public: true },
+    meta: { title: '台球对局' },
     props: true,
   },
   { path: '/:pathMatch(.*)*', redirect: '/articles' },
