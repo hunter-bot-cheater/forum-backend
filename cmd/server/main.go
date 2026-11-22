@@ -111,10 +111,11 @@ func main() {
 	// Recorder 必须传：不传的话 Manager 会兜一个 NopRecorder，
 	// 结果是一杆都不落库、对局永远不会从 playing 变成 finished——
 	// 战绩页永远是空的，回放一杆都读不到，而且没有任何报错。
+	poolStore := pool.NewStore(db)
 	poolManager, err := pool.NewManager(pool.Options{
 		Sim:         sim.NewClient(cfg.Pool.SimURL),
 		TurnTimeout: time.Duration(cfg.Pool.TurnTimeoutSeconds) * time.Second,
-		Recorder:    pool.NewStore(db),
+		Recorder:    poolStore,
 	})
 	if err != nil {
 		exitOnError("对局服务初始化失败", err)
@@ -195,6 +196,15 @@ func main() {
 	go func() {
 		defer wg.Done()
 		poolManager.Janitor(ctx, time.Minute, 10*time.Minute)
+	}()
+
+	// 房间清扫：把开了两小时还没开打的房间标成过期。
+	// 大厅点一下就开一间房，不清理的话库里会积一批永远 waiting 的行，
+	// 六位房号被逐一占满，新房间的可选号码越来越窄。
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		pool.ExpireRooms(ctx, poolStore, time.Minute, 2*time.Hour)
 	}()
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)

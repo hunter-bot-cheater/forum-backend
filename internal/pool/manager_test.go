@@ -2,6 +2,7 @@ package pool
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -73,6 +74,55 @@ func TestSweepKeepsPlayingMatches(t *testing.T) {
 	manager.sweep(0)
 	if _, ok := manager.Get(72); !ok {
 		t.Fatal("正在进行的对局被收掉了")
+	}
+}
+
+// 没人理的房间要被收掉：点一下台球就开一间，关掉页面之后不该永远留着。
+//
+// 判据是「最近一次有人跟它说话」多久之前，而不是「建了多久」：
+// 双方在房间里等的时候一个连接都没有，只能靠轮询打点。
+func TestSweepReapsAbandonedRooms(t *testing.T) {
+	manager, err := NewManager(Options{Sim: &fakeSim{shot: quietShot()}, TurnTimeout: time.Minute})
+	if err != nil {
+		t.Fatalf("构造 manager 失败：%v", err)
+	}
+	t.Cleanup(manager.CloseAll)
+
+	abandoned := manager.Create(newRoomState(81, "000181", [2]PlayerBrief{{UserID: 5}}))
+	manager.Create(newRoomState(82, "000182", [2]PlayerBrief{{UserID: 6}}))
+
+	// 把 81 的活跃时间推到保留期之外，82 保持刚建好的样子。
+	atomic.StoreInt64(&abandoned.lastActive, time.Now().Add(-2*time.Minute).UnixNano())
+
+	manager.sweep(time.Minute)
+	if _, ok := manager.Get(81); ok {
+		t.Error("超过保留期没人理的房间应当被收掉")
+	}
+	if _, ok := manager.Get(82); !ok {
+		t.Error("刚建好的房间被收掉了")
+	}
+}
+
+// 有人还在轮询的房间不许收，哪怕它已经开了很久。
+//
+// 快照请求就是打点：房间页每 1.5 秒调一次，一分钟内一定有一次。
+func TestSweepKeepsRoomThatKeepsPolling(t *testing.T) {
+	manager, err := NewManager(Options{Sim: &fakeSim{shot: quietShot()}, TurnTimeout: time.Minute})
+	if err != nil {
+		t.Fatalf("构造 manager 失败：%v", err)
+	}
+	t.Cleanup(manager.CloseAll)
+
+	match := manager.Create(newRoomState(83, "000183", [2]PlayerBrief{{UserID: 7}}))
+	// 先把活跃时间推到很久以前，再让一次快照把它拉回来。
+	atomic.StoreInt64(&match.lastActive, time.Now().Add(-2*time.Minute).UnixNano())
+	if _, err := match.Snapshot(Seat0); err != nil {
+		t.Fatalf("取快照失败：%v", err)
+	}
+
+	manager.sweep(time.Minute)
+	if _, ok := manager.Get(83); !ok {
+		t.Fatal("有人还在轮询的房间被收掉了")
 	}
 }
 

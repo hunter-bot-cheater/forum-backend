@@ -5,7 +5,10 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"forum-backend/internal/model"
 )
 
 // Manager 是进程内所有进行中对局的登记表。
@@ -128,7 +131,7 @@ func (m *Manager) Janitor(ctx context.Context, interval, keep time.Duration) {
 	}
 }
 
-// sweep 收掉「已结束且超过 keep」的对局。
+// sweep 收掉「已结束且超过 keep」的对局，以及「还没开局又一直没人理」的房间。
 func (m *Manager) sweep(keep time.Duration) {
 	now := time.Now()
 
@@ -137,7 +140,7 @@ func (m *Manager) sweep(keep time.Duration) {
 	for id, match := range m.matches {
 		// 这里读的是 actor 内部状态，理论上要经命令通道。
 		// 收垃圾这个场景允许读到略旧的快照：最坏是多活一轮，不会收错。
-		if match.idleFor(now) > keep {
+		if match.idleFor(now) > keep || match.roomIdleFor(now) > keep {
 			candidates = append(candidates, id)
 		}
 	}
@@ -162,4 +165,25 @@ func (m *Match) idleFor(now time.Time) time.Duration {
 		return 0
 	}
 	return now.Sub(finishedAt)
+}
+
+// touch 记一次「有人还在这局上」。
+func (m *Match) touch() {
+	atomic.StoreInt64(&m.lastActive, time.Now().UnixNano())
+}
+
+// roomIdleFor 返回这条「还没开局的房间」多久没人理了。非房间阶段一律返回 0。
+//
+// 大厅点一下台球就开一间房，人随手关掉页面后这间房会一直挂着：
+// 一局一个 goroutine，几千个用户逛一圈就是几千个协程。
+//
+// 只认 waiting：正在打的由读秒管，已结束的由 idleFor 那条规则管。
+// 判据是「有没有人跟它说过话」而不是「有没有连接」——房间页是 HTTP 轮询，
+// 双方都在页面上等的时候一个 WebSocket 连接都没有。
+func (m *Match) roomIdleFor(now time.Time) time.Duration {
+	info, ok := m.Live()
+	if !ok || info.Status != model.PoolStatusWaiting {
+		return 0
+	}
+	return now.Sub(time.Unix(0, atomic.LoadInt64(&m.lastActive)))
 }
