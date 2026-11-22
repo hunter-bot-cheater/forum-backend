@@ -221,6 +221,18 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 		return
 	}
 
+	// 先把自己的资料取好，再去抢座位。
+	//
+	// 顺序反过来会有个难看的窗口：抢到座位之后才去查昵称，查询失败就只能回 500，
+	// 而库里已经写着「他是这间房的客人」——页面收不到房间，房主却看到有人坐着。
+	briefs, err := h.users.Briefs(ctx, []uint{userID})
+	if err != nil {
+		httputil.LogRequestError(c, "load player briefs", err)
+		response.Error(c, http.StatusInternalServerError, "服务暂时不可用")
+		return
+	}
+	brief := briefOf(briefs, userID)
+
 	// 判据交给带条件的 UPDATE：两个人几乎同时输同一个房号时，
 	// 「先查空位再写」会让两个人都以为自己抢到了。
 	joined, err := h.store.JoinRoom(ctx, row.ID, userID)
@@ -234,32 +246,18 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 		return
 	}
 
-	briefs, err := h.users.Briefs(ctx, []uint{userID})
-	if err != nil {
-		httputil.LogRequestError(c, "load player briefs", err)
-		response.Error(c, http.StatusInternalServerError, "服务暂时不可用")
-		return
-	}
-	brief := briefOf(briefs, userID)
+	// 从这里开始库里已经把他写在座位 1 上了：后面任何一步失败都要把座位退回去，
+	// 否则房主面对的是一个永远不会点准备的人。
+	row.P1ID = &userID
 
 	// 内存里已经有 actor 就把座位补上；没有（房间是在别的请求里建好、但被清扫过）
 	// 就按库里现在的两个人重建一份。
-	row.P1ID = &userID
-	var match *Match
-	if existing, ok := h.manager.Get(row.ID); ok {
-		match = existing
-		if err := match.FillSeat(Seat1, brief); err != nil {
-			httputil.LogRequestError(c, "fill room seat", err)
-			response.Error(c, http.StatusNotFound, msgRoomNotFound)
-			return
-		}
-	} else {
-		match, _, err = h.attachRoom(ctx, row, userID)
-		if err != nil {
-			httputil.LogRequestError(c, "attach room", err)
-			response.Error(c, http.StatusInternalServerError, "进房失败，请重试")
-			return
-		}
+	match, err := h.seatGuest(ctx, row, userID, brief)
+	if err != nil {
+		httputil.LogRequestError(c, "fill room seat", err)
+		h.rollbackSeat(ctx, row.ID, userID)
+		response.Error(c, http.StatusInternalServerError, "进房失败，请重试")
+		return
 	}
 
 	// 房主那边不用刷新就能看到「人来了」。推送失败不要紧，房间页 1.5 秒轮询一次。
@@ -270,6 +268,8 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 
 	// 我自己原来那间房没用了：一个人同时只能在一间房里等。
 	h.retireOwnRooms(ctx, userID, row.ID)
+	// 还有另一种「另一间房」：我曾以客人身份坐在别人房里，那一行也记着我。
+	h.vacateGuestSeats(ctx, userID, row.ID)
 
 	h.writeRoom(c, match, Seat1)
 }
@@ -288,6 +288,57 @@ func (h *Handler) retireOwnRooms(ctx context.Context, userID, keepID uint) {
 	}
 	for _, id := range ids {
 		h.manager.Remove(id)
+	}
+}
+
+// vacateGuestSeats 腾掉「我曾以客人身份坐着的其他房间」里的座位，keepID 不动。
+//
+// 与 retireOwnRooms 的分工：那个收的是我开的房（整间作废），这个只把座位空出来——
+// 那些房的主人还在等，房得留着。库里改完还要清内存里的座位，否则房主那一屏
+// 会一直显示一个早已离开的人，准备键永远等不齐。
+func (h *Handler) vacateGuestSeats(ctx context.Context, userID, keepID uint) {
+	ids, err := h.store.ClearGuestSeats(ctx, userID, keepID)
+	if err != nil {
+		slog.WarnContext(ctx, "clear guest seats", "user_id", userID, "error", err)
+		return
+	}
+	for _, id := range ids {
+		if match, ok := h.manager.Get(id); ok {
+			if err := match.FillSeat(Seat1, PlayerBrief{}); err != nil {
+				slog.WarnContext(ctx, "clear guest seat", "match_id", id, "error", err)
+			}
+		}
+	}
+}
+
+// seatGuest 把刚抢到座位的人放进内存里的那间房。
+//
+// actor 还在就把座位补上；已经被清扫掉（抢座位与补座位之间那一瞬）就按库里
+// 现在的两个人重建一份——库里写着他在座位 1 上，重建出来的房间才是对的。
+func (h *Handler) seatGuest(ctx context.Context, row *model.PoolMatch, userID uint, brief PlayerBrief) (*Match, error) {
+	if existing, ok := h.manager.Get(row.ID); ok {
+		if err := existing.FillSeat(Seat1, brief); err == nil {
+			return existing, nil
+		}
+		// 补座位失败只有一个原因：这个 actor 刚被关掉。落到下面重建。
+	}
+	match, _, err := h.attachRoom(ctx, row, userID)
+	return match, err
+}
+
+// rollbackSeat 在「库里已经抢到座位、后面某一步却失败」时把座位退回去。
+//
+// 不退的话，房主会看到一个人坐在对面却永远不会点准备，那间房既凑不齐也开不了，
+// 只能等两小时那条清扫规则来收。回滚只在真出错时发生，正常路径不会有额外开销。
+func (h *Handler) rollbackSeat(ctx context.Context, matchID, userID uint) {
+	if _, err := h.store.LeaveRoom(ctx, matchID, userID); err != nil {
+		slog.WarnContext(ctx, "rollback joined seat", "match_id", matchID, "user_id", userID, "error", err)
+		return
+	}
+	if match, ok := h.manager.Get(matchID); ok {
+		if err := match.FillSeat(Seat1, PlayerBrief{}); err != nil {
+			slog.WarnContext(ctx, "clear seat after rollback", "match_id", matchID, "error", err)
+		}
 	}
 }
 

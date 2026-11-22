@@ -616,6 +616,55 @@ func TestJoinRoomRetiresOwnRoom(t *testing.T) {
 	}
 }
 
+// 在甲的房间坐着，再去进乙的房间：甲那间房的座位要空出来，房要还在。
+//
+// 「客人」这个身份是房主把我写进去的，退自己的房不会动它。不腾的话，
+// 甲面对的是一个永远不会点准备的人，他那间房既凑不齐也开不了，
+// 只能等两小时那条清扫规则来收。
+func TestJoinSecondRoomVacatesFirstSeat(t *testing.T) {
+	db := testutil.NewDB(t)
+	engine := newEngine(t, db, newRoomManager(t), map[uint]string{7: "甲", 8: "乙", 9: "丙"}, &fakeHub{})
+
+	first := openRoomFor(t, engine, 7)
+	second := openRoomFor(t, engine, 9)
+
+	if status, body := postJSON(t, engine, "/api/pool/rooms/join", 8,
+		joinRoomReq{RoomCode: first.RoomCode}); status != http.StatusOK {
+		t.Fatalf("进第一间房失败 %d：%s", status, body)
+	}
+	if status, body := postJSON(t, engine, "/api/pool/rooms/join", 8,
+		joinRoomReq{RoomCode: second.RoomCode}); status != http.StatusOK {
+		t.Fatalf("进第二间房失败 %d：%s", status, body)
+	}
+
+	// 第一间房回到「只有房主」：房里没人了，但房本身还得在。
+	var row model.PoolMatch
+	if err := db.First(&row, first.MatchID).Error; err != nil {
+		t.Fatalf("读回第一间房失败：%v", err)
+	}
+	if row.Status != model.PoolStatusWaiting {
+		t.Errorf("第一间房 status = %q，期望还在 waiting", row.Status)
+	}
+	if row.P1ID != nil {
+		t.Errorf("第一间房的座位 1 = %v，期望空出来", *row.P1ID)
+	}
+
+	// 甲刷一下页面看到的必须是空位：内存里的座位也要清，否则那一屏还坐着人。
+	mine := openRoomFor(t, engine, 7)
+	if mine.MatchID != first.MatchID {
+		t.Fatalf("甲的房间被换掉了：%d -> %d", first.MatchID, mine.MatchID)
+	}
+	if mine.Players[1].UserID != 0 {
+		t.Errorf("甲的房间里还坐着人：%+v", mine.Players[1])
+	}
+
+	// 乙自己那间当然也作废了，「我的房间」唯一地指向第二间。
+	myAfter := openRoomFor(t, engine, 8)
+	if myAfter.MatchID != second.MatchID || myAfter.Seat != Seat1 {
+		t.Errorf("乙的房间 = %+v，期望在第二间 %d（座位 1）", myAfter, second.MatchID)
+	}
+}
+
 // 开局之后大厅不该另开一间新房，而是把正在打的那一局还回来。
 //
 // 大厅每两秒问一次「我的房间」。若这里只认 waiting，双方准备好、房间变成

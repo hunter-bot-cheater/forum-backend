@@ -241,18 +241,24 @@ func (h *Handler) AcceptInvite(c *gin.Context) {
 	}
 
 	if !h.invites.SetStatus(invite.ID, InviteAccepted) {
+		// 抢到座位之后才发现这条邀请已经被别处处理掉（另一端的标签页先点了、
+		// 或者已经过期）。座位得退回去，否则对方的房间里坐着一个不会点准备的人。
+		h.rollbackSeat(ctx, invite.MatchID, userID)
 		response.Error(c, http.StatusNotFound, "邀请已失效")
 		return
 	}
 
 	if err := h.fillJoinedSeat(ctx, invite.MatchID, userID); err != nil {
 		httputil.LogRequestError(c, "fill seat after invite", err)
+		h.rollbackSeat(ctx, invite.MatchID, userID)
 		response.Error(c, http.StatusInternalServerError, "进房失败，请重试")
 		return
 	}
 
 	// 接受邀请的人原来那间房也要作废：一个人同时只能在一间房里等。
 	h.retireOwnRooms(ctx, userID, invite.MatchID)
+	// 以及「我曾以客人身份坐在别的房间」那种情况：房留着，座位要腾出来。
+	h.vacateGuestSeats(ctx, userID, invite.MatchID)
 
 	// 通知邀请人：对方接受了，房间页会立刻把空位换成人。
 	h.hub.Push(invite.FromID, realtime.PushMessage{

@@ -165,6 +165,38 @@ func (s *Store) LeaveRoom(ctx context.Context, matchID, userID uint) (bool, erro
 	return result.RowsAffected == 1, nil
 }
 
+// ClearGuestSeats 把这个人以「客人」身份坐着的其他房间腾出来，keepID 那间留着。
+//
+// 为什么需要它：ExpireOwnRooms 只管「我是房主」的那些房，而「客人」这个身份
+// 是别人把我写进去的。在甲的房间坐过，再去进乙的房间，甲那一行仍然记着
+// p1_id=我——甲的页面上坐着一个人，却永远不会点准备，那间房也永远凑不齐，
+// 只能等两小时那条清扫规则来收。
+//
+// 与 ExpireOwnRooms 的区别是不作废房间：那间房的主人还在等，房该活着，
+// 只是座位 1 空出来。返回腾过的 match id，调用方拿去清内存里的座位。
+func (s *Store) ClearGuestSeats(ctx context.Context, userID, keepID uint) ([]uint, error) {
+	var ids []uint
+	err := s.db.WithContext(ctx).Model(&model.PoolMatch{}).
+		Where("status = ? AND p1_id = ? AND id <> ?", model.PoolStatusWaiting, userID, keepID).
+		Pluck("id", &ids).Error
+	if err != nil {
+		return nil, fmt.Errorf("load guest rooms: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	// 再带一次 status 条件：查出来与更新之间那间房可能已经开局，
+	// 那时候座位上是真人，不能按旧结果清掉。
+	err = s.db.WithContext(ctx).Model(&model.PoolMatch{}).
+		Where("id IN ? AND status = ?", ids, model.PoolStatusWaiting).
+		Update("p1_id", nil).Error
+	if err != nil {
+		return nil, fmt.Errorf("clear guest seats: %w", err)
+	}
+	return ids, nil
+}
+
 // ExpireStaleWaiting 把开了太久还没凑齐人的房间标成过期。
 //
 // 房间现在由用户随手就开（进大厅就有一个），不清理的话库里会积一堆 waiting 行，

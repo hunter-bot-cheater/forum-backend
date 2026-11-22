@@ -396,3 +396,78 @@ func TestRecentMatchesPaging(t *testing.T) {
 func timePtr(value time.Time) *time.Time {
 	return &value
 }
+
+// 一个人只能在一间房里等，而「客人」这个身份是别人写进去的：
+// 我在甲的房间坐过再去进乙的房间，甲那一行还记着我。
+// ClearGuestSeats 要把那些旧座位腾掉，但房要留着——甲还在里面等人。
+func TestClearGuestSeatsOnlyTouchesGuestRooms(t *testing.T) {
+	db := testutil.NewDB(t)
+	store := NewStore(db)
+	ctx := context.Background()
+
+	seedSeq++
+	host := testutil.SeedUser(t, db, "cs_"+strconv.Itoa(seedSeq)+"_host")
+	guest := testutil.SeedUser(t, db, "cs_"+strconv.Itoa(seedSeq)+"_guest")
+
+	// 甲的房间：guest 坐在座位 1 上。
+	first, err := store.CreateMatch(ctx, host.ID, &guest.ID, "700001")
+	if err != nil {
+		t.Fatalf("建第一间房失败: %v", err)
+	}
+	// 乙的房间：guest 后来进了这间，这间要留着。
+	second, err := store.CreateMatch(ctx, host.ID, &guest.ID, "700002")
+	if err != nil {
+		t.Fatalf("建第二间房失败: %v", err)
+	}
+	// guest 自己开的一间房：ExpireOwnRooms 管它，这里不该动。
+	own, err := store.CreateMatch(ctx, guest.ID, nil, "700003")
+	if err != nil {
+		t.Fatalf("建自己的房失败: %v", err)
+	}
+	// 已经在打的对局：座位上是真人，按 status 条件不能被清。
+	playing, err := store.CreateMatch(ctx, host.ID, &guest.ID, "700004")
+	if err != nil {
+		t.Fatalf("建对局失败: %v", err)
+	}
+	if err := db.Model(&model.PoolMatch{}).Where("id = ?", playing.ID).
+		Update("status", model.PoolStatusPlaying).Error; err != nil {
+		t.Fatalf("改状态失败: %v", err)
+	}
+
+	ids, err := store.ClearGuestSeats(ctx, guest.ID, second.ID)
+	if err != nil {
+		t.Fatalf("腾座位失败: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != first.ID {
+		t.Fatalf("腾了 %v，期望只有第一间房 %d", ids, first.ID)
+	}
+
+	readP1 := func(id uint) *uint {
+		var row model.PoolMatch
+		if err := db.First(&row, id).Error; err != nil {
+			t.Fatalf("读回 %d 失败: %v", id, err)
+		}
+		return row.P1ID
+	}
+	if got := readP1(first.ID); got != nil {
+		t.Errorf("第一间房的座位 1 = %v，期望空出来", *got)
+	}
+	if got := readP1(second.ID); got == nil || *got != guest.ID {
+		t.Errorf("第二间房（他正在等的）被腾掉了：%v", got)
+	}
+	if got := readP1(own.ID); got != nil {
+		t.Errorf("他自己开的房座位被动了：%v", got)
+	}
+	if got := readP1(playing.ID); got == nil || *got != guest.ID {
+		t.Errorf("进行中的对局座位被清了：%v", got)
+	}
+
+	// 房间本体必须还在：房主还在里面等，只是座位空出来了。
+	var row model.PoolMatch
+	if err := db.First(&row, first.ID).Error; err != nil {
+		t.Fatalf("读回第一间房失败: %v", err)
+	}
+	if row.Status != model.PoolStatusWaiting {
+		t.Errorf("第一间房的状态 = %s，期望还在 waiting", row.Status)
+	}
+}
