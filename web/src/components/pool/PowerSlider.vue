@@ -8,9 +8,6 @@
     aria-valuemax="100"
     aria-label="力度"
     @pointerdown="onDown"
-    @pointermove="onMove"
-    @pointerup="onUp"
-    @pointercancel="onUp"
   >
     <div ref="track" class="pw__track">
       <div class="pw__fill" :style="{ height: percent }"></div>
@@ -29,7 +26,7 @@
 // 拖动过程中不锁定手指与滑块的对应关系（不是「拖着球走」），
 // 而是「手指在哪，力度就是哪」：竖屏手机上滑块只有手指肚大小，
 // 要求精确按住它再拖，实际很难操作。
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 
 const props = defineProps<{
   // 0 到 1 的力度。
@@ -45,6 +42,27 @@ const emit = defineEmits<{
 
 const track = ref<HTMLDivElement | null>(null)
 let pressing = false
+// activePointer 是当前正在拖的那根手指。多点触控时另一根手指的 move 不能改力度，
+// 否则两只手同时按上来，滑块会在两个位置之间跳。
+let activePointer = -1
+
+// attach / detach 把 move 与 up 挂到 window 上。
+//
+// 只绑在组件自己身上是不够的：滑轨只有 12px 宽（组件 30px），
+// 手指斜着往下拖很容易移出这个窄条，元素收不到 pointermove，
+// 力度就停在移出那一刻的值——表现就是「拖一下立刻不能动了，只有 2」。
+// setPointerCapture 在部分浏览器上手势判定后会被静默取消，不能只靠它。
+function attach() {
+  window.addEventListener('pointermove', onMove)
+  window.addEventListener('pointerup', onUp)
+  window.addEventListener('pointercancel', onUp)
+}
+
+function detach() {
+  window.removeEventListener('pointermove', onMove)
+  window.removeEventListener('pointerup', onUp)
+  window.removeEventListener('pointercancel', onUp)
+}
 
 // percent 是给样式用的字符串，省得模板里拼两次。
 const percent = computed(() => Math.round(props.value * 100) + '%')
@@ -76,19 +94,20 @@ function valueAt(clientY: number): number {
   return clamp01((clientY - rect.top) / rect.height)
 }
 
-// onDown 按下即取值并捕获指针，拖出轨道也能继续调。
+// onDown 按下即取值并开始跟踪，拖出轨道也能继续调。
 function onDown(e: PointerEvent) {
   if (props.disabled || (e.pointerType === 'mouse' && e.button !== 0)) {
     return
   }
   pressing = true
-  ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  activePointer = e.pointerId
+  attach()
   emit('update:value', valueAt(e.clientY))
 }
 
-// onMove 只在按下后响应。
+// onMove 只在按下之后响应，并且只认按下的那根手指。
 function onMove(e: PointerEvent) {
-  if (!pressing || props.disabled) {
+  if (!pressing || e.pointerId !== activePointer || props.disabled) {
     return
   }
   emit('update:value', valueAt(e.clientY))
@@ -99,19 +118,25 @@ function onMove(e: PointerEvent) {
 // 力度小于 2% 当成误触：手指只是碰了一下轨道就抬手，不应该把球打出去。
 // 这个阈值也给「取消出杆」留了口子——把力度拖回顶部再松手即可。
 function onUp(e: PointerEvent) {
-  if (!pressing) {
+  if (!pressing || e.pointerId !== activePointer) {
     return
   }
   pressing = false
-  const target = e.currentTarget as HTMLElement
-  if (target.hasPointerCapture(e.pointerId)) {
-    target.releasePointerCapture(e.pointerId)
-  }
+  activePointer = -1
+  detach()
   if (props.disabled || props.value < 0.02) {
     return
   }
   emit('shoot')
 }
+
+// 组件被卸载时可能正拖着（比如对局结束、路由离开），
+// 不摘监听会在 window 上留一对永远不触发的回调，且下次挂载再添一遍。
+onBeforeUnmount(() => {
+  pressing = false
+  activePointer = -1
+  detach()
+})
 </script>
 
 <style scoped>
@@ -124,6 +149,10 @@ function onUp(e: PointerEvent) {
   gap: 6px;
   width: 100%;
   height: 100%;
+  /* 热区比视觉上的滑轨宽：手指按在轨道左右几像素也该算按中。
+     加宽的是外框，滑轨本身仍是 12px，看起来和原来一样。 */
+  padding: 0 8px;
+  box-sizing: border-box;
   touch-action: none;
 }
 
@@ -134,7 +163,7 @@ function onUp(e: PointerEvent) {
   flex: 1;
   width: 12px;
   min-height: 120px;
-  margin: 0 9px;
+  margin: 0 auto;
   background: #1a1d26;
   border-radius: 6px;
   box-shadow:

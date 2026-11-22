@@ -2,10 +2,13 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 
 // 组件只负责尺寸、DPR、生命周期与指针转发，绘制本身在 renderer 里已经测过，
-// 这里把 drawScene 换掉，断言「有没有画、画的尺寸对不对」。
-const drawScene = vi.hoisted(() => vi.fn())
+// 这里把两个绘制入口都换掉，断言「有没有画、画的尺寸对不对」。
+// 台面（木框/库边/台呢/袋口）与动态层（杆、瞄准线、球）是两个入口：
+// 前者走离屏缓存，后者每帧重画，两者调用次数本身就是这项优化的判据。
+const drawTable = vi.hoisted(() => vi.fn())
+const drawActors = vi.hoisted(() => vi.fn())
 // TABLE_PADDING 是真实常量，指针换算要用它；只有绘制函数被替掉。
-vi.mock('@/game/renderer', () => ({ drawScene, TABLE_PADDING: 12 }))
+vi.mock('@/game/renderer', () => ({ drawTable, drawActors, TABLE_PADDING: 12 }))
 
 import PoolTable from './PoolTable.vue'
 import type { BallState } from '@/game/types'
@@ -65,7 +68,8 @@ beforeAll(() => {
 beforeEach(() => {
   resizeCallbacks.length = 0
   disconnectSpy.mockClear()
-  drawScene.mockClear()
+  drawTable.mockClear()
+  drawActors.mockClear()
   vi.stubGlobal('ResizeObserver', FakeResizeObserver)
 
   Object.defineProperty(HTMLCanvasElement.prototype, 'clientWidth', {
@@ -76,16 +80,20 @@ beforeEach(() => {
     configurable: true,
     get: () => 600,
   })
+  // 画布上下文在 jsdom 里是空的。这里只补 paint 真正用到的那几个：
+  // 复位变换、清屏、把静态层贴回去。
   HTMLCanvasElement.prototype.getContext = (() => ({
     setTransform: vi.fn(),
+    clearRect: vi.fn(),
+    drawImage: vi.fn(),
   })) as unknown as typeof HTMLCanvasElement.prototype.getContext
 })
 
 describe('PoolTable', () => {
   it('挂载后按 CSS 尺寸画一帧', () => {
     mount(PoolTable, { props: { balls: balls() } })
-    expect(drawScene).toHaveBeenCalledTimes(1)
-    const args = drawScene.mock.calls[0]
+    expect(drawActors).toHaveBeenCalledTimes(1)
+    const args = drawActors.mock.calls[0]
     expect(args[1]).toEqual({ width: 300, height: 600 })
   })
 
@@ -98,18 +106,47 @@ describe('PoolTable', () => {
 
   it('球位变化会重画', async () => {
     const wrapper = mount(PoolTable, { props: { balls: balls() } })
-    drawScene.mockClear()
+    drawActors.mockClear()
     wrapper.setProps({ balls: [...balls(), { id: '9', x: 0.4, y: 1.2, z: 0, on_table: true }] })
     await new Promise((r) => setTimeout(r, 40))
-    expect(drawScene).toHaveBeenCalled()
+    expect(drawActors).toHaveBeenCalled()
+    // 台呢、库边、六个袋口一帧一个像素都不变，却在拖动时每帧重画——
+    // 那正是「动杆子发涩」的来源。球位变化只该重画动态层。
+    expect(drawTable).toHaveBeenCalledTimes(1)
+  })
+
+  it('容器尺寸不变时复用静态台面，变了才重画', async () => {
+    mount(PoolTable, { props: { balls: balls() } })
+    // 挂载时画了一次台面。
+    expect(drawTable).toHaveBeenCalledTimes(1)
+
+    // 尺寸没变：静态层继续用缓存。
+    triggerResize()
+    await new Promise((r) => setTimeout(r, 40))
+    expect(drawTable).toHaveBeenCalledTimes(1)
+
+    // 尺寸变了：缓存作废，按新尺寸重画一次。
+    Object.defineProperty(HTMLCanvasElement.prototype, 'clientHeight', {
+      configurable: true,
+      get: () => 800,
+    })
+    triggerResize()
+    await new Promise((r) => setTimeout(r, 40))
+    expect(drawTable).toHaveBeenCalledTimes(2)
+
+    // 这个尺寸是改在原型上的，不还原会污染后面的用例。
+    Object.defineProperty(HTMLCanvasElement.prototype, 'clientHeight', {
+      configurable: true,
+      get: () => 600,
+    })
   })
 
   it('容器尺寸变化会重画', async () => {
     mount(PoolTable, { props: { balls: balls() } })
-    drawScene.mockClear()
+    drawActors.mockClear()
     triggerResize()
     await new Promise((r) => setTimeout(r, 40))
-    expect(drawScene).toHaveBeenCalled()
+    expect(drawActors).toHaveBeenCalled()
   })
 
   it('卸载时断开尺寸观察，避免容器移除后还在回调', () => {
@@ -136,7 +173,7 @@ describe('PoolTable', () => {
     const wrapper = mount(PoolTable, { props: { balls: balls(), ghost: { x: 0.5, y: 0.6 } } })
     await new Promise((r) => setTimeout(r, 40))
 
-    const scene = drawScene.mock.calls.at(-1)?.[2] as { ghost?: { x: number; y: number } }
+    const scene = drawActors.mock.calls.at(-1)?.[2] as { ghost?: { x: number; y: number } }
     expect(scene.ghost).toEqual({ x: 0.5, y: 0.6 })
     wrapper.unmount()
   })

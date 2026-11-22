@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import type { DownMessage, GameSocketOptions } from '@/game/protocol'
-import type { MatchSnapshot } from '@/game/types'
+import type { BallState, MatchSnapshot } from '@/game/types'
 
 // 对局页的用例只盯「服务端说了什么，界面就说什么」这一层：
 //   1. 进球之后回合没换人 → 卡片与横幅都说「继续击打」，不是「你的回合」；
@@ -80,8 +80,18 @@ vi.mock('vue-router', async (importOriginal) => {
 const MatchPage = (await import('@/views/pool/match.vue')).default
 
 // 球台与力度条都是 canvas / 拖拽组件，这里只关心文案，用空壳替掉。
+// 球台那个壳留两个按钮：一个是「点了一下台面」，一个是「拖动后抬手」，
+// 摆球流程的两种落位方式各走一条。
 const stubs = {
-  PoolTable: { props: ['balls', 'aim'], template: '<div class="tbl" />' },
+  PoolTable: {
+    props: ['balls', 'aim'],
+    emits: ['tap', 'drag'],
+    template:
+      '<div>' +
+      '<button class="tbl" @click="$emit(\'tap\', { x: 0.5, y: 0.6 })" />' +
+      '<button class="tbl-drag" @click="$emit(\'drag\', { phase: \'end\', dx: 30, dy: 10, point: { x: 0.7, y: 0.8 } })" />' +
+      '</div>',
+  },
   PowerSlider: { template: '<div class="pw" />' },
   'el-avatar': { template: '<span class="el-avatar"><slot /></span>' },
   'el-icon': { template: '<span class="el-icon"><slot /></span>' },
@@ -103,6 +113,7 @@ function snapshot(patch: Partial<MatchSnapshot> = {}): MatchSnapshot {
     group: ['solids', 'stripes'],
     ready: [true, true],
     ball_in_hand: false,
+    cue_placed: false,
     shot_seq: 1,
     players: [
       { user_id: 1, nickname: '阿泽', avatar: '' },
@@ -112,6 +123,15 @@ function snapshot(patch: Partial<MatchSnapshot> = {}): MatchSnapshot {
     win_reason: '',
   }
   return { ...base, ...patch }
+}
+
+// cuePotted 造一份「母球已经进袋」的球位：它还在列表里但 on_table=false，
+// 坐标停在袋口附近且 z 为负——这正是摔袋之后、落位之前的状态。
+function cuePotted(): BallState[] {
+  return [
+    { id: 'cue', x: 0.2, y: 0.1, z: -0.05, on_table: false },
+    { id: '1', x: 0.6, y: 1.0, z: 0, on_table: true },
+  ]
 }
 
 // shotFrame 造一杆的轨迹。frames 与 final 只要形状对得上就够，
@@ -190,9 +210,13 @@ describe('对局页的回合提示', () => {
 })
 
 describe('对局页的自由球', () => {
-  it('拿到手中球时弹一块「自由球」牌子，底栏也留一条', async () => {
+  it('母球摔袋后进摆球模式：弹牌子，底栏换成提示条', async () => {
     const { wrapper, push } = await mountPage()
-    push({ type: 'state', ts: 0, data: snapshot({ ball_in_hand: true }) })
+    push({
+      type: 'state',
+      ts: 0,
+      data: snapshot({ ball_in_hand: true, balls: cuePotted() }),
+    })
     await flushPromises()
 
     const tip = wrapper.find('.pm__ballin')
@@ -201,13 +225,73 @@ describe('对局页的自由球', () => {
 
     // 底栏那一条不能只靠牌子：牌子三秒后就收了，而球可能还没落。
     expect(wrapper.find('.pm__place-tag').text()).toBe('自由球')
-    // 手握母球时底部微调尺换成提示，不该同时出现。
+    // 摆球时底部微调尺换成提示，不该同时出现。
     expect(wrapper.find('.ft').exists()).toBe(false)
+    // 母球还没落到台上，这时候没有杆可以瞄，「去瞄准」点了也没用。
+    expect(wrapper.find('.pm__place-btn').attributes('disabled')).toBeDefined()
+  })
+
+  it('母球还在台上时先给瞄准线，底栏留一个重摆入口', async () => {
+    const { wrapper, push } = await mountPage()
+    push({ type: 'state', ts: 0, data: snapshot({ ball_in_hand: true }) })
+    await flushPromises()
+
+    // 犯规但没摔袋：球就在台上，多数人只想接着瞄这一杆。
+    expect(wrapper.find('.pm__place').exists()).toBe(false)
+    expect(wrapper.find('.ft').exists()).toBe(true)
+    expect(wrapper.find('.pm__reopen').text()).toContain('自由球')
+  })
+
+  it('摆下去的母球还能再挪：每次点台面都发一条 place_cue', async () => {
+    const { wrapper, push } = await mountPage()
+    push({
+      type: 'state',
+      ts: 0,
+      data: snapshot({ ball_in_hand: true, balls: cuePotted() }),
+    })
+    await flushPromises()
+
+    await wrapper.find('.tbl').trigger('click')
+    await flushPromises()
+
+    // 服务端落位成功：母球回到台上，手中球的权利还留着（出杆才收）。
+    push({ type: 'state', ts: 0, data: snapshot({ ball_in_hand: true, cue_placed: true }) })
+    await flushPromises()
+    // 球一落到台上就回瞄准，微调尺与重摆入口一起回来。
+    expect(wrapper.find('.pm__place').exists()).toBe(false)
+    expect(wrapper.find('.ft').exists()).toBe(true)
+
+    // 点「重摆」再进摆球模式，第二下照样能挪。
+    await wrapper.find('.pm__reopen').trigger('click')
+    await wrapper.find('.tbl').trigger('click')
+    await flushPromises()
+
+    expect(mocks.sends.filter((item) => item === 'place_cue')).toHaveLength(2)
+  })
+
+  it('手机上拖动摆球：抬手那一下落位', async () => {
+    const { wrapper, push } = await mountPage()
+    push({
+      type: 'state',
+      ts: 0,
+      data: snapshot({ ball_in_hand: true, balls: cuePotted() }),
+    })
+    await flushPromises()
+
+    // 触摸屏没有悬停，拖动是唯一的挪法；落位挂在抬手上，
+    // 不然手指松开之后球还悬在半空，玩家会以为卡住了。
+    await wrapper.find('.tbl-drag').trigger('click')
+    await flushPromises()
+    expect(mocks.sends).toContain('place_cue')
   })
 
   it('球落定之后牌子与底栏提示一起消失', async () => {
     const { wrapper, push } = await mountPage()
-    push({ type: 'state', ts: 0, data: snapshot({ ball_in_hand: true }) })
+    push({
+      type: 'state',
+      ts: 0,
+      data: snapshot({ ball_in_hand: true, balls: cuePotted() }),
+    })
     await flushPromises()
     expect(wrapper.find('.pm__ballin').exists()).toBe(true)
 
@@ -215,5 +299,6 @@ describe('对局页的自由球', () => {
     await flushPromises()
     expect(wrapper.find('.pm__ballin').exists()).toBe(false)
     expect(wrapper.find('.pm__place').exists()).toBe(false)
+    expect(wrapper.find('.pm__reopen').exists()).toBe(false)
   })
 })

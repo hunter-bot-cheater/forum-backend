@@ -96,19 +96,42 @@ export interface Scene {
 //
 // 调用方负责先把 ctx 按 dpr 缩放好（PoolTable.vue 里做），
 // 这里全部按 CSS 像素算，避免两处都乘 dpr 导致画面放大四倍。
+//
+// 对局页不用这个函数：它把台面静态层缓存起来，每帧只调 drawActors。
+// 留着它是给「一次性画完」的场景（练习页首帧、测试）。
 export function drawScene(
   ctx: CanvasRenderingContext2D,
   view: Viewport,
   scene: Scene,
   dpr: number,
 ): void {
-  const t = fitTable(view, TABLE_PADDING)
-
   ctx.clearRect(0, 0, view.width, view.height)
+  drawTable(ctx, view)
+  drawActors(ctx, view, scene, dpr)
+}
+
+// drawTable 只画不动的部分：木框、库边、台呢、六个袋口。
+//
+// 这一层每帧重画是白费力气：一帧里它一个像素都不会变，
+// 而它偏偏是最贵的那部分（台呢两层全屏渐变、六个袋口各自四层填充加裁剪）。
+// 拖动瞄准时每帧三十毫秒里有二十多毫秒耗在这里，手感就是「拖杆发涩」。
+export function drawTable(ctx: CanvasRenderingContext2D, view: Viewport): void {
+  const t = fitTable(view, TABLE_PADDING)
   drawRail(ctx, t)
   drawCushion(ctx, t)
   drawCloth(ctx, t)
   drawPockets(ctx, t)
+}
+
+// drawActors 画每帧会动的东西：两根杆与瞄准线、球、落袋动画、手中球虚影。
+// 必须在 drawTable 之后调用，球要压在这些之上。
+export function drawActors(
+  ctx: CanvasRenderingContext2D,
+  view: Viewport,
+  scene: Scene,
+  dpr: number,
+): void {
+  const t = fitTable(view, TABLE_PADDING)
   if (scene.peerAim) {
     // 对面的杆子画得淡一档，并且压在自己那一层下面：
     // 两根杆子同时出现时，一眼分得出哪根是自己的。
@@ -353,7 +376,7 @@ function drawCloth(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
 
 // 口沿比洞口大一圈：真实袋口是「皮口 + 洞」，皮口把库边切出一个比洞更宽的缺口。
 // 只画一个和洞一样大的圆，远看就是一个贴在台面上的黑点，分不清从哪边能进。
-const POCKET_MOUTH_SCALE = 1.2
+const POCKET_MOUTH_SCALE = 1.5
 
 // pocketOutward 给出袋口朝台外的单位方向（世界坐标）。
 //
@@ -379,14 +402,20 @@ function pocketOutward(p: Pocket): { x: number; y: number } {
 
 // drawPockets 画六个袋口。
 //
-// 袋口有三层：往外张开的喇叭口（库边被切开的那一段）、洞口本身、
-// 以及口沿一圈皮边。只看一个黑圆判断不出「球从哪个方向进来」，
-// 参考视频里袋口的缺口是明显敞开的，这里照那个形状画。
+// 真实球台的袋口不是一个贴在库边上的洞，而是**库边被切开一段**：
+// 切开处的台呢一直铺到袋口，两侧库边留出斜切的端面，端面后面才是袋口内壁。
+// 照着画有四层，顺序不能变：
 //
-// 整帧裁剪到木框范围内：中袋的喇叭口会伸到木框之外，
-// 不裁的话木框中间会多出两个黑块，看起来像木头被啃了。
+//   1) 缺口填台呢色 —— 这是「库边被切掉」这件事本身。缺一块它就只是个黑点。
+//   2) 袋口内壁    —— 缺口外沿往后的一段深色，让开口有厚度，不是一张纸。
+//   3) 圆洞        —— 真正的落球孔。
+//   4) 皮口与切口线 —— 洞口一圈浅色包边，加上两条斜切端头的高光。
+//
+// 整帧裁剪到木框范围内：角袋的缺口会伸到木框上，
+// 不裁的话圆角处会多出几个黑三角，看起来像木头被啃了。
 function drawPockets(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   const rail = railRect(t)
+  const cushionPx = metersToPx(t, CUSHION_WIDTH)
 
   ctx.save()
   roundRectPath(ctx, rail.x, rail.y, rail.width, rail.height, RAIL_RADIUS)
@@ -400,31 +429,41 @@ function drawPockets(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
     // 屏幕 y 朝下，世界方向要翻转一次才对得上画面。
     const ox = out.x
     const oy = -out.y
-    // 沿袋口切线的方向，喇叭口的两个边就落在这条线上。
+    // 沿袋口切线的方向：缺口的两条斜边就落在这条线的两侧。
     const tx = -oy
     const ty = ox
-    const reach = radius * 1.7
+    // 缺口沿台外方向一直开到木框内沿，库边才算真的断开了。
+    const reach = cushionPx * 1.3 + radius * 0.4
+    // 台面侧比外沿窄：缺口是「外宽内窄」的喇叭，球进来时才有收口的感觉。
+    const innerHalf = radius * 0.9
 
-    // 1) 喇叭口：从洞口两侧往外张开，像车床车的喇叭。这一段盖住库边，
-    //    视觉上就是「库边在这里被切开」，开口方向一眼能看出来。
+    // 1) 缺口：填台呢色。库边在这里被切掉，露出下面的台面。
     ctx.beginPath()
-    ctx.moveTo(center.x + tx * radius, center.y + ty * radius)
-    ctx.lineTo(center.x + tx * mouth + ox * reach, center.y + ty * mouth + oy * reach)
+    ctx.moveTo(center.x + tx * innerHalf, center.y + ty * innerHalf)
+    ctx.lineTo(center.x - tx * innerHalf, center.y - ty * innerHalf)
     ctx.lineTo(center.x - tx * mouth + ox * reach, center.y - ty * mouth + oy * reach)
-    ctx.lineTo(center.x - tx * radius, center.y - ty * radius)
+    ctx.lineTo(center.x + tx * mouth + ox * reach, center.y + ty * mouth + oy * reach)
     ctx.closePath()
-    const throat = ctx.createLinearGradient(
-      center.x,
-      center.y,
-      center.x + ox * reach,
-      center.y + oy * reach,
-    )
-    throat.addColorStop(0, '#05080d')
-    throat.addColorStop(1, '#02040a')
-    ctx.fillStyle = throat
+    ctx.fillStyle = COLORS.cloth
+    ctx.fill()
+    // 台呢在库边缺口里比台面中间暗（三面挡光），压一层很淡的黑，
+    // 否则挖出来的那块会和台面中央一样亮，看起来像贴了一张绿纸。
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.2)'
     ctx.fill()
 
-    // 2) 洞口：中心偏外一点最暗，靠台面那一侧透出一点灰，才有「洞有深度」的感觉。
+    // 2) 袋口内壁：缺口末端往里收的一段深色，给开口做出「深度」。
+    //    少了这一层，缺口就是一块平地，球看起来是滚进地板缝里。
+    const wellStart = reach - cushionPx * 0.55
+    ctx.beginPath()
+    ctx.moveTo(center.x + tx * mouth * 0.86 + ox * wellStart, center.y + ty * mouth * 0.86 + oy * wellStart)
+    ctx.lineTo(center.x - tx * mouth * 0.86 + ox * wellStart, center.y - ty * mouth * 0.86 + oy * wellStart)
+    ctx.lineTo(center.x - tx * mouth * 1.02 + ox * reach, center.y - ty * mouth * 1.02 + oy * reach)
+    ctx.lineTo(center.x + tx * mouth * 1.02 + ox * reach, center.y + ty * mouth * 1.02 + oy * reach)
+    ctx.closePath()
+    ctx.fillStyle = '#0a0e14'
+    ctx.fill()
+
+    // 3) 圆洞：中心偏外一点最暗，靠台面那一侧透出一点灰，才有「洞有深度」的感觉。
     const hole = ctx.createRadialGradient(
       center.x + ox * radius * 0.25,
       center.y + oy * radius * 0.25,
@@ -440,21 +479,31 @@ function drawPockets(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
     ctx.fillStyle = hole
     ctx.fill()
 
-    // 3) 皮口：一圈亮边压在洞口上，宽度按半径缩放。
+    // 4) 皮口：一圈亮边压在洞口上，宽度按半径缩放。
     ctx.beginPath()
-    ctx.arc(center.x, center.y, radius * 0.92, 0, Math.PI * 2)
-    ctx.strokeStyle = 'rgba(198, 205, 214, 0.34)'
-    ctx.lineWidth = Math.max(1, radius * 0.12)
+    ctx.arc(center.x, center.y, radius * 0.94, 0, Math.PI * 2)
+    ctx.strokeStyle = 'rgba(198, 205, 214, 0.4)'
+    ctx.lineWidth = Math.max(1, radius * 0.1)
     ctx.stroke()
 
-    // 4) 喇叭口的两条切口线：浅灰细线，告诉眼睛「库边到这里为止」。
+    // 5) 两条斜切端头：浅灰细线，告诉眼睛「库边到这里为止」。
+    //    线从台面侧的内沿点画到缺口外沿点，正好落在斜切面上。
     ctx.beginPath()
-    ctx.moveTo(center.x + tx * radius, center.y + ty * radius)
+    ctx.moveTo(center.x + tx * innerHalf, center.y + ty * innerHalf)
     ctx.lineTo(center.x + tx * mouth + ox * reach, center.y + ty * mouth + oy * reach)
-    ctx.moveTo(center.x - tx * radius, center.y - ty * radius)
+    ctx.moveTo(center.x - tx * innerHalf, center.y - ty * innerHalf)
     ctx.lineTo(center.x - tx * mouth + ox * reach, center.y - ty * mouth + oy * reach)
-    ctx.strokeStyle = 'rgba(206, 214, 224, 0.16)'
-    ctx.lineWidth = Math.max(1, radius * 0.08)
+    ctx.strokeStyle = 'rgba(226, 232, 240, 0.42)'
+    ctx.lineWidth = Math.max(1, radius * 0.07)
+    ctx.stroke()
+
+    // 6) 缺口外沿的一小段浅色包边：真实袋口外侧有一圈皮/金属，
+    //    它在深色内壁与木框之间画出一条亮分隔，袋口方向就更好认了。
+    ctx.beginPath()
+    ctx.moveTo(center.x - tx * mouth * 1.02 + ox * reach, center.y - ty * mouth * 1.02 + oy * reach)
+    ctx.lineTo(center.x + tx * mouth * 1.02 + ox * reach, center.y + ty * mouth * 1.02 + oy * reach)
+    ctx.strokeStyle = 'rgba(208, 214, 222, 0.3)'
+    ctx.lineWidth = Math.max(1, radius * 0.09)
     ctx.stroke()
   }
 
@@ -666,13 +715,21 @@ function drawBalls(
   }
 }
 
-// 滚动角度缓存。渲染层本来「只读输入」，这是唯一的例外：
-// 一颗球转了多少只跟它走过的路径有关，光看当前位置推不出来。
-// 键是球号，值里同时记着上一帧的位置，用来算位移。
+// ===== 球的三维朝向 =====
+//
+// 台面上的球是滚过去的，不是原地打转。要画出这一点，每颗球都得记住自己的
+// 三维朝向：纯滚动时它绕「垂直于运动方向的水平轴」转，转过的角度等于
+// 走过的弧长除以半径。只按屏幕法线转贴图，看起来永远是同一面在转圈，
+// 号码不会转到侧面去，而且往左滚和往右滚一个样。
+//
+// 渲染层本来「只读输入」，这是唯一的例外：一颗球转了多少只跟它走过的路径有关，
+// 光看当前位置推不出来。
 interface RollState {
   x: number
   y: number
-  angle: number
+  // 球体局部坐标到世界坐标的 3×3 旋转矩阵，行优先，长度 9。
+  // 用数组而不是对象：每帧只是九次乘加，没必要为可读性多一层属性访问。
+  m: number[]
 }
 
 const rollState = new Map<string, RollState>()
@@ -681,42 +738,207 @@ const rollState = new Map<string, RollState>()
 // 换局、重连补齐、自由球落位都会让球直接出现在别处，那时转半圈很假。
 const TELEPORT_DISTANCE = BALL_RADIUS * 6
 
-// rollAngleOf 返回这颗球当前该转到的角度（弧度）。
+// IDENTITY 是单位旋转，球还没动过时用这个。
+const IDENTITY = [1, 0, 0, 0, 1, 0, 0, 0, 1]
+
+// multiply3 算两个行优先 3×3 矩阵的乘积 a·b。
+function multiply3(a: number[], b: number[]): number[] {
+  const out = new Array<number>(9)
+  for (let row = 0; row < 3; row += 1) {
+    for (let col = 0; col < 3; col += 1) {
+      out[row * 3 + col] =
+        a[row * 3] * b[col] + a[row * 3 + 1] * b[3 + col] + a[row * 3 + 2] * b[6 + col]
+    }
+  }
+  return out
+}
+
+// rollMatrixOf 返回这颗球当前该用哪个朝向，就地把这一帧的位移滚进去。
 //
-// 纯滚动：球面转过的弧长等于走过的距离，角度 = 距离 / 半径。
-// 屏幕 y 朝下，所以往右、往下都取正号（顺时针）。竖直方向在正俯视里
-// 本来就没有「滚动」可言，取个一致的符号就够，肉眼看到的是号码在转。
-function rollAngleOf(ball: BallState): number {
+// 没动的时候返回**同一个数组引用**：球面位图的缓存靠引用比较判断能不能复用，
+// 每帧新建一个值相同的数组会让缓存永远不命中，白白重画十六颗球。
+function rollMatrixOf(ball: BallState): number[] {
   const prev = rollState.get(ball.id)
   if (!prev) {
-    rollState.set(ball.id, { x: ball.x, y: ball.y, angle: 0 })
-    return 0
+    rollState.set(ball.id, { x: ball.x, y: ball.y, m: IDENTITY })
+    return IDENTITY
   }
 
   const dx = ball.x - prev.x
-  const screenDy = -(ball.y - prev.y)
-  const distance = Math.hypot(dx, screenDy)
+  // 位移换到「观察坐标」（x 向右、y 向下、z 朝观察者），与屏幕方向一致。
+  // 世界坐标的 y 朝远端，所以这里取负：不换的话竖直方向的滚动会反着转。
+  const dy = -(ball.y - prev.y)
   prev.x = ball.x
   prev.y = ball.y
-  if (distance > TELEPORT_DISTANCE) {
-    return prev.angle
+  const distance = Math.hypot(dx, dy)
+  // 瞬移不推进朝向：那不是滚出来的位移。
+  if (distance < 1e-6 || distance > TELEPORT_DISTANCE) {
+    return prev.m
   }
 
-  let sign = 1
-  if (Math.abs(dx) >= Math.abs(screenDy)) {
-    sign = dx >= 0 ? 1 : -1
-  } else {
-    sign = screenDy >= 0 ? 1 : -1
-  }
-  const twoPi = Math.PI * 2
-  prev.angle = (prev.angle + (distance / BALL_RADIUS) * sign) % twoPi
-  return prev.angle
+  // 滚动轴在水平面内，垂直于运动方向。取哪一侧由「球顶往运动方向倒」定：
+  // 往 +x 滚时球顶要朝 +x 倒，对应绕 +y 转正角，所以轴取 (-dy, dx)。
+  const ax = -dy / distance
+  const ay = dx / distance
+  const angle = distance / BALL_RADIUS
+  const cos = Math.cos(angle)
+  const sin = Math.sin(angle)
+  const t = 1 - cos
+  // 罗德里格斯公式，轴在 xy 平面上所以 az 为 0。
+  const rot = [
+    t * ax * ax + cos,
+    t * ax * ay,
+    sin * ay,
+    t * ax * ay,
+    t * ay * ay + cos,
+    -sin * ax,
+    -sin * ay,
+    sin * ax,
+    cos,
+  ]
+  // 世界端左乘：新朝向 = 这一小段旋转 · 原来的朝向。
+  prev.m = multiply3(rot, prev.m)
+  return prev.m
 }
 
-// drawBall 画一颗球：先按滚动角度贴球面，再叠一层不随球转的光影。
+// ===== 球面采样 =====
+
+// context2d 取 2d 上下文。jsdom 没实现 canvas，getContext 会直接抛，
+// 测试环境走到这里返回 null，渲染退回「不滚动的贴图」也不会崩。
+function context2d(canvas: HTMLCanvasElement): CanvasRenderingContext2D | null {
+  try {
+    return canvas.getContext('2d')
+  } catch {
+    return null
+  }
+}
+
+// TextureEntry 是一颗球反照率贴图的像素副本，按尺寸缓存。
+interface TextureEntry {
+  side: number
+  data: ImageData
+}
+
+const textureDataCache = new Map<string, TextureEntry>()
+
+// textureImage 取一颗球贴图的像素，供球面反投影采样用。
 //
-// 号码必须跟着球转，球才像在滚而不是一张贴纸在图面上平移。
-// 但光影不能转——台灯是固定的，把高光烘焙进贴图再整体旋转，
+// 每换一次尺寸都要重新读：贴图本身按尺寸缓存，这里跟着它的节奏走。
+function textureImage(id: string, side: number): ImageData | null {
+  const cached = textureDataCache.get(id)
+  if (cached && cached.side === side) {
+    return cached.data
+  }
+  const ctx = context2d(ballTexture(id, side))
+  if (!ctx) {
+    return null
+  }
+  const data = ctx.getImageData(0, 0, side, side)
+  textureDataCache.set(id, { side, data })
+  return data
+}
+
+// SpriteEntry 缓存一颗球某个朝向的位图。m 用引用比较：
+// 球没动时 rollMatrixOf 返回的就是同一个数组，直接复用不用重算。
+interface SpriteEntry {
+  side: number
+  m: number[]
+  canvas: HTMLCanvasElement
+}
+
+const spriteCache = new Map<string, SpriteEntry>()
+
+// ballSprite 按当前朝向画一颗球的反照率位图。
+//
+// 球贴图是「从正上方看」的正交投影，所以反投影非常直接：
+// 屏幕圆上某点 (nx, ny) 对应球面法线 n = (nx, ny, √(1-nx²-ny²))
+// （观察坐标：x 向右、y 向下、z 朝观察者）。
+// 换到球体局部 m = Mᵀn，贴图坐标就是 (m.x, m.y) —— 正交投影把球面点
+// 直接落到贴图的同名位置，不用三角函数。
+//
+// m.z 小于 0 的点（球体局部的另一侧）同样用 (m.x, m.y)：
+// 那个位置对应贴图上的镜像点，等于「另一极也印着号码」。
+// 这里**不能**改成对跖点 (-m.x, -m.y)：那样在 m.z = 0 那一圈上
+// 两侧坐标突然反号，画出来是一圈竖着的黑色锯齿（踩过）。
+function ballSprite(ball: BallState, side: number, m: number[]): HTMLCanvasElement | null {
+  const cached = spriteCache.get(ball.id)
+  if (cached && cached.side === side && cached.m === m) {
+    return cached.canvas
+  }
+  const source = textureImage(ball.id, side)
+  if (!source) {
+    return null
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = side
+  canvas.height = side
+  const ctx = context2d(canvas)
+  if (!ctx) {
+    return null
+  }
+  const image = ctx.createImageData(side, side)
+  const out = image.data
+  const src = source.data
+  const half = side / 2
+  const last = side - 1
+
+  for (let py = 0; py < side; py += 1) {
+    const ny = (py + 0.5 - half) / half
+    for (let px = 0; px < side; px += 1) {
+      const nx = (px + 0.5 - half) / half
+      const radiusSquared = nx * nx + ny * ny
+      // 圆外的像素保持全透明：贴到画布上时会被 drawImage 直接丢掉，
+      // 不会盖住旁边的台呢。
+      if (radiusSquared > 1) {
+        continue
+      }
+      const nz = Math.sqrt(1 - radiusSquared)
+      // m = Mᵀ · n，行优先矩阵的转置就是「按列取」。
+      const mx = m[0] * nx + m[3] * ny + m[6] * nz
+      const my = m[1] * nx + m[4] * ny + m[7] * nz
+
+      // 贴图半径对应 u = 1（球面赤道），先归一化再乘到像素上。
+      const fx = (0.5 + mx * 0.5) * last
+      const fy = (0.5 + my * 0.5) * last
+
+      // 双线性采样。最近邻在球的边缘会出摩尔纹：
+      // 那里的球面被压得很扁，相邻屏幕像素可能跨好几个贴图像素，
+      // 号码盘的边缘就会碎成锯齿。四个像素加权只多几次乘加。
+      const x0 = fx | 0
+      const y0 = fy | 0
+      const x1 = x0 < last ? x0 + 1 : last
+      const y1 = y0 < last ? y0 + 1 : last
+      const tx = fx - x0
+      const ty = fy - y0
+      const w00 = (1 - tx) * (1 - ty)
+      const w10 = tx * (1 - ty)
+      const w01 = (1 - tx) * ty
+      const w11 = tx * ty
+      const i00 = (y0 * side + x0) * 4
+      const i10 = (y0 * side + x1) * 4
+      const i01 = (y1 * side + x0) * 4
+      const i11 = (y1 * side + x1) * 4
+      const to = (py * side + px) * 4
+      out[to] = src[i00] * w00 + src[i10] * w10 + src[i01] * w01 + src[i11] * w11
+      out[to + 1] =
+        src[i00 + 1] * w00 + src[i10 + 1] * w10 + src[i01 + 1] * w01 + src[i11 + 1] * w11
+      out[to + 2] =
+        src[i00 + 2] * w00 + src[i10 + 2] * w10 + src[i01 + 2] * w01 + src[i11 + 2] * w11
+      out[to + 3] = 255
+    }
+  }
+
+  ctx.putImageData(image, 0, 0)
+  spriteCache.set(ball.id, { side, m, canvas })
+  return canvas
+}
+
+// drawBall 画一颗球：贴一张按当前三维朝向重采样出来的球面，再叠一层
+// 不随球转的光影。
+//
+// 号码与花色必须跟着球滚，球才像在滚而不是一张贴纸在图面上平移。
+// 但光影不能跟着转——台灯固定在台面上方，把高光烘焙进贴图再整体旋转，
 // 看起来会像有人举着灯绕台子走。所以贴图只存反照率（见 balls.ts），
 // 明暗与高光每次按屏幕方向补。
 function drawBall(
@@ -732,17 +954,21 @@ function drawBall(
   const drawRadius = radiusPx * (1 + ball.z * BALL_GROWTH)
   const cy = center.y - lift * 0.6
 
-  ctx.save()
-  ctx.translate(center.x, cy)
-  ctx.rotate(rollAngleOf(ball))
-  ctx.drawImage(
-    ballTexture(ball.id, textureSide),
-    -drawRadius,
-    -drawRadius,
-    drawRadius * 2,
-    drawRadius * 2,
-  )
-  ctx.restore()
+  // 朝向按这一帧的位移推进，再用它重采样球面。
+  const sprite = ballSprite(ball, textureSide, rollMatrixOf(ball))
+  if (sprite) {
+    ctx.drawImage(sprite, center.x - drawRadius, cy - drawRadius, drawRadius * 2, drawRadius * 2)
+  } else {
+    // 拿不到球面位图（测试环境没有 canvas 实现）：退回一张不动的贴图。
+    // 位置仍然对，只是看不出滚动，比整帧空掉好。
+    ctx.drawImage(
+      ballTexture(ball.id, textureSide),
+      center.x - drawRadius,
+      cy - drawRadius,
+      drawRadius * 2,
+      drawRadius * 2,
+    )
+  }
 
   ctx.save()
   ctx.beginPath()
@@ -866,6 +1092,9 @@ export function resetBallMotion(): void {
   rollState.clear()
   sinking.clear()
   visibleIds = new Set<string>()
+  // 球面位图是按「球号 + 朝向」缓存的，朝向表清了它也就没意义了；
+  // 不清的话下一局的球会沿用上一局的朝向重新起算，看起来像被谁转过一圈。
+  spriteCache.clear()
 }
 
 // drawSinking 画还在往袋口滚的球。

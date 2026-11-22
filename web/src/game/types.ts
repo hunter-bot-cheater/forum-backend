@@ -85,6 +85,9 @@ export interface MatchSnapshot {
   // 能不能出杆只看 status 与 turn，不要拿它反推。
   ready: [boolean, boolean]
   ball_in_hand: boolean
+  // cue_placed 表示这次手中球已经摆过至少一次。出杆的闸门看它：
+  // ball_in_hand 在出杆前一直是 true，光看它分不出「还没摆」与「摆好了」。
+  cue_placed: boolean
   shot_seq: number
   // players 是定长两项：没进房的那一侧 user_id 为 0，昵称与头像为空串。
   players: [PlayerBrief, PlayerBrief]

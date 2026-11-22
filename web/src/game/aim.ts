@@ -127,9 +127,15 @@ function findBall(balls: ReadonlyArray<BallState>, id: string): BallState | null
 // 引导线的长度上限，单位米。
 //
 // 0.42 米差不多是七个球直径：再短看不出「球往哪走」，再长会把台面糊成一片虚线，
-// 而且越过后面那颗球之后指向就没有意义了。真正生效的长度还要被库边截断。
+// 而且越过后面那颗球之后指向就没有意义了。真正生效的长度还要被库边截断，
+// 以及按击球厚度打折（见 aimGuides）。
 export const OBJECT_GUIDE_LENGTH = 0.42
 export const CUE_GUIDE_LENGTH = 0.3
+
+// 太薄的球目标球几乎不动、正碰时母球几乎不动，
+// 这两种情况画出来的线段只有几个像素，看着像脏点，不如不画。
+const MIN_OBJECT_RATIO = 0.08
+const MIN_CUE_RATIO = 0.06
 
 // GuideSegment 是一段引导线，两端都是世界坐标。
 export interface GuideSegment {
@@ -140,7 +146,7 @@ export interface GuideSegment {
 // AimGuides 是瞄准时除了母球路线之外的两段预测线。
 //
 // object 是目标球被撞之后的去向（沿两球球心连线），
-// cue 是母球撞完之后分离的方向（连线的切线，也就是「薄厚」的那一侧）。
+// cue 是母球撞完之后分离的方向。
 // 撞库时两者都是 null：库边反弹的入射角等于反射角，但真正的落点还要看旋转，
 // 画一条不准的线比不画更容易误导。
 export interface AimGuides {
@@ -150,8 +156,18 @@ export interface AimGuides {
 
 // aimGuides 按一次瞄准结果算出两段引导线。
 //
-// 只做几何近似：假设正碰、不带走位（stun）。真实击球点偏上时母球会跟球，
-// 偏下会缩杆，这两条线只是「大致往哪走」，所以画短一点，不让人当成精确预测。
+// 两条线的方向与长度都由「打得多厚」决定。设 n 是球心连线方向（幽灵球心
+// 指向目标球心）、v 是来球方向，完全弹性、等质量、不带走位时：
+//
+//   目标球速度 = v·cosθ，方向沿 n
+//   母球速度   = v·sinθ，方向沿切向
+//
+// θ 是 v 与 n 的夹角。正碰（θ=0）时母球停住、目标球拿满速；
+// 越薄母球越接近原速、目标球越慢。所以：
+//   - 正碰时母球那条线不画（它根本不动），目标球那条最长；
+//   - 擦边时反过来，目标球那条很短、母球那条接近原方向。
+//
+// 以前不管什么厚度都画一根等长的 90 度线，正碰时也画，是纯误导。
 export function aimGuides(
   balls: ReadonlyArray<BallState>,
   phi: number,
@@ -175,31 +191,41 @@ export function aimGuides(
   const nx = gapX / gap
   const ny = gapY / gap
 
-  // 目标球从自己的表面出发，走到库边或长度上限为止。
-  const objectFrom = { x: target.x + nx * BALL_RADIUS, y: target.y + ny * BALL_RADIUS }
-  const objectReach = Math.min(
-    OBJECT_GUIDE_LENGTH,
-    cushionHit(target.x, target.y, nx, ny).distance,
-  )
-  const object: GuideSegment = {
-    from: objectFrom,
-    to: { x: objectFrom.x + nx * objectReach, y: objectFrom.y + ny * objectReach },
+  // 来球方向与球心连线的夹角：cos 决定目标球拿多少速度，sin 决定母球剩多少。
+  const vx = Math.cos(phi)
+  const vy = Math.sin(phi)
+  const cosTheta = Math.max(0, vx * nx + vy * ny)
+  const sinTheta = Math.abs(vx * ny - vy * nx)
+
+  // 目标球从自己的表面出发，走到库边或长度上限为止；长度按 cosθ 打折。
+  let object: GuideSegment | null = null
+  if (cosTheta > MIN_OBJECT_RATIO) {
+    const objectFrom = { x: target.x + nx * BALL_RADIUS, y: target.y + ny * BALL_RADIUS }
+    const objectReach = Math.min(
+      OBJECT_GUIDE_LENGTH * cosTheta,
+      cushionHit(target.x, target.y, nx, ny).distance,
+    )
+    object = {
+      from: objectFrom,
+      to: { x: objectFrom.x + nx * objectReach, y: objectFrom.y + ny * objectReach },
+    }
   }
 
   // 母球撞完沿切线走。切线有两个方向，取与来球同侧的那一支：
   // 反了会把「往左偏」画成「往右偏」，比不画还糟。
-  const tx = Math.cos(phi)
-  const ty = Math.sin(phi)
-  let px = -ny
-  let py = nx
-  if (px * tx + py * ty < 0) {
-    px = -px
-    py = -py
-  }
-  const cueReach = Math.min(CUE_GUIDE_LENGTH, cushionHit(hit.x, hit.y, px, py).distance)
-  const cue: GuideSegment = {
-    from: { x: hit.x + px * BALL_RADIUS, y: hit.y + py * BALL_RADIUS },
-    to: { x: hit.x + px * cueReach, y: hit.y + py * cueReach },
+  let cue: GuideSegment | null = null
+  if (sinTheta > MIN_CUE_RATIO) {
+    let px = -ny
+    let py = nx
+    if (px * vx + py * vy < 0) {
+      px = -px
+      py = -py
+    }
+    const cueReach = Math.min(CUE_GUIDE_LENGTH * sinTheta, cushionHit(hit.x, hit.y, px, py).distance)
+    cue = {
+      from: { x: hit.x + px * BALL_RADIUS, y: hit.y + py * BALL_RADIUS },
+      to: { x: hit.x + px * cueReach, y: hit.y + py * cueReach },
+    }
   }
 
   return { object, cue }

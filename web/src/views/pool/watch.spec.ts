@@ -109,6 +109,7 @@ function snapshot(patch: Partial<MatchSnapshot> = {}): MatchSnapshot {
     group: ['solids', 'stripes'],
     ready: [true, true],
     ball_in_hand: false,
+    cue_placed: false,
     shot_seq: 3,
     players: [
       { user_id: 1, nickname: '阿泽', avatar: '' },

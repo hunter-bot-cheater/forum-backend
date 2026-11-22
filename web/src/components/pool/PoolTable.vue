@@ -18,9 +18,9 @@
 // 指针拖动也只负责「换算成相对起点的位移」再抛给父级，
 // 具体是旋转瞄准还是拖动母球由页面决定：同一个画布以后还要支持手中球落位。
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { screenToWorld, fitTable, type Point } from '@/game/geometry'
+import { screenToWorld, fitTable, type Point, type Viewport } from '@/game/geometry'
 import type { AimLayer } from '@/game/renderer'
-import { drawScene, TABLE_PADDING } from '@/game/renderer'
+import { drawActors, drawTable, TABLE_PADDING } from '@/game/renderer'
 import type { BallState, PoolDrag } from '@/game/types'
 
 const props = defineProps<{
@@ -93,8 +93,42 @@ function syncSize(el: HTMLCanvasElement): { width: number; height: number } | nu
   return { width: cssWidth, height: cssHeight }
 }
 
-// paint 画一帧。ctx 先按 DPR 缩放，之后 drawScene 全程按 CSS 像素算，
-// 绘制代码里不用再关心屏幕是几倍图。
+// staticLayer 是台面的静态层：木框、库边、台呢、六个袋口。
+//
+// 这一层一帧里一个像素都不会变，但它最贵（台呢两层全屏渐变、袋口六个各自
+// 四层填充加裁剪）。拖动瞄准时每帧重画整张台面，手感就是「拖杆发涩」。
+// 现在只在尺寸或像素比变化时重画一次，平时每帧只贴一张图。
+let staticLayer: HTMLCanvasElement | null = null
+// staticKey 记着这张图是按哪套尺寸画的，跟当前不一致就重建。
+let staticKey = ''
+
+// ensureStaticLayer 取（必要时重建）静态层，返回的位图与画布同尺寸。
+function ensureStaticLayer(
+  width: number,
+  height: number,
+  dpr: number,
+  view: Viewport,
+): HTMLCanvasElement {
+  const key = String(width) + 'x' + String(height) + '@' + String(dpr)
+  if (staticLayer && staticKey === key) {
+    return staticLayer
+  }
+  const layer = document.createElement('canvas')
+  layer.width = width
+  layer.height = height
+  const layerCtx = layer.getContext('2d')
+  if (layerCtx) {
+    // 静态层也按物理像素画，贴回主画布时才不用再缩放一次。
+    layerCtx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    drawTable(layerCtx, view)
+  }
+  staticLayer = layer
+  staticKey = key
+  return layer
+}
+
+// paint 画一帧。ctx 先按 DPR 缩放，之后绘制代码全程按 CSS 像素算，
+// 不用再关心屏幕是几倍图。
 function paint(): void {
   const el = canvas.value
   if (!el) {
@@ -109,8 +143,15 @@ function paint(): void {
     return
   }
   const dpr = dprOf()
+  const layer = ensureStaticLayer(el.width, el.height, dpr, size)
+
+  // 先复位变换再贴静态层：位图已经是物理像素，带着 dpr 缩放贴会被再放一倍。
+  ctx.setTransform(1, 0, 0, 1, 0, 0)
+  ctx.clearRect(0, 0, el.width, el.height)
+  ctx.drawImage(layer, 0, 0)
+
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  drawScene(
+  drawActors(
     ctx,
     size,
     { balls: props.balls, aim: props.aim, peerAim: props.peerAim, ghost: props.ghost },
@@ -240,6 +281,9 @@ onBeforeUnmount(() => {
     cancelAnimationFrame(frame)
     frame = 0
   }
+  // 静态层是整张画布的位图，宽屏上能到几 MB，组件卸了就放掉。
+  staticLayer = null
+  staticKey = ''
 })
 </script>
 

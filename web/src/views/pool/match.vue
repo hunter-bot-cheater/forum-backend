@@ -66,7 +66,7 @@
         <Transition name="pm-ballin">
           <div v-if="ballInHandTip" class="pm__ballin" role="status">
             <span class="pm__ballin-tag">自由球</span>
-            <span class="pm__ballin-text">点一下台面，把白球放在那里</span>
+            <span class="pm__ballin-text">{{ ballInHandText }}</span>
           </div>
         </Transition>
 
@@ -95,12 +95,30 @@
       </div>
       <!-- 手中球：那圈微调尺用不上（方向还没定），换成一块明显的提示。
            提示留在底栏而不是只盖在球台上，是因为弹出来的牌子几秒后会收起，
-           而「还在等他放球」这件事要一直看得到。 -->
-      <div v-if="mustPlace" class="pm__place">
-        <span class="pm__place-tag">自由球</span>
-        <span class="pm__place-tip">点一下台面，白球就放在那里</span>
+           而「还在等他放球」这件事要一直看得到。
+           两种形态：摆球时整行是提示条，右侧一个「去瞄准」按钮；
+           其余时候微调尺照常显示，自由球期间在最左边多一颗「重摆」入口
+           ——白球摆下去之后往往还要再挪两次，入口不能只给一次。 -->
+      <div class="pm__ctls">
+        <div v-if="placingMode" class="pm__place">
+          <span class="pm__place-tag">自由球</span>
+          <span class="pm__place-tip">点台面挪白球，可以反复挪</span>
+          <button
+            class="pm__place-btn"
+            type="button"
+            :disabled="!cueOnTable"
+            @click="finishPlacing"
+          >
+            去瞄准
+          </button>
+        </div>
+        <template v-else>
+          <button v-if="ballInHand" class="pm__reopen" type="button" @click="reopenPlacing">
+            自由球 · 重摆
+          </button>
+          <FineTuneRail :phi="phi" :disabled="!canAim" @nudge="onNudge" />
+        </template>
       </div>
-      <FineTuneRail v-else :phi="phi" :disabled="!canAim" @nudge="onNudge" />
     </footer>
 
     <ResultSheet
@@ -272,6 +290,11 @@ const result = ref<{ won: boolean; reason: string } | null>(null)
 // 第二杆的 seq 更小、服务端按「不是你的回合」拒掉，玩家看到一句莫名其妙的报错。
 const shotPending = ref(false)
 
+// shotTimer 是出杆之后等结果的兜底计时器，超时会把 shotPending 解开。
+// 没有它的话，一杆在链路上丢掉（服务端重启、连接抖动）就会永久卡住：
+// canShoot 一直为假，力度条永远是灰的，玩家只能刷新页面。
+let shotTimer: ReturnType<typeof setTimeout> | null = null
+
 // placing 表示「已经点了落点，等服务端回快照」。
 // 落位不做乐观更新：越界或落点在球上时服务端会拒，本地先挪过去还得再挪回来，
 // 一次往返只有几毫秒，等权威结果更省事。
@@ -316,20 +339,57 @@ const isMyTurn = computed(() => {
   return snapshot.value.status === 'playing' && turn.value === mySeat.value
 })
 
-// mustPlace 表示手里握着母球，必须先落位才能出杆。
-const mustPlace = computed(() => {
+// ballInHand 表示这一杆手里握着母球：摆到哪算哪，直到出杆之前都有效。
+//
+// 服务端在落位之后不会收回这项权利（只有出杆才收），所以摆完还能接着挪。
+const ballInHand = computed(() => {
   if (!snapshot.value) {
     return false
   }
   return snapshot.value.ball_in_hand === true && isMyTurn.value
 })
 
+// cueOnTable 是「母球此刻在台上吗」。摔袋之后它是 false，
+// 直到落位请求被服务端接受、新快照把球摆回去。
+const cueOnTable = computed(() => {
+  for (const ball of balls.value) {
+    if (ball.id === 'cue') {
+      return ball.on_table
+    }
+  }
+  return false
+})
+
+// placingMode 是「正在摆白球」的本地模式：指针带着虚影走，点台面把它放下去。
+//
+// 由玩家自己进出（底栏两个按钮），只在一处自动切换——母球刚落到台上那一刻。
+// 让它一直挂在摆球模式下，就永远没有瞄准线；反过来放一次就永久收起，
+// 又变成「只能放一次」。
+const placingMode = ref(false)
+
+// cueInHand 表示母球还在手上：台面上不画它，由虚影代表。
+const cueInHand = computed(() => placingMode.value && !cueOnTable.value)
+
 // ghost 是手中球还没落位时跟着指针走的虚影位置（世界坐标）。
 //
 // 虚影就是那颗球本身，不是「预览」：指针指到哪它跟到哪，点一下台面就落定。
-// 不用底栏按钮确认，是因为球会一直跟着指针——挪开鼠标去按按钮的路上，
-// 球已经跟着走了，永远按不出「先摆好后确认」。
+// 球一落到台上就收起来——两颗白球同时在台上，分不清哪颗能拖。
 const ghost = ref<Point | null>(null)
+
+// syncGhost 按当前模式决定虚影要不要出现、出现在哪。
+//
+// 母球还在台上时没有虚影；已经落袋了就摆到开球线附近，
+// 免得虚影一出来就在袋口里（那里既放不下球，也看不清）。
+function syncGhost() {
+  if (!cueInHand.value) {
+    ghost.value = null
+    return
+  }
+  if (ghost.value) {
+    return
+  }
+  ghost.value = { x: TABLE_WIDTH / 2, y: TABLE_LENGTH * 0.25 }
+}
 
 // ballInHandTip 控制「自由球」那块大牌子的显示。
 //
@@ -338,24 +398,28 @@ const ghost = ref<Point | null>(null)
 const ballInHandTip = ref(false)
 let ballInHandTimer: ReturnType<typeof setTimeout> | null = null
 
-// 拿到手中球时把虚影摆在一个合理的位置：母球还在台上就摆它现在的位置
-// （视觉上「球被拿起来了」），已经落袋了就摆在开球线附近，免得虚影出现在袋口。
-// 同时弹一次大牌子——这是「为什么现在打不出杆」的唯一解释。
-watch(mustPlace, (holding) => {
+// ballInHandText 是牌子上那句话：说的是「下一步做什么」。
+// 母球还在台上时不能让他去点台面——那时点台面是锁方向。
+const ballInHandText = computed(() =>
+  placingMode.value ? '点一下台面，把白球放在那里' : '白球可以随时重摆',
+)
+
+// 拿到手中球的那一刻：进摆球模式，并弹一次大牌子——
+// 这是「为什么现在打不出杆」的唯一解释。
+//
+// 母球还在台上时（犯规但没摔袋）先按瞄准处理：多数人只是要这一杆的击球权，
+// 不想再看一遍自己已经能看见的球位。想挪他自然会点底栏的「自由球」。
+watch(ballInHand, (has) => {
   if (ballInHandTimer) {
     clearTimeout(ballInHandTimer)
     ballInHandTimer = null
   }
-  if (!holding) {
-    ghost.value = null
+  if (!has) {
+    placingMode.value = false
     ballInHandTip.value = false
     return
   }
-  const cue = balls.value.find((b) => b.id === 'cue')
-  ghost.value =
-    cue && cue.on_table
-      ? { x: cue.x, y: cue.y }
-      : { x: TABLE_WIDTH / 2, y: TABLE_LENGTH * 0.25 }
+  placingMode.value = !cueOnTable.value
   ballInHandTip.value = true
   ballInHandTimer = setTimeout(() => {
     ballInHandTip.value = false
@@ -363,28 +427,130 @@ watch(mustPlace, (holding) => {
   }, 3200)
 })
 
+// 母球刚落到台上的那一刻回瞄准模式：摆下去之后玩家要的是瞄准线，
+// 而不是继续跟着指针跑的虚影。想再挪由底栏的「自由球」按钮负责。
+watch(cueOnTable, (onTable) => {
+  if (onTable && placingMode.value) {
+    placingMode.value = false
+  }
+})
+
+watch([placingMode, cueOnTable], syncGhost)
+
+// finishPlacing 收起摆球模式去瞄准。母球不在台上时按钮是禁用的，这里不再判。
+function finishPlacing() {
+  placingMode.value = false
+}
+
+// reopenPlacing 回到摆球模式，把母球再挪一挪。
+// 顺手解锁方向：摆完球的方向和刚才瞄的不是同一条线。
+function reopenPlacing() {
+  placingMode.value = true
+  aimLocked.value = false
+}
+
+// ===== 出杆后的本地起步 =====
+//
+// pool-sim 算一杆要 12 毫秒到 1.7 秒（开球最重：十六颗球、几百次接触），
+// 这段时间里客户端只有一张静止的台面。等真实帧回来才动的话，
+// 松手到出球之间会空一段，越长越像「点了没反应」。
+//
+// 这里用与服务端同一套出射速度（1.0 + power × 6.0 米每秒，见 pool-sim 的
+// power_to_speed）先让母球沿瞄准方向滚 160 毫秒。收到真实帧时把播放起点
+// 设成已经滚过的时长，白球从当前位置接着走，不会跳回起点。
+const PREDICT_SECONDS = 0.16
+
+// strikePos 是预测出来的母球位置（世界坐标），null 表示此刻没在预测。
+const strikePos = ref<Point | null>(null)
+// strikeAt 是出杆那一刻的时间戳，用来算已经滚了多久。
+let strikeAt = 0
+let strikeRaf = 0
+
+// startStrikeRoll 按力度让母球先滚一小段。
+//
+// 位移上限取「沿瞄准方向最先撞到的那个东西」：撞球就停在接触点，撞库就停在库边。
+// 不截断的话满力 160 毫秒能走 1.1 米，白球会直接穿过球堆。
+function startStrikeRoll(shotPhi: number, shotPower: number) {
+  stopStrikeRoll()
+  const cue = balls.value.find((ball) => ball.id === 'cue')
+  if (!cue || !cue.on_table) {
+    return
+  }
+  const speed = 1 + shotPower * 6
+  const dx = Math.cos(shotPhi)
+  const dy = Math.sin(shotPhi)
+  // 复用瞄准那套几何：它已经算好了「最先撞到谁、距离多少」。
+  const limit = aimFromCue(balls.value, shotPhi).distance
+  const fromX = cue.x
+  const fromY = cue.y
+  strikeAt = performance.now()
+
+  const step = () => {
+    const elapsed = (performance.now() - strikeAt) / 1000
+    const travel = Math.min(speed * Math.min(elapsed, PREDICT_SECONDS), limit)
+    strikePos.value = { x: fromX + dx * travel, y: fromY + dy * travel }
+    // 走满这段时间，或者已经贴到要撞的东西上，就停手等真实帧。
+    if (elapsed >= PREDICT_SECONDS || travel >= limit) {
+      strikeRaf = 0
+      return
+    }
+    strikeRaf = requestAnimationFrame(step)
+  }
+  step()
+}
+
+// stopStrikeRoll 收掉预测，返回母球已经滚过的秒数。
+// 这个值给真实轨迹当起始偏移：真实帧的 t=0 就是出杆那一刻，
+// 从 lead 开始播才对得上白球现在的位置。
+function stopStrikeRoll(): number {
+  if (strikeRaf) {
+    cancelAnimationFrame(strikeRaf)
+    strikeRaf = 0
+  }
+  strikePos.value = null
+  if (strikeAt === 0) {
+    return 0
+  }
+  const lead = Math.min((performance.now() - strikeAt) / 1000, PREDICT_SECONDS)
+  strikeAt = 0
+  return lead
+}
+
 // tableBalls 是画到球台上的球。
 //
-// 手里握着母球时把它去掉：那颗球现在在玩家手上，台面上由虚影代表。
+// 母球还在手上时把它去掉：那颗球现在在玩家手上，台面上由虚影代表。
 // 不去掉的话会在台上看到两颗白球——一颗虚的跟着指针、一颗实的停在原处，
 // 分不清哪颗才是真的要打的那颗。
+//
+// 预测中的母球单独覆盖坐标：只换这一颗的 x/y，其余球原样透传。
 const tableBalls = computed(() => {
-  if (!mustPlace.value) {
+  const predicted = strikePos.value
+  if (!cueInHand.value && !predicted) {
     return balls.value
   }
   const rest: BallState[] = []
   for (const ball of balls.value) {
-    if (ball.id !== 'cue') {
-      rest.push(ball)
+    if (cueInHand.value && ball.id === 'cue') {
+      continue
     }
+    if (predicted && ball.id === 'cue') {
+      rest.push({ ...ball, x: predicted.x, y: predicted.y })
+      continue
+    }
+    rest.push(ball)
   }
   return rest
 })
 
 // canShoot 是「现在能不能出杆」的唯一判据。
-// 四个条件缺一不可：轮到我、没有一杆在路上、不在播动画、没有手中球。
+// 五个条件缺一不可：轮到我、没有一杆在路上、不在播动画、不在摆球、母球在台上。
 const canShoot = computed(
-  () => isMyTurn.value && !shotPending.value && !shooting.value && !mustPlace.value,
+  () =>
+    isMyTurn.value &&
+    !shotPending.value &&
+    !shooting.value &&
+    !placingMode.value &&
+    cueOnTable.value,
 )
 
 // refreshPotted 把「已经进袋的球」同步到桌下那一排。
@@ -452,8 +618,16 @@ function pottedStyle(id: string): Record<string, string> {
   return { background: look.color }
 }
 
-// canAim 只影响瞄准线与微调尺：动画期间不该让瞄准线跟着手指跑。
-const canAim = computed(() => isMyTurn.value && !shooting.value)
+// canAim 决定台上还有没有杆。
+//
+// 四个条件：轮到我、不在播动画、没有一杆在路上、不在摆球。
+// 前两条之外的那一条是必须的：服务端算一杆要 12 毫秒到 1.7 秒（开球最重），
+// 只等 shot 帧到达才收杆的话，松手之后球杆会继续挂在台上盯着白球，
+// 玩家看到的是「我打了，但什么都没发生」。
+// 摆球时也要收杆：白球还在手上，杆子没有立足点。
+const canAim = computed(
+  () => isMyTurn.value && !shooting.value && !shotPending.value && !placingMode.value,
+)
 
 // seats 是两张座位卡要传的数据：座位、该侧组别、该侧剩余球。
 //
@@ -512,11 +686,6 @@ const clockText = computed(() => {
 // 会让人以为下一杆方向已经定了。
 const aim = computed<AimLayer | null>(() => {
   if (!canAim.value) {
-    return null
-  }
-  // 手里握着球时不画瞄准线：母球还没落位，这条线指向的是台面上那颗
-  // 等着被拿走的球，跟着它瞄只会误导向。
-  if (mustPlace.value) {
     return null
   }
   const cue = balls.value.find((b) => b.id === 'cue')
@@ -588,7 +757,8 @@ let aimTimer: ReturnType<typeof setTimeout> | null = null
 // flushAim 立即发一帧当前姿态。
 function flushAim() {
   aimTimer = null
-  if (!socket || !isMyTurn.value || shooting.value || mustPlace.value) {
+  // 杆不在台上时不上报：对面看到一根不存在的杆在转，比看到杆停住更怪。
+  if (!socket || !canAim.value) {
     return
   }
   aimSentAt = Date.now()
@@ -596,7 +766,8 @@ function flushAim() {
 }
 
 watch([phi, power], () => {
-  if (!socket || !isMyTurn.value || shooting.value || mustPlace.value) {
+  // 杆不在台上时不上报：对面看到一根不存在的杆在转，比看到杆停住更怪。
+  if (!socket || !canAim.value) {
     return
   }
   const wait = AIM_SEND_INTERVAL - (Date.now() - aimSentAt)
@@ -650,6 +821,9 @@ function applySnapshot(snap: MatchSnapshot, deadline: number) {
   // （服务端要么算完广播了 shot，要么把请求拒了）。
   // 断线重连时正是靠这一句把标记解开——否则 canShoot 永远是 false，只能刷新页面。
   shotPending.value = false
+  clearShotTimeout()
+  // 本地那一段预测也要收掉：快照里的球位才是真的，继续盖着会画错。
+  stopStrikeRoll()
   // 每次权威状态回来都解锁：球位可能变了，上一杆锁定的方向已经不作数。
   aimLocked.value = false
   // 对面的瞄准帧同样作废：快照之后球位可能全变了，旧角度画出来是错的。
@@ -764,6 +938,10 @@ function playShotFrame(data: ShotData) {
     handle.stop()
     handle = null
   }
+  // 本地预测已经滚了一小段，真实轨迹从那个时刻接着播：
+  // 白球从脚下继续走，不会跳回出杆位置重来一遍。
+  const lead = stopStrikeRoll()
+  clearShotTimeout()
   // 服务端已经收下这一杆并算完了，在途标记可以放开：
   // 从这里开始由 shooting 接管，直到动画播完都不允许再出杆。
   shotPending.value = false
@@ -779,6 +957,8 @@ function playShotFrame(data: ShotData) {
   handle = playShot(
     { frames: data.frames, duration: data.duration },
     {
+      // 预测已经播掉的那一段跳过，从当前位置继续。
+      startAt: lead,
       onSample: (sample) => {
         applySample(balls.value, sample)
         // 每帧对一次：这一杆里刚掉袋的球要立刻进桌下那一排，
@@ -906,6 +1086,9 @@ function onPeer(event: string) {
 function onServerError(data: { code: string; message: string }) {
   shotPending.value = false
   placing.value = false
+  clearShotTimeout()
+  // 这一杆被拒了，母球回到原位：留着预测位置会让人以为球已经打出去了。
+  stopStrikeRoll()
   showNotice(data.message)
 }
 
@@ -992,15 +1175,12 @@ function initialPhi(): number {
 // 「指哪打哪」比「左右拖着转」直观得多，尤其在这一页——玩家盯着的是目标球，
 // 而不是屏幕下方的刻度。锁定之后就不再跟随，否则手去点力度条的路上会把方向带偏。
 function onHover(point: Point) {
-  if (!canAim.value) {
-    return
-  }
-  // 手里握着球时，指针就是那颗球：桌面端指到哪虚影跟到哪，不用按住拖。
-  if (mustPlace.value) {
+  // 球还在手上时，指针就是那颗球：桌面端指到哪虚影跟到哪，不用按住拖。
+  if (cueInHand.value) {
     moveGhost(point)
     return
   }
-  if (aimLocked.value) {
+  if (!canAim.value || aimLocked.value) {
     return
   }
   aimTowards(point)
@@ -1038,9 +1218,19 @@ function moveGhost(point: Point) {
 // 触摸屏上没有悬停，这是手机端唯一的瞄准方式；鼠标上它等同于按住跟手。
 // 锁定之后一律不理，理由同 onHover。
 function onDrag(payload: PoolDrag) {
-  // 手里握着球时拖动就是挪球。触摸屏没有悬停，这是手机上唯一的挪法。
-  if (mustPlace.value) {
-    if (payload.phase !== 'start' && payload.point) {
+  // 摆球模式下拖动就是挪球，抬手那一下落位。
+  // 不做「拖动中实时落位」：一帧一条请求没有意义，服务端只认最后那个点。
+  if (placingMode.value) {
+    if (!payload.point) {
+      return
+    }
+    if (payload.phase === 'end') {
+      placeCue(payload.point)
+      return
+    }
+    // 只有还没落位的那颗跟着手指走。已经在台上的不动：
+    // 跟着跑的话看起来像被拖走了，却不知道落在哪。
+    if (cueInHand.value && payload.phase === 'move') {
       moveGhost(payload.point)
     }
     return
@@ -1060,10 +1250,10 @@ function onNudge(deltaDeg: number) {
 }
 
 // onTap 处理台面点按。两种用意，按当前状态分流：
-//   - 手里握着母球：点哪里就落在哪里；
+//   - 摆球模式：点哪里就把母球放到哪里（已经放下的也可以再挪）；
 //   - 平时：锁定 / 解锁方向。锁上之后才能安心去拖力度条。
 function onTap(point: Point) {
-  if (mustPlace.value) {
+  if (placingMode.value) {
     placeCue(point)
     return
   }
@@ -1144,12 +1334,43 @@ function shoot() {
     return
   }
   shotPending.value = true
+  // 出杆这一刻就让母球先滚起来：服务端算一杆 12 毫秒到 1.7 秒，
+  // 这段时间干等着只会让人觉得没打出去（收到真实帧时按已滚时长接着播）。
+  startStrikeRoll(params.phi, params.power)
+  // 兜底：开球是最慢的一杆（约 1.7 秒），12 秒还没有任何帧回来
+  // 说明这一杆在链路上丢了。不兜底的话 shotPending 永远为真，
+  // 力度条会一直灰着，玩家只能刷新页面。
+  if (shotTimer) {
+    clearTimeout(shotTimer)
+  }
+  shotTimer = setTimeout(() => {
+    shotTimer = null
+    if (!shotPending.value) {
+      return
+    }
+    shotPending.value = false
+    stopStrikeRoll()
+    showNotice('这一杆没有收到结果，可以重新出杆')
+  }, SHOT_TIMEOUT_MS)
   // 出杆之后力度归零、方向解锁：下一杆从「自由瞄准」开始。
   power.value = 0
   aimLocked.value = false
   // 连击标记跟着这一杆一起结束：进球之后接着打，是下一次判定的结果，
   // 不是一直挂着的状态。不在这里清掉，出杆动画期间卡片上还写着「继续击打」。
   continuing.value = false
+}
+
+// SHOT_TIMEOUT_MS 是「一杆发出去之后最多等多久」。
+// 取值比服务端调物理的超时（10 秒）多留两秒，保证客户端不会先于服务端放弃。
+const SHOT_TIMEOUT_MS = 12_000
+
+// clearShotTimeout 在收到任何与这一杆有关的帧时调用。
+// shot / foul / turn / state / error 任意一条到，都说明服务端已经有结论了。
+function clearShotTimeout() {
+  if (shotTimer) {
+    clearTimeout(shotTimer)
+    shotTimer = null
+  }
 }
 
 // isPlaying 表示对局还在进行、也还没出结果。
@@ -1281,6 +1502,10 @@ function cleanup() {
     clearTimeout(ballInHandTimer)
     ballInHandTimer = null
   }
+  // 出杆兜底计时与本地预测都要一起收：留着的话组件已经销毁，
+  // 超时回调仍会去改 ref、预测的 rAF 仍会继续跑。
+  clearShotTimeout()
+  stopStrikeRoll()
   if (socket) {
     socket.close()
     socket = null
@@ -1456,9 +1681,10 @@ onBeforeRouteLeave(() => {
   position: absolute;
   top: 50%;
   /* 挂到球台外框外面一点，但贴着库边：从框沿到滑轨只有 12px 左右。
-     以前是 -44px，宽屏上眼睛要在球台与力度条之间来回跳。 */
-  right: -24px;
-  width: 30px;
+     以前是 -44px，宽屏上眼睛要在球台与力度条之间来回跳。
+     宽度 44 是给手指留的热区，滑轨本身还是 12px、位置不变。 */
+  right: -30px;
+  width: 44px;
   height: min(48%, 300px);
   transform: translateY(-50%);
 }
@@ -1591,9 +1817,18 @@ onBeforeRouteLeave(() => {
 }
 
 /* 手中球时底栏换成一块黄底提示条：落位靠点台面，不放按钮——
-   球跟着指针走，挪去按按钮的路上球就跑了。 */
+   球跟着指针走，挪去按按钮的路上球就跑了。
+   「去瞄准」是例外：白球已经落在台上，那颗按钮不会把球带走。 */
+.pm__ctls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
 .pm__place {
   display: flex;
+  flex: 1;
   align-items: center;
   justify-content: center;
   gap: 10px;
@@ -1601,6 +1836,44 @@ onBeforeRouteLeave(() => {
   border: 1px solid rgba(240, 192, 47, 0.4);
   border-radius: 12px;
   background: rgba(240, 192, 47, 0.12);
+}
+
+.pm__place-btn {
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #2a2100;
+  background: #f0c02f;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.pm__place-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* 瞄准状态下的「重摆」入口：做成描边胶囊而不是实心按钮，
+   它是个补充入口，不该比微调尺更抢眼。 */
+.pm__reopen {
+  flex: none;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #f0c02f;
+  white-space: nowrap;
+  background: rgba(240, 192, 47, 0.14);
+  border: 1px solid rgba(240, 192, 47, 0.4);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.pm__reopen:active {
+  background: rgba(240, 192, 47, 0.26);
 }
 
 .pm__place-tag {
