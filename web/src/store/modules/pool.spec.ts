@@ -85,19 +85,43 @@ beforeEach(() => {
 })
 
 describe('pool store 的邀请推送', () => {
-  it('三个推送帧各注册一次，重复调用不会注册两遍', () => {
+  it('四个推送帧各注册一次，重复调用不会注册两遍', () => {
     const store = usePoolStore()
     store.initWS()
     store.initWS()
 
     // 注册次数与「注册了哪几个」都要验：
-    // 只数次数的话，把 pool_invite_declined 换成 pool_invite_xxx 也照样是 3。
-    expect(mocks.frameRegistrations).toBe(3)
+    // 只数次数的话，把 pool_invite_declined 换成 pool_invite_xxx 也照样是 4。
+    expect(mocks.frameRegistrations).toBe(4)
     expect([...mocks.frames.keys()].sort()).toEqual([
       'pool_invite',
       'pool_invite_accepted',
       'pool_invite_declined',
+      'pool_room_joined',
     ])
+  })
+
+  // 有人进我的房间：roomTick 要涨一次，大厅据此立刻重拉快照。
+  //
+  // 这是「只有自己时大厅可以十秒才轮询一次」的前提：慢轮询 + 推送补位，
+  // 对面进人照样是秒级可见。roomTick 不涨的话，对面进来后大厅最多要等十秒。
+  it('有人进房时把 roomTick 加一', () => {
+    const store = usePoolStore()
+    store.initWS()
+    expect(store.roomTick).toBe(0)
+
+    fire('pool_room_joined', {
+      match_id: 5,
+      room_code: '123456',
+      player: { user_id: 8, nickname: '小满', avatar: '' },
+    })
+    fire('pool_room_joined', {
+      match_id: 5,
+      room_code: '123456',
+      player: { user_id: 9, nickname: '陆陆', avatar: '' },
+    })
+
+    expect(store.roomTick).toBe(2)
   })
 
   // expires_in 是「服务端发这一帧时还剩多少秒」，必须换成本地截止时刻：

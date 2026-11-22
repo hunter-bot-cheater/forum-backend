@@ -128,11 +128,11 @@ watch(
   { immediate: true },
 )
 
-// 对方接受了我的邀请：跳房间页。
+// 对方接受了我的邀请：把人带回大厅，也就是他自己的房间。
 //
-// 用 replace 而不是 push：大厅 → 房间是一次「往前走」的流程，
-// 但用户从房间点返回时应该回到大厅而不是回到那张等待卡，
-// 而等待卡此时已经没有意义了（邀请已被接受）。
+// 大厅现在就是房间页：进去之后对面已经坐着刚才那个人，房号还是那串数字。
+// 用 replace 而不是 push，是为了不把「等待卡」留在历史里——
+// 那条邀请已经被接受，退回去看到它只会让人以为又发了一次。
 watch(
   () => pool.acceptedRoom,
   (room) => {
@@ -140,7 +140,7 @@ watch(
       return
     }
     pool.acceptedRoom = null
-    void router.replace('/pool/room/' + String(room.match_id))
+    void router.replace('/pool')
   },
 )
 
@@ -155,7 +155,7 @@ watch(
   },
 )
 
-// accept 接受邀请：成功后直接进房间页。
+// accept 接受邀请：成功后回大厅，也就是那间「已经有对手」的房间。
 // 失败交给 request 拦截器弹提示，这里只负责把按钮解锁。
 async function accept() {
   if (!current.value || busy.value) {
@@ -164,9 +164,9 @@ async function accept() {
   busy.value = true
   const inviteId = current.value.invite_id
   try {
-    const room = await pool.accept(inviteId)
+    await pool.accept(inviteId)
     stopCountdown()
-    await router.replace('/pool/room/' + String(room.match_id))
+    await router.replace('/pool')
   } catch {
     // 不 dismiss：失败可能只是网络抖了一下（限流、超时），这条邀请还活着。
     // 一旦 dismiss 会把它记进 ignored，本会话再也不会弹出来，

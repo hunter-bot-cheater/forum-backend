@@ -63,6 +63,12 @@ export const usePoolStore = defineStore('pool', () => {
   // notice 是一次性提示文案（对方拒绝、邀请过期等），读走即清。
   const notice = ref('')
 
+  // roomTick 在「我这一侧的房间变了」时自增，大厅据此立刻重拉一次。
+  //
+  // 有了它，大厅在只有自己一个人的时候可以慢速轮询（十秒一次）：
+  // 对面进来人这件事由推送告诉我们，不必靠两秒一次的快轮询去撞。
+  const roomTick = ref(0)
+
   // wsBound 保证帧处理只注册一次。store 是单例，但 initWS 会被多个入口调用。
   let wsBound = false
 
@@ -185,7 +191,13 @@ export const usePoolStore = defineStore('pool', () => {
       acceptedRoom.value = data
     })
 
-    // 对方拒绝：服务端已经把这个房间解散了，本地只需要收起卡片并提示。
+    // 有人进了我的房间：大厅立刻重拉一次快照，对面那个空位马上变成人。
+    onFrame('pool_room_joined', () => {
+      roomTick.value += 1
+    })
+
+    // 对方拒绝：房间还留着（邀请人可能把房号又给了别人），
+    // 本地只需要收起卡片并提示。
     onFrame('pool_invite_declined', () => {
       outgoing.value = null
       outgoingTo.value = 0
@@ -207,6 +219,7 @@ export const usePoolStore = defineStore('pool', () => {
     outgoingTo.value = 0
     acceptedRoom.value = null
     notice.value = ''
+    roomTick.value = 0
   }
 
   onLogout(reset)
@@ -218,6 +231,7 @@ export const usePoolStore = defineStore('pool', () => {
     outgoingTo,
     acceptedRoom,
     notice,
+    roomTick,
     refresh,
     invite,
     cancelOutgoing,

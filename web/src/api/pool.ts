@@ -40,14 +40,68 @@ export interface AcceptInviteResp {
 // 房间页与对局页面对的是同一份「谁坐哪、谁准备了」，各写一份迟早对不上。
 export type PoolRoom = RoomSnapshot
 
-// 邀请一个我关注的人。后端会校验关注关系，没关注返回 400。
+// 邀请一个在线的人打一局。
 //
-// 不传房号：房号由服务端生成，客户端自己编会出现两局撞号。
+// 不要求关注：谁是好友是社交关系，能不能一起打球是另一件事。
+// 但要求对方在线——离线的邀请只能干等一分钟，对方根本不会知道。
+//
+// 不传房号：邀请指向发起人自己的房间，房号由服务端生成。
+// 客户端自己编房号会出现两局撞号，而且对方接受之后进的是哪个房间也说不清。
 export function createInvite(toUserId: number) {
   return request<InviteResp>({
     url: '/pool/invites',
     method: 'post',
     data: { to_user_id: toUserId },
+  })
+}
+
+// OnlineUser 是「现在在线的人」里的一条。
+// following 只用来分组（关注的人排前面），不作为「能不能邀请」的条件。
+export interface OnlineUser {
+  user_id: number
+  nickname: string
+  avatar: string
+  following: boolean
+}
+
+// 拉当前在线、且没在打的人。邀请面板用。
+//
+// 排除自己与正在对局的人由服务端做：名单要按「谁更可能答应」排序，
+// 而排序需要知道谁在打，这些判断在服务端一次做完比前端拼两三个接口简单。
+export function getOnlineUsers() {
+  return request<OnlineUser[]>({
+    url: '/pool/online',
+    method: 'get',
+  })
+}
+
+// 读我的房间，没有就开一间。
+//
+// 用 POST 而不是 GET：它可能建一条新房间（写操作），
+// 而 GET 在半路被浏览器或代理重试时留下两行房间是个很难查的 bug。
+// 房间页每两秒轮询它一次：同一间房会被反复返回，房号不会变。
+export function getMyRoom() {
+  return request<PoolRoom>({
+    url: '/pool/rooms/my',
+    method: 'post',
+  })
+}
+
+// 按房号进别人的房间。房号不对 / 房间已开局 / 座位被占各有各的文案，
+// 服务端直接给中文说明，前端原样弹出来即可。
+export function joinRoom(roomCode: string) {
+  return request<PoolRoom>({
+    url: '/pool/rooms/join',
+    method: 'post',
+    data: { room_code: roomCode },
+  })
+}
+
+// 退出别人的房间。自己的房间没有这个动作（房号还要留给别人用）。
+export function leaveRoom() {
+  return request<{ left: boolean }>({
+    url: '/pool/rooms/leave',
+    method: 'post',
   })
 }
 
@@ -71,22 +125,12 @@ export function acceptInvite(inviteId: string) {
   })
 }
 
-// 拒绝邀请。服务端会顺手解散已经建好的那个房间。
+// 拒绝邀请。房间不跟着解散：邀请人还在自己那间房里等着，房号还要留给别人用，
+// 收掉反而会让报给第三个人的那串数字突然失效。
 export function declineInvite(inviteId: string) {
   return request<{ declined: boolean }>({
     url: '/pool/invites/' + encodeURIComponent(inviteId) + '/decline',
     method: 'post',
-  })
-}
-
-// 读房间状态。房间页按 1.5 秒轮询它，看到 status 变 playing 就跳对局页。
-//
-// 房间页为什么不连 WebSocket：准备是低频动作，为它多建一条长连接不划算，
-// 而且轮询天然带「进页面就有一份当前状态」，不用等首帧推送。
-export function getRoom(matchId: number | string) {
-  return request<PoolRoom>({
-    url: '/pool/rooms/' + String(matchId),
-    method: 'get',
   })
 }
 

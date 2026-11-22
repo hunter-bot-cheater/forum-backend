@@ -113,13 +113,11 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '台球对战' },
       },
       {
-        // 房间页。必须能单独刷新——被邀请方常常是「点开链接顺手刷一下」，
-        // 所以它的全部状态都来自 GET /api/pool/rooms/:id，不依赖内存态。
+        // 旧的房间页已经并进大厅（大厅就是我的房间）。
+        // 这条重定向留着是为了旧链接与旧推送不落到 404 上——
+        // 那些链接里带的 match_id 现在也不需要了：房间归属由服务端按人查。
         path: 'pool/room/:id',
-        name: 'PoolRoom',
-        component: () => import('@/views/pool/room.vue'),
-        meta: { title: '准备中' },
-        props: true,
+        redirect: '/pool',
       },
       {
         // 战绩页。数据全在库里，所以它也能单独刷新与从分享链接直接打开。
