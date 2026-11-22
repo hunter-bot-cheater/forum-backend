@@ -115,6 +115,13 @@ function paintBall(ctx: CanvasRenderingContext2D, side: number, look: BallLook):
   ctx.fillStyle = shade
   ctx.fillRect(0, 0, side, side)
 
+  // 一小块死白的高光点。只有它才让球看起来是抛光树脂；
+  // 光靠上面那圈渐变，球会像一颗哑光塑料珠子。
+  ctx.beginPath()
+  ctx.ellipse(c - r * 0.38, c - r * 0.44, r * 0.2, r * 0.13, -0.5, 0, Math.PI * 2)
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.88)'
+  ctx.fill()
+
   // 号码：白圆垫底再写黑字。母球（number 为 0）跳过这一层。
   if (look.number > 0) {
     const badge = r * 0.46

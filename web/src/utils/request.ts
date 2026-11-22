@@ -38,6 +38,18 @@ interface RetryableConfig extends InternalAxiosRequestConfig {
   _retried?: boolean
 }
 
+// quiet 是给单个请求用的「别弹提示」开关。
+//
+// 给后台轮询用：大厅每几秒拉一次在线名单、房间快照、进行中的对局，
+// 这些请求失败时页面自己会显示错误态（「暂无其他人在线」、重试按钮），
+// 再叠一条全局红条只会让人以为整页坏了——限流时更是每两秒弹一条。
+// 挂到 axios 的模块声明上，接口函数里写 { quiet: true } 就有类型提示。
+declare module 'axios' {
+  export interface AxiosRequestConfig {
+    quiet?: boolean
+  }
+}
+
 // isAuthEndpoint 判断这个请求本身是不是认证接口。
 //
 // 认证接口的 401 有确定含义，不能走刷新流程：
@@ -172,7 +184,10 @@ service.interceptors.response.use(
     if (res && res.code === 0) {
       return res.data
     }
-    ElMessage.error(res?.message || '请求失败')
+    // 业务码失败也要看 quiet：轮询接口同样会走到这里。
+    if (!response.config.quiet) {
+      ElMessage.error(res?.message || '请求失败')
+    }
     return Promise.reject(new Error(res?.message || 'Error'))
   },
   async (error) => {
@@ -219,10 +234,12 @@ service.interceptors.response.use(
       // 限流：后端按客户端 IP 分桶，参数见 config/config.yaml 的 rate_limit，首页会并发多个请求。
       // 不要把 429 自动重试——重试本身也吃令牌，越重试越晚恢复。
       const retryAfter = resp?.headers?.['retry-after']
-      ElMessage.error(
-        retryAfter ? `请求过于频繁，请 ${retryAfter} 秒后重试` : '请求过于频繁，请稍后重试',
-      )
-    } else {
+      if (!config?.quiet) {
+        ElMessage.error(
+          retryAfter ? `请求过于频繁，请 ${retryAfter} 秒后重试` : '请求过于频繁，请稍后重试',
+        )
+      }
+    } else if (!config?.quiet) {
       ElMessage.error(message)
     }
 

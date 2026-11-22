@@ -55,6 +55,12 @@ export const usePoolStore = defineStore('pool', () => {
   // 存在这里而不是大厅组件里：从对局页「再约一局」回大厅时组件是重新挂载的，
   // 本地 ref 会归零，那一行就会重新变成可点的「邀请」，点了必然 409。
   const outgoingTo = ref(0)
+  // outgoingToName 是按下邀请那一刻对方的昵称。
+  //
+  // 不能每次渲染再去在线名单里查：从对局页点「再约一局」回大厅时，
+  // 房间与在线名单都还在路上，等待卡会先渲染成「已邀请 对方」，
+  // 等一下才变成名字。邀请是我们自己发出去的，那一刻就知道发给谁。
+  const outgoingToName = ref('')
   // acceptedRoom 是「对方接受了」的跳转信号，由弹层组件消费后清空。
   //
   // store 自己不跳路由：让 store import router 会在单测里拉起整棵路由树，
@@ -99,11 +105,25 @@ export const usePoolStore = defineStore('pool', () => {
 
   // invite 邀请一个关注的人，成功后记住这条邀请以便显示倒计时。
   // 失败原样抛出：调用方（大厅页）要按 409 与 400 给不同的提示。
-  async function invite(toUserId: number): Promise<TrackedInvite<InviteResp>> {
+  //
+  // nickname 只用来显示「已邀请 xxx」，允许为空：调用方拿不到昵称时
+  // 等待卡会显示成「已邀请 对方」，不影响邀请本身。
+  async function invite(toUserId: number, nickname = ''): Promise<TrackedInvite<InviteResp>> {
     const resp = track(await createInvite(toUserId))
     outgoing.value = resp
     outgoingTo.value = toUserId
+    outgoingToName.value = nickname
     return resp
+  }
+
+  // clearOutgoing 收起「等待对方接受」的那条本地记录。
+  //
+  // 三样东西必须一起清：只清其中一样，大厅就会出现「按钮说已发送、
+  // 等待卡却不见了」这种半截状态。取消、对方接受、对方拒绝、登出都走这里。
+  function clearOutgoing() {
+    outgoing.value = null
+    outgoingTo.value = 0
+    outgoingToName.value = ''
   }
 
   // cancelOutgoing 收起「等待对方接受」的卡片。
@@ -112,8 +132,7 @@ export const usePoolStore = defineStore('pool', () => {
   // 届时 acceptedRoom 会把我们带回房间——这正是想要的行为，
   // 因为对方已经进房了，房间是真实存在的。
   function cancelOutgoing() {
-    outgoing.value = null
-    outgoingTo.value = 0
+    clearOutgoing()
   }
 
   // accept 接受邀请，成功后清掉这条并返回房间信息供调用方跳转。
@@ -185,10 +204,15 @@ export const usePoolStore = defineStore('pool', () => {
 
     // 对方接受：清掉自己那条等待中的邀请，把房间信息交给组件去跳转。
     // 不清的话大厅会一直显示「等待对方接受」，而对方已经在房间里等着了。
+    //
+    // 还要顺手让大厅重拉一次房间：从对局页「再来一局」发出的邀请，
+    // 被接受时发起方已经站在大厅里了，router.replace('/pool') 是同一个路由、
+    // 不会重新挂载组件，不重拉的话对面那个人永远不出现——这就是
+    // 「对方已经进房，我这屏还是只有自己」的真因。
     onFrame('pool_invite_accepted', (data: AcceptInviteResp) => {
-      outgoing.value = null
-      outgoingTo.value = 0
+      clearOutgoing()
       acceptedRoom.value = data
+      roomTick.value += 1
     })
 
     // 有人进了我的房间：大厅立刻重拉一次快照，对面那个空位马上变成人。
@@ -199,8 +223,7 @@ export const usePoolStore = defineStore('pool', () => {
     // 对方拒绝：房间还留着（邀请人可能把房号又给了别人），
     // 本地只需要收起卡片并提示。
     onFrame('pool_invite_declined', () => {
-      outgoing.value = null
-      outgoingTo.value = 0
+      clearOutgoing()
       notice.value = '对方拒绝了这次邀请'
     })
 
@@ -215,8 +238,7 @@ export const usePoolStore = defineStore('pool', () => {
   function reset() {
     pending.value = []
     ignored.value = []
-    outgoing.value = null
-    outgoingTo.value = 0
+    clearOutgoing()
     acceptedRoom.value = null
     notice.value = ''
     roomTick.value = 0
@@ -229,6 +251,7 @@ export const usePoolStore = defineStore('pool', () => {
     incoming,
     outgoing,
     outgoingTo,
+    outgoingToName,
     acceptedRoom,
     notice,
     roomTick,

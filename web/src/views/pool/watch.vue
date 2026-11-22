@@ -22,8 +22,10 @@
       <span class="wt__badge">观战</span>
     </header>
 
-    <main class="wt__stage">
-      <PoolTable :balls="balls" :aim="null" />
+    <main class="wt__stage fs-table-stage">
+      <div class="fs-table-box">
+        <PoolTable :balls="balls" :aim="null" />
+      </div>
 
       <Transition name="wt-notice">
         <div v-if="notice" class="wt__notice">{{ notice }}</div>

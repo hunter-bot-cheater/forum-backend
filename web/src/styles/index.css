@@ -180,3 +180,31 @@ a {
   border-radius: var(--fs-radius-lg);
   box-shadow: var(--fs-shadow-sm);
 }
+
+/* 球台舞台：让球台按真实宽高比铺满可用空间。
+   canvas 自己会按容器尺寸等比缩放内容，容器比例一旦和球台对不上，
+   四周就留出一圈黑边——球台白白小了一圈，挂在台边的力度条也被推远。
+   对局、观战、回放三处共用这一套，别再各写一份。 */
+.fs-table-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fs-table-stage > .fs-table-box {
+  flex: none;
+  height: 100%;
+  /* 外框宽高比 = (台面宽 + 两侧库边木框) / (台面长 + 两侧)，见 game/table.ts。 */
+  aspect-ratio: 1.2022 / 2.1928;
+  max-width: 100%;
+}
+
+/* 竖屏：宽度是短板，按宽度推高度。
+   只给 height: 100% 的话，max-width 一夹住宽度，高度不会跟着缩，
+   上下的黑边就是这么来的。 */
+@media (max-width: 720px) {
+  .fs-table-stage > .fs-table-box {
+    width: 100%;
+    height: auto;
+  }
+}

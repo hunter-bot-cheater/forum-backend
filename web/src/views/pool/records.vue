@@ -14,8 +14,8 @@
          所以做成一块独立面板，而不是塞进列表的表头。 -->
     <section class="rec__summary">
       <div class="rec__stat">
-        <span class="rec__stat-label">积分</span>
-        <span class="rec__stat-value">{{ eloText }}</span>
+        <span class="rec__stat-label">场次</span>
+        <span class="rec__stat-value">{{ playedText }}</span>
       </div>
       <div class="rec__stat">
         <span class="rec__stat-label">胜 / 负</span>
@@ -91,7 +91,7 @@
 </template>
 
 <script setup lang="ts">
-// 战绩页：积分、胜负、最近的对局，每条可以点进回放。
+// 战绩页：场次、胜负、最近的对局，每条可以点进回放。
 //
 // 数据全部读后端（对局结束就落库了），所以刷新页面、换设备都在；
 // 对局结束后内存里的 actor 会被回收，战绩页拿不到内存状态也不需要。
@@ -130,13 +130,13 @@ let loadSeq = 0
 // 0 分看起来像真的输光了，短横一眼就知道是还没拉到。
 const placeholder = '—'
 
-// eloText / recordText / winRateText 都从 rating 派生。
+// playedText / recordText / winRateText 都从 rating 派生。
 // 胜率一场没打时也显示短横：0% 看起来像「打了全输」。
-const eloText = computed(() => {
+const playedText = computed(() => {
   if (!rating.value) {
     return placeholder
   }
-  return String(rating.value.elo)
+  return String(rating.value.wins + rating.value.losses)
 })
 
 const recordText = computed(() => {

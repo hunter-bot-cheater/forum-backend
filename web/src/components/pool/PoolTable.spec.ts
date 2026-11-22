@@ -4,7 +4,8 @@ import { mount } from '@vue/test-utils'
 // 组件只负责尺寸、DPR、生命周期与指针转发，绘制本身在 renderer 里已经测过，
 // 这里把 drawScene 换掉，断言「有没有画、画的尺寸对不对」。
 const drawScene = vi.hoisted(() => vi.fn())
-vi.mock('@/game/renderer', () => ({ drawScene }))
+// TABLE_PADDING 是真实常量，指针换算要用它；只有绘制函数被替掉。
+vi.mock('@/game/renderer', () => ({ drawScene, TABLE_PADDING: 12 }))
 
 import PoolTable from './PoolTable.vue'
 import type { BallState } from '@/game/types'
@@ -117,21 +118,41 @@ describe('PoolTable', () => {
     expect(disconnectSpy).toHaveBeenCalled()
   })
 
-  it('拖动上报相对起点的累计位移', async () => {
+  it('拖动上报相对起点的累计位移，并带上指针的台面坐标', async () => {
     const wrapper = mount(PoolTable, { props: { balls: balls() } })
     const host = wrapper.find('.pt')
     await host.trigger('pointerdown', { clientX: 100, clientY: 200, pointerId: 1, pointerType: 'mouse', button: 0 })
     await host.trigger('pointermove', { clientX: 130, clientY: 210, pointerId: 1, pointerType: 'mouse' })
 
     const events = wrapper.emitted('drag')!
-    expect(events[0][0]).toEqual({ phase: 'start', dx: 0, dy: 0 })
-    expect(events[1][0]).toEqual({ phase: 'move', dx: 30, dy: 10 })
+    expect(events[0][0]).toMatchObject({ phase: 'start', dx: 0, dy: 0 })
+    expect(events[1][0]).toMatchObject({ phase: 'move', dx: 30, dy: 10 })
+    // point 是手中球挪位置用的：那里要的是「指针现在在哪」，
+    // 只给位移的话球会停在起点，和手指错开一段。
+    expect(events[1][0].point).not.toBeNull()
   })
 
-  it('没有按下时鼠标划过不上报拖动', async () => {
+  it('手中球的虚影会传给渲染层', async () => {
+    const wrapper = mount(PoolTable, { props: { balls: balls(), ghost: { x: 0.5, y: 0.6 } } })
+    await new Promise((r) => setTimeout(r, 40))
+
+    const scene = drawScene.mock.calls.at(-1)?.[2] as { ghost?: { x: number; y: number } }
+    expect(scene.ghost).toEqual({ x: 0.5, y: 0.6 })
+    wrapper.unmount()
+  })
+
+  it('没有按下时鼠标划过不上报拖动，但会上报悬停位置', async () => {
     const wrapper = mount(PoolTable, { props: { balls: balls() } })
     await wrapper.find('.pt').trigger('pointermove', { clientX: 130, clientY: 210, pointerId: 1, pointerType: 'mouse' })
     expect(wrapper.emitted('drag')).toBeUndefined()
+    // 桌面端「指哪打哪」靠这一条，缺了就只能靠拖动转角度。
+    expect(wrapper.emitted('hover')).toHaveLength(1)
+  })
+
+  it('手指划过不上报悬停（触摸屏没有悬停）', async () => {
+    const wrapper = mount(PoolTable, { props: { balls: balls() } })
+    await wrapper.find('.pt').trigger('pointermove', { clientX: 130, clientY: 210, pointerId: 1, pointerType: 'touch' })
+    expect(wrapper.emitted('hover')).toBeUndefined()
   })
 
   it('松手后不再上报移动', async () => {

@@ -124,15 +124,19 @@ function onUp(e: PointerEvent) {
   touch-action: none;
 }
 
-/* 轨道左右留出余量，手指按在轨道旁边也算按在滑块上。 */
+/* 轨道是一条凹进面板里的窄槽，跟参考视频一样：外面一圈深色底，
+   里面一条更深的缝，滑块压在缝上。左右留出的余量让手指按在槽旁边也算按中。 */
 .pw__track {
   position: relative;
   flex: 1;
-  width: 16px;
+  width: 12px;
   min-height: 120px;
-  margin: 0 8px;
-  background: rgba(255, 255, 255, 0.14);
-  border-radius: 8px;
+  margin: 0 9px;
+  background: #1a1d26;
+  border-radius: 6px;
+  box-shadow:
+    inset 0 1px 3px rgba(0, 0, 0, 0.9),
+    0 0 0 1px rgba(255, 255, 255, 0.2);
 }
 
 /* 填充从下往上长。渐变末端的暖色提示「再往上就过头了」。 */
@@ -142,26 +146,29 @@ function onUp(e: PointerEvent) {
   bottom: 0;
   left: 0;
   background: linear-gradient(to top, #3ea675 0%, #d7c447 62%, #e0613f 100%);
-  border-radius: 8px;
+  border-radius: 6px;
   transition: none;
 }
 
-/* 手柄：轨道上一个白色小圆，位置与填充顶端一致。 */
+/* 手柄：一颗奶油色的圆，位置与填充顶端一致。
+   外圈一道暖白描边，压在深色槽上边界才清楚。 */
 .pw__knob {
   position: absolute;
   left: 50%;
-  width: 22px;
-  height: 22px;
-  margin: 0 0 -11px -11px;
-  background: #fbfaf6;
+  width: 20px;
+  height: 20px;
+  margin: 0 0 -10px -10px;
+  background: radial-gradient(circle at 34% 30%, #ffffff 0%, #f3ead6 55%, #d9c8a8 100%);
   border-radius: 50%;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  box-shadow:
+    0 1px 4px rgba(0, 0, 0, 0.6),
+    0 0 0 1px rgba(255, 255, 255, 0.35);
 }
 
 .pw__value {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
-  color: rgba(255, 255, 255, 0.75);
+  color: rgba(255, 255, 255, 0.72);
 }
 
 /* 禁用时整体压暗，仍保留形状，避免布局跳动。 */

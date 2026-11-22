@@ -84,11 +84,11 @@
               </article>
 
               <!-- 空位用虚线框：一眼能看出「这里还能坐一个人」，
-                   而不是「对手掉线了」。 -->
+                   而不是「对手掉线了」。里面只留一个加号，不再写「等一个人」——
+                   那句话和虚线框说的是同一件事，字还压在加号下面。 -->
               <article v-if="otherEmpty" class="pl__seat is-empty">
                 <div class="pl__seat-tag">空位</div>
                 <div class="pl__seat-ghost">+</div>
-                <span class="pl__seat-name">等一个人</span>
               </article>
 
               <article v-else class="pl__seat" :class="{ 'is-ready': otherReady }">
@@ -390,11 +390,14 @@ async function loadRoom() {
     applyRoom(next)
   } catch {
     // 拦截器已经弹过提示。保留上一份房间（比整块消失好），
-    // 失败态只用来决定要不要给重试入口。
+    // 失败态只用来决定要不要给重试入口——而且只在手里一间房都没有时给：
+    // 已经有房间时把它换成「房间没开出来」，页面会闪一下再变回来。
     if (roomDisposed || seq !== roomSeq) {
       return
     }
-    roomFailed.value = true
+    if (!room.value) {
+      roomFailed.value = true
+    }
   } finally {
     roomPolling = false
   }
@@ -564,11 +567,8 @@ const busyId = ref(0)
 // 名单会变：朋友可能刚上线，也可能刚开了一局（那就不该再邀请他）。
 // 十秒一次与观战列表同频，两个请求加起来也远低于限流桶的补充速度。
 const ONLINE_POLL_MS = 10 * 1000
-// ONLINE_MAX_MISSES 与观战列表同理：连续两次不通就停表，等用户点重试。
-const ONLINE_MAX_MISSES = 2
 
 let onlineTimer: ReturnType<typeof setInterval> | null = null
-let onlineMisses = 0
 // onlineSeq 与房间轮询同理：弱网下后发的响应可能先到，
 // 只认最新一次，免得旧名单盖掉新名单。
 let onlineSeq = 0
@@ -576,7 +576,8 @@ let onlineSeq = 0
 // loadOnline 拉一次在线名单。
 //
 // 只在第一次（手里还没有名单）时显示骨架屏：每十秒把列表换成骨架会让人
-// 以为页面在闪。后续刷新失败也不清空名单——上一份总比空白有用。
+// 以为页面在闪。失败同理——已经有名单时什么都不动，等下一轮自己恢复。
+// 不停表：这一条是最该保持新鲜的，停掉之后「谁在线」就永远停在那一刻了。
 async function loadOnline() {
   const seq = onlineSeq + 1
   onlineSeq = seq
@@ -590,15 +591,15 @@ async function loadOnline() {
     }
     online.value = list
     onlineFailed.value = false
-    onlineMisses = 0
   } catch {
     if (seq !== onlineSeq) {
       return
     }
-    onlineMisses += 1
-    onlineFailed.value = true
-    if (onlineMisses >= ONLINE_MAX_MISSES) {
-      stopOnlineTimer()
+    // 名单已经在屏幕上时不要把它换成错误态：
+    // 「动不动闪一下」就是从这里来的——轮询里碰上一次 429，
+    // 整张名单消失半秒再回来，看着像列表在抽。
+    if (online.value.length === 0) {
+      onlineFailed.value = true
     }
   } finally {
     if (seq === onlineSeq) {
@@ -623,11 +624,10 @@ function startOnlineTimer() {
   }, ONLINE_POLL_MS)
 }
 
-// retryOnline 手动重试：先补一次，再把表重新起上。
+// retryOnline 手动重试：立刻补一次，再把表重新起上。
 // 不先清 onlineFailed：面板靠它决定显示「没加载出来」还是空状态，
 // 先清会让文案在请求回来之前跳一次。
 function retryOnline() {
-  onlineMisses = 0
   void loadOnline()
   startOnlineTimer()
 }
@@ -641,7 +641,7 @@ async function onInvite(person: OnlineUser) {
   }
   busyId.value = person.user_id
   try {
-    await pool.invite(person.user_id)
+    await pool.invite(person.user_id, person.nickname)
   } catch {
     // 拦截器已提示。
   } finally {
@@ -653,16 +653,11 @@ async function onInvite(person: OnlineUser) {
 
 const outgoing = computed(() => pool.outgoing)
 
-// outgoingName 取被邀请人的昵称。在线名单里找不到（对方刚掉线）时说「对方」。
-const outgoingName = computed(() => {
-  const id = pool.outgoingTo
-  for (const person of online.value) {
-    if (person.user_id === id) {
-      return person.nickname || '对方'
-    }
-  }
-  return '对方'
-})
+// outgoingName 取被邀请人的昵称。
+//
+// 用邀请那一刻记在 store 里的名字，而不是现查在线名单：回大厅的瞬间
+// 名单还没拉回来，现查会先显示成「已邀请 对方」，等一下才跳成名字。
+const outgoingName = computed(() => pool.outgoingToName || '对方')
 
 // waitLeft 是等待卡上的剩余秒数，按 store 里记下的本地截止时刻倒数。
 const waitLeft = ref(0)
@@ -1093,13 +1088,15 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
-/* 空位的占位图形：56px 与头像同高，两张卡片的高度才对得齐。 */
+/* 空位的占位图形：56px 与头像同高，两张卡片的高度才对得齐。
+   上下 auto 让它在对侧那张卡撑高之后仍然居中，而不是顶在「空位」两个字下面。 */
 .pl__seat-ghost {
   display: flex;
   align-items: center;
   justify-content: center;
   width: 56px;
   height: 56px;
+  margin: auto 0;
   font-size: 24px;
   color: var(--fs-text-3);
   background: var(--fs-surface-hover);
@@ -1114,11 +1111,6 @@ onBeforeUnmount(() => {
   font-size: 14px;
   font-weight: 600;
   color: var(--fs-text-1);
-}
-
-.pl__seat.is-empty .pl__seat-name {
-  color: var(--fs-text-3);
-  font-weight: 400;
 }
 
 .pl__seat-ready {

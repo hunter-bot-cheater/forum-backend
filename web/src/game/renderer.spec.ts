@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { drawScene, type AimLayer } from './renderer'
-import { RACK_EIGHTBALL } from './table'
+import { BALL_DRAW_SCALE, drawScene, TABLE_PADDING, type AimLayer } from './renderer'
+import { fitTable, metersToPx, worldToScreen } from './geometry'
+import { BALL_RADIUS, RACK_EIGHTBALL } from './table'
 import type { BallState } from './types'
 
 // ballTexture 会创建 canvas 并取 2d 上下文，jsdom 没有实现这一层。
@@ -32,8 +33,11 @@ function createFakeCtx(): FakeCtx {
         if (prop === 'calls') {
           return calls
         }
-        if (prop === 'createRadialGradient') {
-          return () => ({ addColorStop() {} })
+        if (prop === 'createRadialGradient' || prop === 'createLinearGradient') {
+          return (...args: unknown[]) => {
+            calls.push({ method: String(prop), args })
+            return { addColorStop() {} }
+          }
         }
         return (...args: unknown[]) => {
           calls.push({ method: String(prop), args })
@@ -94,6 +98,17 @@ describe('drawScene：球', () => {
       expect(draw.args[3]).toBeGreaterThan(0)
       expect(draw.args[4]).toBeGreaterThan(0)
     }
+  })
+
+  it('球按物理直径的 1.2 倍画：小屏上也看得出是球，不是一颗彩点', () => {
+    const ctx = createFakeCtx()
+    drawScene(ctx, { width: 390, height: 844 }, { balls: rackState() }, 1)
+    const draw = ctx.calls.find((c) => c.method === 'drawImage')!
+    const t = fitTable({ width: 390, height: 844 }, TABLE_PADDING)
+    const physical = metersToPx(t, BALL_RADIUS) * 2
+    // drawImage(texture, x, y, 宽, 高)：宽高要是物理直径放大后的值。
+    expect(Number(draw.args[3])).toBeCloseTo(physical * BALL_DRAW_SCALE, 3)
+    expect(BALL_DRAW_SCALE).toBeGreaterThan(1)
   })
 
   it('球的绘制发生在影子之后：所有 fill 都在第一个 drawImage 之前', () => {
@@ -175,6 +190,9 @@ describe('drawScene：瞄准层', () => {
   const aim: AimLayer = {
     cue: { x: 0.5944, y: 0.4557 },
     hit: { x: 0.5944, y: 1.1, kind: 'ball' },
+    phi: Math.PI / 2,
+    power: 0,
+    locked: false,
   }
 
   it('有瞄准层时画虚线与幽灵球', () => {
@@ -186,7 +204,13 @@ describe('drawScene：瞄准层', () => {
   })
 
   it('撞库时不画幽灵球，只画虚线', () => {
-    const wallAim: AimLayer = { cue: { x: 0.5, y: 0.5 }, hit: { x: 0.5, y: 1.9, kind: 'cushion' } }
+    const wallAim: AimLayer = {
+      cue: { x: 0.5, y: 0.5 },
+      hit: { x: 0.5, y: 1.9, kind: 'cushion' },
+      phi: Math.PI / 2,
+      power: 0,
+      locked: false,
+    }
     const ctx = createFakeCtx()
     drawScene(ctx, { width: 390, height: 844 }, { balls: rackState(), aim: wallAim }, 1)
     const strokesWithDash = ctx.calls.filter((c) => c.method === 'setLineDash')
@@ -194,7 +218,13 @@ describe('drawScene：瞄准层', () => {
   })
 
   it('母球与命中点重合时不画线，也不会除零', () => {
-    const degenerate: AimLayer = { cue: { x: 0.5, y: 0.5 }, hit: { x: 0.5, y: 0.5, kind: 'cushion' } }
+    const degenerate: AimLayer = {
+      cue: { x: 0.5, y: 0.5 },
+      hit: { x: 0.5, y: 0.5, kind: 'cushion' },
+      phi: 0,
+      power: 0,
+      locked: false,
+    }
     const ctx = createFakeCtx()
     expect(() =>
       drawScene(ctx, { width: 390, height: 844 }, { balls: rackState(), aim: degenerate }, 1),
@@ -206,5 +236,111 @@ describe('drawScene：瞄准层', () => {
     const ctx = createFakeCtx()
     drawScene(ctx, { width: 390, height: 844 }, { balls: rackState(), aim: null }, 1)
     expect(countOf(ctx, 'setLineDash')).toBe(0)
+  })
+})
+
+describe('drawScene：球杆', () => {
+  // translate 的参数就是杆头位置（屏幕坐标）。用它来验证「杆在母球后面」。
+  function tipOf(ctx: FakeCtx): { x: number; y: number } {
+    const call = ctx.calls.find((c) => c.method === 'translate')
+    if (!call) {
+      throw new Error('没有画杆')
+    }
+    return { x: Number(call.args[0]), y: Number(call.args[1]) }
+  }
+
+  const base: AimLayer = {
+    cue: { x: 0.635, y: 0.635 },
+    hit: { x: 0.635, y: 1.9, kind: 'cushion' },
+    phi: Math.PI / 2,
+    power: 0,
+    locked: false,
+  }
+
+  it('瞄准时画一根杆，杆头在击球方向的反面', () => {
+    const ctx = createFakeCtx()
+    drawScene(ctx, { width: 390, height: 844 }, { balls: rackState(), aim: base }, 1)
+
+    // 球往 +y（台面远端）走，屏幕上是向上，所以杆头要在母球下方。
+    const t = fitTable({ width: 390, height: 844 }, TABLE_PADDING)
+    const center = worldToScreen(t, base.cue.x, base.cue.y)
+    expect(tipOf(ctx).x).toBeCloseTo(center.x, 3)
+    expect(tipOf(ctx).y).toBeGreaterThan(center.y)
+  })
+
+  it('力度越大杆子拉得越远', () => {
+    const soft = createFakeCtx()
+    drawScene(soft, { width: 390, height: 844 }, { balls: rackState(), aim: base }, 1)
+
+    const hard = createFakeCtx()
+    drawScene(
+      hard,
+      { width: 390, height: 844 },
+      { balls: rackState(), aim: { ...base, power: 1, locked: true } },
+      1,
+    )
+
+    expect(tipOf(hard).y).toBeGreaterThan(tipOf(soft).y)
+  })
+
+  it('杆头与先角各画一次，杆身是渐变的而不是纯色', () => {
+    const ctx = createFakeCtx()
+    drawScene(ctx, { width: 390, height: 844 }, { balls: rackState(), aim: base }, 1)
+    expect(countOf(ctx, 'createLinearGradient')).toBe(1)
+    expect(countOf(ctx, 'fillRect')).toBeGreaterThanOrEqual(2)
+  })
+})
+
+describe('drawScene：手中球虚影', () => {
+  // 袋口也是用 arc 画的圆，所以不能直接数 arc 的总数。虚影是整帧最后画的一笔，
+  // 拿「有虚影」与「没虚影」两次绘制相减，差出来的就是它。
+  function callsWith(ghost: { x: number; y: number } | null): Call[] {
+    const ctx = createFakeCtx()
+    drawScene(ctx, { width: 390, height: 844 }, { balls: rackState(), ghost }, 1)
+    return ctx.calls
+  }
+
+  // countIn 数某一类调用在给定调用序列里出现了几次。
+  function countIn(calls: Call[], method: string): number {
+    let n = 0
+    for (const call of calls) {
+      if (call.method === method) {
+        n += 1
+      }
+    }
+    return n
+  }
+
+  const spot = { x: 0.635, y: 0.9 }
+
+  it('比没有虚影时多画两个圆：球身与外围虚线', () => {
+    const plain = callsWith(null)
+    const ghost = callsWith(spot)
+
+    expect(countIn(ghost, 'arc')).toBe(countIn(plain, 'arc') + 2)
+
+    // 球身是一个球径，虚线圈是它的 1.55 倍。
+    const arcs = ghost.filter((c) => c.method === 'arc')
+    const body = arcs[arcs.length - 2]
+    const ring = arcs[arcs.length - 1]
+    expect(Number(ring.args[2])).toBeCloseTo(Number(body.args[2]) * 1.55, 3)
+  })
+
+  it('虚影落在球心换算出来的屏幕位置上', () => {
+    const t = fitTable({ width: 390, height: 844 }, TABLE_PADDING)
+    const center = worldToScreen(t, spot.x, spot.y)
+    const arcs = callsWith(spot).filter((c) => c.method === 'arc')
+    const body = arcs[arcs.length - 2]
+    expect(Number(body.args[0])).toBeCloseTo(center.x, 3)
+    expect(Number(body.args[1])).toBeCloseTo(center.y, 3)
+  })
+
+  it('球身用径向渐变画，虚线圈画完把 dash 复位', () => {
+    const plain = callsWith(null)
+    const ghost = callsWith(spot)
+    // 半透明感靠径向渐变：中间亮、边缘淡，和真球是同一个光源方向。
+    expect(countIn(ghost, 'createRadialGradient')).toBe(countIn(plain, 'createRadialGradient') + 1)
+    // 一次设 dash、一次复位。少了复位，之后所有描边都会变成虚线。
+    expect(countIn(ghost, 'setLineDash')).toBe(2)
   })
 })

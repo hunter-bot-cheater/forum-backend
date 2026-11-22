@@ -12,8 +12,10 @@
       <span class="rp__reason">{{ reasonText }}</span>
     </header>
 
-    <main class="rp__stage">
-      <PoolTable :balls="balls" :aim="null" />
+    <main class="rp__stage fs-table-stage">
+      <div class="fs-table-box">
+        <PoolTable :balls="balls" :aim="null" />
+      </div>
 
       <!-- 三种「没有画面」要分开：这一局不归你看（重试也没用）、
            还没结算、以及拉失败（可以重试）。 -->

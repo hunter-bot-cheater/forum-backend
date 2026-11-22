@@ -1,36 +1,60 @@
 <template>
   <div class="ft" :class="{ 'is-off': disabled }">
-    <button class="ft__step" type="button" :disabled="disabled" @click="nudge(-STEP_DEG)">‹</button>
-
-    <div
-      ref="rail"
-      class="ft__rail"
-      @pointerdown="onDown"
-      @pointermove="onMove"
-      @pointerup="onUp"
-      @pointercancel="onUp"
+    <button
+      class="ft__step"
+      type="button"
+      :disabled="disabled"
+      aria-label="向左微调 0.1 度"
+      @pointerdown.prevent="onStepDown(-STEP_DEG)"
+      @pointerup="stopRepeat"
+      @pointerleave="stopRepeat"
+      @pointercancel="stopRepeat"
+      @keydown.enter.prevent="nudge(-STEP_DEG)"
+      @keydown.space.prevent="nudge(-STEP_DEG)"
     >
-      <span class="ft__cue"></span>
-      <span class="ft__angle">{{ angleText }}°</span>
-    </div>
+      −0.1°
+    </button>
 
-    <button class="ft__step" type="button" :disabled="disabled" @click="nudge(STEP_DEG)">›</button>
+    <span class="ft__angle" :title="disabled ? '还没轮到你' : '当前瞄准角度'">
+      {{ angleText }}°
+    </span>
+
+    <button
+      class="ft__step"
+      type="button"
+      :disabled="disabled"
+      aria-label="向右微调 0.1 度"
+      @pointerdown.prevent="onStepDown(STEP_DEG)"
+      @pointerup="stopRepeat"
+      @pointerleave="stopRepeat"
+      @pointercancel="stopRepeat"
+      @keydown.enter.prevent="nudge(STEP_DEG)"
+      @keydown.space.prevent="nudge(STEP_DEG)"
+    >
+      +0.1°
+    </button>
+
+    <span class="ft__tip">方向键也行</span>
   </div>
 </template>
 
 <script setup lang="ts">
-// 底部微调尺。三个入口：左右按钮各走 0.1°，在刻度尺上横向拖动则连续微调。
+// 底部微调：两个按钮各走 0.1°，中间那串数字是当前角度。
 //
-// 只上报「转多少度」，不自己算 phi：角度的唯一来源在页面里，
-// 这里如果也用一份本地状态，拖快了两边就会打架。
-import { computed, ref } from 'vue'
+// 以前这里是一条「刻度尺」，按住横向拖动才转度数。问题在于它没有零点，
+// 拖一下不知道转了多少，松手也没有停在哪一格的手感——玩家只能凭感觉试。
+// 换成两个明确步长的按钮之后，按几下就是几格，角度数字一直在眼前。
+//
+// 按住不放会连发（350ms 之后每 70ms 一格）：差 1 度时不用真点十下。
+// 只上报「转多少度」，不自己算 phi：角度的唯一来源在页面里。
+import { computed, onBeforeUnmount } from 'vue'
 
 // 一格的度数。台球瞄准差 0.1° 在 1.5 米外就是 2.6 毫米，够用了。
 const STEP_DEG = 0.1
 
-// 刻度尺上拖动多少像素算一格。8px 与手指的精细控制范围接近，
-// 再小就会「怎么拖都过不去」。
-const PX_PER_STEP = 8
+// 按住多久开始连发，以及连发的间隔。
+const REPEAT_DELAY_MS = 350
+const REPEAT_EVERY_MS = 70
 
 const props = defineProps<{
   // 当前方位角，弧度。
@@ -42,13 +66,6 @@ const emit = defineEmits<{
   nudge: [deltaDeg: number]
 }>()
 
-const rail = ref<HTMLDivElement | null>(null)
-
-// 拖动过程中的累计格数与上一次上报的格数。
-let pressing = false
-let originX = 0
-let lastStep = 0
-
 // angleText 把弧度换成 0 到 360 的度数，保留一位小数。
 // 不做归一化的话会出现「-37.4°」这种负数，读起来要心算。
 const angleText = computed(() => {
@@ -57,7 +74,10 @@ const angleText = computed(() => {
   return wrapped.toFixed(1)
 })
 
-// nudge 上报一次固定步长的微调，按钮直接调它。
+let delayTimer: ReturnType<typeof setTimeout> | null = null
+let repeatTimer: ReturnType<typeof setInterval> | null = null
+
+// nudge 上报一次固定步长的微调。
 function nudge(deltaDeg: number) {
   if (props.disabled) {
     return
@@ -65,43 +85,35 @@ function nudge(deltaDeg: number) {
   emit('nudge', deltaDeg)
 }
 
-// onDown 记下起点，按下的那一刻不动角度：误触很常见，抬手就走的按钮不该生效。
-function onDown(e: PointerEvent) {
-  if (props.disabled || (e.pointerType === 'mouse' && e.button !== 0)) {
+// onStepDown 先把这一格走出去，再等一会儿开始连发。
+// 立即走一格是必须的：只按一下（不到 350ms）也该生效。
+function onStepDown(deltaDeg: number) {
+  if (props.disabled) {
     return
   }
-  pressing = true
-  originX = e.clientX
-  lastStep = 0
-  ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  nudge(deltaDeg)
+  stopRepeat()
+  delayTimer = setTimeout(() => {
+    repeatTimer = setInterval(() => {
+      emit('nudge', deltaDeg)
+    }, REPEAT_EVERY_MS)
+  }, REPEAT_DELAY_MS)
 }
 
-// onMove 按整格上报差额。只报差额而不是总位移：
-// 总位移每次都会把已经转过的角度再算一遍，父级一加就翻倍。
-function onMove(e: PointerEvent) {
-  if (!pressing || props.disabled) {
-    return
+// stopRepeat 收掉连发。抬手、移出按钮、指针被系统取消都走它。
+function stopRepeat() {
+  if (delayTimer) {
+    clearTimeout(delayTimer)
+    delayTimer = null
   }
-  const steps = Math.trunc((e.clientX - originX) / PX_PER_STEP)
-  const delta = steps - lastStep
-  if (delta === 0) {
-    return
+  if (repeatTimer) {
+    clearInterval(repeatTimer)
+    repeatTimer = null
   }
-  lastStep = steps
-  emit('nudge', delta * STEP_DEG)
 }
 
-// onUp 结束拖动，释放指针捕获。
-function onUp(e: PointerEvent) {
-  if (!pressing) {
-    return
-  }
-  pressing = false
-  const target = e.currentTarget as HTMLElement
-  if (target.hasPointerCapture(e.pointerId)) {
-    target.releasePointerCapture(e.pointerId)
-  }
-}
+// 组件卸载时还有定时器在跑就会往已经销毁的父级发事件，收尾时必须停。
+onBeforeUnmount(stopRepeat)
 </script>
 
 <style scoped>
@@ -109,23 +121,24 @@ function onUp(e: PointerEvent) {
 .ft {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: center;
+  gap: 10px;
   height: 36px;
-  padding: 0 2px;
 }
 
 .ft__step {
   flex: none;
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  font-size: 18px;
-  line-height: 1;
-  color: rgba(255, 255, 255, 0.82);
-  background: rgba(255, 255, 255, 0.1);
+  min-width: 58px;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.86);
+  background: rgba(255, 255, 255, 0.09);
   border: none;
   border-radius: 8px;
   cursor: pointer;
+  touch-action: none;
 }
 
 .ft__step:active {
@@ -137,53 +150,30 @@ function onUp(e: PointerEvent) {
   cursor: default;
 }
 
-/* 刻度尺：用重复渐变画短线，比塞几十个 span 轻得多，
-   而且宽度随容器自适应，不用监听尺寸。 */
-.ft__rail {
-  position: relative;
-  flex: 1;
-  height: 30px;
-  overflow: hidden;
-  background-image: repeating-linear-gradient(
-    to right,
-    rgba(255, 255, 255, 0.32) 0,
-    rgba(255, 255, 255, 0.32) 1px,
-    transparent 1px,
-    transparent 8px
-  );
-  background-position: center;
-  background-size: 100% 10px;
-  background-repeat: no-repeat;
-  border-radius: 8px;
-  cursor: ew-resize;
-  touch-action: none;
-}
-
-/* 尺子中间的球杆图形。只是一段渐变的细条，用来表达「这里在调杆」，
-   不按真实角度旋转——刻度尺本身是水平的，旋转反而看不懂。 */
-.ft__cue {
-  position: absolute;
-  top: 50%;
-  right: 18%;
-  left: 18%;
-  height: 3px;
-  margin-top: -1.5px;
-  background: linear-gradient(to right, #d8c9a8 0%, #d8c9a8 12%, #8a6a44 100%);
-  border-radius: 2px;
-}
-
-/* 角度数字压在尺子右端，等宽数字避免每位跳动时左右晃。 */
+/* 角度数字用等宽字，调的时候数字不会左右跳。 */
 .ft__angle {
-  position: absolute;
-  top: 50%;
-  right: 6px;
-  font-size: 11px;
+  min-width: 68px;
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
-  color: rgba(255, 255, 255, 0.78);
-  transform: translateY(-50%);
+  color: rgba(255, 255, 255, 0.9);
+  text-align: center;
+}
+
+/* 「方向键也行」是补一句桌面端的快捷方式，手机上看不见也用不上，
+   所以只在宽一点的屏幕上显示。 */
+.ft__tip {
+  display: none;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.38);
+}
+
+@media (min-width: 720px) {
+  .ft__tip {
+    display: inline;
+  }
 }
 
 .ft.is-off {
-  opacity: 0.4;
+  opacity: 0.5;
 }
 </style>

@@ -3,6 +3,8 @@
 // 前端不在这里做校验或补默认值：服务端是唯一权威，缺字段就是协议不一致，
 // 应该立刻在开发期暴露出来，而不是被一层「宽松解析」掩盖掉。
 
+import type { Point } from './geometry'
+
 // Seat 是席位号。0 是发起邀请的房主，1 是被邀请方。
 export type Seat = 0 | 1
 
@@ -111,4 +113,8 @@ export interface PoolDrag {
   phase: 'start' | 'move' | 'end'
   dx: number
   dy: number
+  // point 是当前指针所在的台面世界坐标（米）。拖动转角度只认 dx，
+  // 而拖动母球要的是「指针现在在哪」，用位移反推落点会让球和手指错开一段。
+  // 指针在画布之外时拿不到换算结果，这时为 null。
+  point: Point | null
 }

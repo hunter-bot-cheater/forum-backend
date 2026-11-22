@@ -205,7 +205,7 @@ describe('pool store 的邀请处理', () => {
     expect(store.pending).toHaveLength(0)
   })
 
-  it('invite 成功后记住自己发出的那条，以及发给了谁', async () => {
+  it('invite 成功后记住自己发出的那条、发给了谁，以及对方叫什么', async () => {
     const store = usePoolStore()
     mocks.createInvite.mockResolvedValue({
       invite_id: 'x',
@@ -214,12 +214,15 @@ describe('pool store 的邀请处理', () => {
       expires_in: 60,
     })
 
-    await store.invite(9)
+    await store.invite(9, '小满')
 
     expect(mocks.createInvite).toHaveBeenCalledWith(9)
     expect(store.outgoing?.room_code).toBe('111222')
     // 响应里没有被邀请者的 id，大厅要靠 outgoingTo 把那一行标成「已发送」。
     expect(store.outgoingTo).toBe(9)
+    // 昵称也一起记下来：回大厅时在线名单还没拉回来，
+    // 现查的话等待卡会先显示成「已邀请 对方」。
+    expect(store.outgoingToName).toBe('小满')
     expect(store.outgoing?.expires_at).toBeGreaterThan(Date.now())
   })
 
@@ -238,6 +241,7 @@ describe('pool store 的邀请处理', () => {
     expect(store.outgoing).toBeNull()
     // 不清的话大厅那一行会一直是「已发送」并禁用，用户再也约不到这个人。
     expect(store.outgoingTo).toBe(0)
+    expect(store.outgoingToName).toBe('')
   })
 })
 

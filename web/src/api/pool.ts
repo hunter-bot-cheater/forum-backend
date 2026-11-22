@@ -68,10 +68,13 @@ export interface OnlineUser {
 //
 // 排除自己与正在对局的人由服务端做：名单要按「谁更可能答应」排序，
 // 而排序需要知道谁在打，这些判断在服务端一次做完比前端拼两三个接口简单。
+// quiet：大厅每几秒轮询一次，失败时页面自己有「暂无其他人在线」这一态，
+// 再弹一条全局红条只会在限流时刷屏。
 export function getOnlineUsers() {
   return request<OnlineUser[]>({
     url: '/pool/online',
     method: 'get',
+    quiet: true,
   })
 }
 
@@ -80,10 +83,13 @@ export function getOnlineUsers() {
 // 用 POST 而不是 GET：它可能建一条新房间（写操作），
 // 而 GET 在半路被浏览器或代理重试时留下两行房间是个很难查的 bug。
 // 房间页每两秒轮询它一次：同一间房会被反复返回，房号不会变。
+// quiet：与在线名单同理，房间拉不到时大厅显示「房间没开出来 + 重试」，
+// 不需要再来一条弹到右上角的红条。
 export function getMyRoom() {
   return request<PoolRoom>({
     url: '/pool/rooms/my',
     method: 'post',
+    quiet: true,
   })
 }
 
@@ -120,10 +126,13 @@ export function reopenRoom() {
 //
 // 实时到达靠全局 WS 推的 pool_invite，这个接口负责两件 WS 覆盖不到的事：
 // 刷新页面后补回推送期间漏掉的邀请，以及弹层被关掉后重新找回入口。
+// quiet：这是后台补拉，没有待接受邀请本来就是常态，
+// 一次失败不该在用户读文章的时候弹一条红条出来。
 export function listPendingInvites() {
   return request<PendingInvite[]>({
     url: '/pool/invites/pending',
     method: 'get',
+    quiet: true,
   })
 }
 
@@ -234,9 +243,11 @@ export interface LiveMatch {
 }
 
 // getLive 拉正在进行的对局。返回的是内存里的对局，已结束的立刻消失。
+// quiet：这是首页列表的轮询接口，失败时保留上一份列表即可。
 export function getLiveMatches() {
   return request<LiveMatch[]>({
     url: '/pool/live',
     method: 'get',
+    quiet: true,
   })
 }

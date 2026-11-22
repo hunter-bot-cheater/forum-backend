@@ -62,6 +62,8 @@ export interface FoulData {
 export interface ResultData {
   winner: Seat
   reason: string
+  // 服务端仍会带这两个积分增量（库里的 rating 还在算），界面已经不显示了。
+  // 留着字段是因为它属于线上协议：删掉类型不会让服务端少发这两个键。
   elo_delta_0: number
   elo_delta_1: number
 }

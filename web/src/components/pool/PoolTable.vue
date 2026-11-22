@@ -26,6 +26,8 @@ import type { BallState, PoolDrag } from '@/game/types'
 const props = defineProps<{
   balls: BallState[]
   aim?: AimLayer | null
+  // ghost 是手中球还没落位时跟着指针走的虚影位置（世界坐标）。
+  ghost?: { x: number; y: number } | null
 }>()
 
 const emit = defineEmits<{
@@ -33,6 +35,9 @@ const emit = defineEmits<{
   // tap 是「按下又抬起、几乎没移动」的一次点按，坐标已换成台面世界坐标（米）。
   // 手中球落位用它，瞄准走 drag，两者用同一个 scale，落点不会偏。
   tap: [point: Point]
+  // hover 是鼠标在台面上移动（没按键）时的位置。桌面端「指哪打哪」靠它：
+  // 手指没有悬停，所以只在鼠标上发，触摸屏仍然用拖动转角度。
+  hover: [point: Point]
 }>()
 
 const host = ref<HTMLDivElement | null>(null)
@@ -103,7 +108,7 @@ function paint(): void {
   }
   const dpr = dprOf()
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  drawScene(ctx, size, { balls: props.balls, aim: props.aim }, dpr)
+  drawScene(ctx, size, { balls: props.balls, aim: props.aim, ghost: props.ghost }, dpr)
 }
 
 // schedule 把多次重画请求压到下一帧，避免同一帧里画好几遍。
@@ -119,7 +124,7 @@ function schedule(): void {
 
 // 球位是数组里的对象，浅比较会在原地修改坐标时漏掉变化，所以用 deep。
 // 16 颗球的 deep 遍历成本远低于一次重绘，不值得为它写更细的脏检查。
-watch(() => [props.balls, props.aim], schedule, { deep: true })
+watch(() => [props.balls, props.aim, props.ghost], schedule, { deep: true })
 
 // onPointerDown 记录起点并捕获指针。
 // 捕获之后手指移出画布甚至移出窗口，move 与 up 仍然会回到这个元素，
@@ -132,15 +137,35 @@ function onPointerDown(e: PointerEvent) {
   originX = e.clientX
   originY = e.clientY
   ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
-  emit('drag', { phase: 'start', dx: 0, dy: 0 })
+  emit('drag', { phase: 'start', dx: 0, dy: 0, point: worldOf(e) })
 }
 
-// onPointerMove 只在按下之后上报，且始终带相对起点的累计位移。
+// worldOf 把一次指针事件换算成台面世界坐标（米）。
+//
+// 变换必须和绘制时一模一样，否则会出现「看着点在中袋、球落在中袋另一侧」。
+// 两者都从 fitTable + TABLE_PADDING 取，改一处就一起改。
+function worldOf(e: PointerEvent): Point | null {
+  const el = canvas.value
+  if (!el) {
+    return null
+  }
+  const rect = el.getBoundingClientRect()
+  const t = fitTable({ width: rect.width, height: rect.height }, TABLE_PADDING)
+  return screenToWorld(t, e.clientX - rect.left, e.clientY - rect.top)
+}
+
+// onPointerMove 只在按下之后上报拖动，另外把鼠标悬停的位置也报出去。
 function onPointerMove(e: PointerEvent) {
   if (!pressing) {
+    if (e.pointerType === 'mouse') {
+      const point = worldOf(e)
+      if (point) {
+        emit('hover', point)
+      }
+    }
     return
   }
-  emit('drag', { phase: 'move', dx: e.clientX - originX, dy: e.clientY - originY })
+  emit('drag', { phase: 'move', dx: e.clientX - originX, dy: e.clientY - originY, point: worldOf(e) })
 }
 
 // onPointerUp 结束拖动。用 pressing 兜底：某些浏览器在取消捕获后仍会补发一次 up。
@@ -153,7 +178,7 @@ function onPointerUp(e: PointerEvent) {
   if (target.hasPointerCapture(e.pointerId)) {
     target.releasePointerCapture(e.pointerId)
   }
-  emit('drag', { phase: 'end', dx: e.clientX - originX, dy: e.clientY - originY })
+  emit('drag', { phase: 'end', dx: e.clientX - originX, dy: e.clientY - originY, point: worldOf(e) })
 
   // 位移小于 4px 才算点按。手指按下时几乎一定会抖几像素，
   // 阈值给 0 会让「想点一下」变成「拖了一下」，落位永远不生效。
@@ -161,15 +186,10 @@ function onPointerUp(e: PointerEvent) {
   if (moved > 4) {
     return
   }
-  const el = canvas.value
-  if (!el) {
-    return
+  const point = worldOf(e)
+  if (point) {
+    emit('tap', point)
   }
-  const rect = el.getBoundingClientRect()
-  // 变换必须和绘制时一模一样，否则会出现「看着点在中袋、球落在中袋另一侧」。
-  // 两者都从 fitTable + TABLE_PADDING 取，改一处就一起改。
-  const t = fitTable({ width: rect.width, height: rect.height }, TABLE_PADDING)
-  emit('tap', screenToWorld(t, e.clientX - rect.left, e.clientY - rect.top))
 }
 
 // onDprChange 在像素比变化时重画，并重新注册一次查询。

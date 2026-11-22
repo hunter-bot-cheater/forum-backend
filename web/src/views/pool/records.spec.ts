@@ -95,11 +95,12 @@ beforeEach(() => {
 })
 
 describe('战绩页', () => {
-  it('汇总条显示积分与胜负，胜率按局数算出来', async () => {
+  it('汇总条显示场次与胜负，胜率按局数算出来', async () => {
     const wrapper = await mountPage(resp([record(), record({ match_id: 12, won: false })]))
 
     const stats = wrapper.findAll('.rec__stat-value')
-    expect(stats[0].text()).toBe('1032')
+    // 场次 = 胜 + 负，积分不再出现在界面上。
+    expect(stats[0].text()).toBe('2')
     expect(stats[1].text()).toBe('1 / 1')
     expect(stats[2].text()).toBe('50%')
   })
@@ -165,7 +166,7 @@ describe('战绩页', () => {
 
   // 汇总条在拿到数据之前不能摆出 1000 / 0 胜 0 负：
   // 请求失败时那三个数字会留在页面上，与下面那句「没加载出来」互相打架，
-  // 看起来还像「我的积分被清零了」。
+  // 看起来还像「我的战绩被清零了」。
   it('还没拉到数据时汇总条显示短横，不拿默认值顶上', async () => {
     // 永不 resolve 的请求：页面停在「首次加载中」。
     mocks.getRecords.mockReturnValue(new Promise(() => {}))

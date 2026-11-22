@@ -24,40 +24,56 @@
       <span class="pm__clock">{{ clockText }}</span>
     </header>
 
-    <main class="pm__stage">
-      <PoolTable :balls="balls" :aim="aim" @drag="onDrag" @tap="onTap" />
+    <main class="pm__stage fs-table-stage">
+      <!-- 球台单独一层：力度条挂在它的右边，两者一起居中。
+           以前力度条贴着屏幕右边缘，宽屏上离球台隔着好几百像素，
+           眼睛要在两处来回跳。 -->
+      <div class="pm__table fs-table-box">
+        <PoolTable
+          :balls="tableBalls"
+          :aim="aim"
+          :ghost="ghost"
+          @drag="onDrag"
+          @tap="onTap"
+          @hover="onHover"
+        />
 
-      <!-- 换人横幅盖在球台上，不挡操作。 -->
-      <TurnBanner
-        :visible="bannerVisible"
-        :is-me="bannerMine"
-        :name="bannerName"
-        :avatar="bannerAvatar"
-        :subtitle="bannerSubtitle"
-      />
+        <!-- 换人横幅盖在球台上，不挡操作。 -->
+        <TurnBanner
+          :visible="bannerVisible"
+          :is-me="bannerMine"
+          :name="bannerName"
+          :avatar="bannerAvatar"
+          :subtitle="bannerSubtitle"
+        />
 
-      <!-- 犯规与提示条。3 秒后自动消失，不需要用户去点。 -->
-      <Transition name="pm-notice">
-        <div v-if="notice" class="pm__notice">{{ notice }}</div>
-      </Transition>
+        <!-- 犯规与提示条。3 秒后自动消失，不需要用户去点。 -->
+        <Transition name="pm-notice">
+          <div v-if="notice" class="pm__notice">{{ notice }}</div>
+        </Transition>
 
-      <!-- 手中球：整块球台可点，落点前不允许出杆。 -->
-      <div v-if="mustPlace" class="pm__place">点击台面放置母球</div>
-
-      <div class="pm__power">
-        <PowerSlider v-model:value="power" :disabled="!canShoot" @shoot="shoot" />
+        <div class="pm__power">
+          <PowerSlider v-model:value="power" :disabled="!canShoot" @shoot="shoot" />
+        </div>
       </div>
     </main>
 
     <footer class="pm__foot">
-      <FineTuneRail :phi="phi" :disabled="!canAim" @nudge="onNudge" />
+      <!-- 手中球：那圈微调尺用不上（方向还没定），换成选位置与确认。
+           放在底栏还顺带把球台的底库让出来，不再压着库边画一条黄条。 -->
+      <div v-if="mustPlace" class="pm__place">
+        <span class="pm__place-tip">白球跟着指针走，选好位置再确认</span>
+        <button class="pm__place-ok" type="button" :disabled="placing" @click="confirmPlace">
+          放这里
+        </button>
+      </div>
+      <FineTuneRail v-else :phi="phi" :disabled="!canAim" @nudge="onNudge" />
     </footer>
 
     <ResultSheet
       v-if="result"
       :won="result.won"
       :reason="result.reason"
-      :delta="result.delta"
       @again="rematch"
       @lobby="backToLobby"
     />
@@ -94,7 +110,7 @@
 //
 // 规则判定一行都不在客户端：能不能出杆由 turn 与 ball_in_hand 决定，
 // 但服务端会再判一次，客户端提前拦住只是省一次往返，不是权威。
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { ElMessageBox } from 'element-plus'
@@ -164,6 +180,13 @@ const phi = ref(0)
 const shooting = ref(false)
 const notice = ref('')
 
+// aimLocked 表示方向已经定住：鼠标再怎么移、手指再怎么拖，杆子都不动。
+//
+// 这是视频里那套操作的核心一步。不锁的话，手从球台移到右边的力度条这一段路
+// 会把瞄准线一路带偏，最后一杆打出去的方向取决于鼠标怎么划过去的，
+// 根本没法瞄。锁了之后，调力度、点微调都不会影响方向。
+const aimLocked = ref(false)
+
 // 换人横幅
 const bannerVisible = ref(false)
 const bannerMine = ref(false)
@@ -172,7 +195,7 @@ const bannerAvatar = ref('')
 const bannerSubtitle = ref('')
 
 // 结算
-const result = ref<{ won: boolean; reason: string; delta: number | null } | null>(null)
+const result = ref<{ won: boolean; reason: string } | null>(null)
 
 // shotPending 表示「已经发出去一杆，还没收到 shot 帧」。
 //
@@ -237,6 +260,45 @@ const mustPlace = computed(() => {
   return snapshot.value.ball_in_hand === true && isMyTurn.value
 })
 
+// ghost 是手中球还没落位时跟着指针走的虚影位置（世界坐标）。
+//
+// 落位不再是「点一下就定」：手里有球的时候，指针指到哪虚影就跟到哪，
+// 觉得合适再点「放这里」。一次点错就得重新等犯规才能再挪，这在真人台球里
+// 是不能接受的——自由球本来就允许拿着球在台面上比划。
+const ghost = ref<Point | null>(null)
+
+// 拿到手中球时把虚影摆在一个合理的位置：母球还在台上就摆它现在的位置
+// （视觉上「球被拿起来了」），已经落袋了就摆在开球线附近，免得虚影出现在袋口。
+watch(mustPlace, (holding) => {
+  if (!holding) {
+    ghost.value = null
+    return
+  }
+  const cue = balls.value.find((b) => b.id === 'cue')
+  ghost.value =
+    cue && cue.on_table
+      ? { x: cue.x, y: cue.y }
+      : { x: TABLE_WIDTH / 2, y: TABLE_LENGTH * 0.25 }
+})
+
+// tableBalls 是画到球台上的球。
+//
+// 手里握着母球时把它去掉：那颗球现在在玩家手上，台面上由虚影代表。
+// 不去掉的话会在台上看到两颗白球——一颗虚的跟着指针、一颗实的停在原处，
+// 分不清哪颗才是真的要打的那颗。
+const tableBalls = computed(() => {
+  if (!mustPlace.value) {
+    return balls.value
+  }
+  const rest: BallState[] = []
+  for (const ball of balls.value) {
+    if (ball.id !== 'cue') {
+      rest.push(ball)
+    }
+  }
+  return rest
+})
+
 // canShoot 是「现在能不能出杆」的唯一判据。
 // 四个条件缺一不可：轮到我、没有一杆在路上、不在播动画、没有手中球。
 const canShoot = computed(
@@ -296,6 +358,11 @@ const aim = computed<AimLayer | null>(() => {
   if (!canAim.value) {
     return null
   }
+  // 手里握着球时不画瞄准线：母球还没落位，这条线指向的是台面上那颗
+  // 等着被拿走的球，跟着它瞄只会误导向。
+  if (mustPlace.value) {
+    return null
+  }
   const cue = balls.value.find((b) => b.id === 'cue')
   if (!cue || !cue.on_table) {
     return null
@@ -304,6 +371,10 @@ const aim = computed<AimLayer | null>(() => {
   return {
     cue: { x: cue.x, y: cue.y },
     hit: { x: hit.x, y: hit.y, kind: hit.kind },
+    // 球杆的朝向与后拉量都在渲染层算：这一层只把「往哪打、多大力、锁没锁」交出去。
+    phi: phi.value,
+    power: power.value,
+    locked: aimLocked.value,
   }
 })
 
@@ -348,11 +419,8 @@ function applySnapshot(snap: MatchSnapshot, deadline: number) {
   // （服务端要么算完广播了 shot，要么把请求拒了）。
   // 断线重连时正是靠这一句把标记解开——否则 canShoot 永远是 false，只能刷新页面。
   shotPending.value = false
-  // 第一次拿到快照时才知道母球在哪，瞄准角要在这之后算：
-  // 组件挂载那一刻 balls 还是空的，算出来恒为 0（永远指向 +x）。
-  if (first) {
-    phi.value = initialPhi()
-  }
+  // 每次权威状态回来都解锁：球位可能变了，上一杆锁定的方向已经不作数。
+  aimLocked.value = false
 
   const list: BallState[] = []
   for (const ball of snap.balls) {
@@ -360,9 +428,15 @@ function applySnapshot(snap: MatchSnapshot, deadline: number) {
   }
   balls.value = list
 
+  // 默认瞄准角必须在球位落地之后算：它要读母球与球堆的位置。
+  // 放在上面会让第一杆永远朝 +x（phi=0）打出去——开球直接空杆犯规。
+  if (first) {
+    phi.value = initialPhi()
+  }
+
   // 重连进来时对局可能已经结束，快照里带的就是结果。
   if (snap.status === 'finished' && snap.winner !== null) {
-    result.value = { won: snap.winner === snap.seat, reason: snap.win_reason, delta: null }
+    result.value = { won: snap.winner === snap.seat, reason: snap.win_reason }
   }
 }
 
@@ -551,16 +625,9 @@ function applyTurn(data: TurnData, deadline: number) {
   showBanner(data.seat)
 }
 
-// applyResult 结算。
-//
-// delta 取自己那一边；两个都为 0 说明这一帧没带积分（积分在落库那一步算，
-// 那时广播已经发出去了），此时传 null 让面板不显示积分行。
+// applyResult 结算。只关心「我赢没赢」和机读的原因码，不显示积分。
 function applyResult(data: ResultData) {
-  let delta: number | null = null
-  if (data.elo_delta_0 !== 0 || data.elo_delta_1 !== 0) {
-    delta = (mySeat.value ?? 0) === 0 ? data.elo_delta_0 : data.elo_delta_1
-  }
-  result.value = { won: data.winner === mySeat.value, reason: data.reason, delta }
+  result.value = { won: data.winner === mySeat.value, reason: data.reason }
 }
 
 // onPeer 处理对手进出。
@@ -628,28 +695,86 @@ function showBanner(seat: Seat) {
 
 // ===== 本地操作 =====
 
-// initialPhi 算母球到八号球的方向，作为进房后的默认瞄准角。
+// initialPhi 算进房后的默认瞄准角：指向「正前方最近的那颗球」。
 //
-// 不默认朝右或朝上：开球时玩家想看的就是这条线，初始方向错了要先自己转一下。
+// 开球时那就是球堆的顶点。不能默认朝 +y 直推：母球并不在台面中线上
+// （x=0.5944，顶点球在 0.4953），直推会从侧面切过去，球堆只散一半，
+// 母球还会带着大半速度撞库，很容易直接摔袋——第一次开球就吃犯规。
+//
+// 后面每一杆也复用这条规则：瞄准最近的一颗球是一个不至于离谱的起点，
+// 玩家要打别的球自己转就是。
 function initialPhi(): number {
-  let targetX = TABLE_WIDTH / 2
-  let targetY = TABLE_LENGTH * 0.75
-  for (const ball of balls.value) {
-    if (ball.id === '8') {
-      targetX = ball.x
-      targetY = ball.y
-    }
-  }
   const cue = balls.value.find((b) => b.id === 'cue')
   if (!cue) {
     return 0
   }
+  let targetX = cue.x
+  let targetY = cue.y + 1
+  let best = Number.POSITIVE_INFINITY
+  for (const ball of balls.value) {
+    if (ball.id === 'cue' || !ball.on_table || ball.y <= cue.y) {
+      continue
+    }
+    const distance = Math.hypot(ball.x - cue.x, ball.y - cue.y)
+    if (distance < best) {
+      best = distance
+      targetX = ball.x
+      targetY = ball.y
+    }
+  }
   return normalizePhi(Math.atan2(targetY - cue.y, targetX - cue.x))
 }
 
-// onDrag 处理画布拖动：只认水平位移，换算出新的瞄准角。
-function onDrag(payload: PoolDrag) {
+// onHover 处理鼠标在台面上的移动：让瞄准线指向指针。
+//
+// 「指哪打哪」比「左右拖着转」直观得多，尤其在这一页——玩家盯着的是目标球，
+// 而不是屏幕下方的刻度。锁定之后就不再跟随，否则手去点力度条的路上会把方向带偏。
+function onHover(point: Point) {
   if (!canAim.value) {
+    return
+  }
+  // 手里握着球时，指针就是那颗球：桌面端指到哪虚影跟到哪，不用按住拖。
+  if (mustPlace.value) {
+    moveGhost(point)
+    return
+  }
+  if (aimLocked.value) {
+    return
+  }
+  const cue = balls.value.find((b) => b.id === 'cue')
+  if (!cue || !cue.on_table) {
+    return
+  }
+  // 指针压在母球上时方向没有意义，保持原角度，免得线在原地乱抖。
+  const dx = point.x - cue.x
+  const dy = point.y - cue.y
+  if (Math.hypot(dx, dy) < BALL_RADIUS * 1.2) {
+    return
+  }
+  phi.value = normalizePhi(Math.atan2(dy, dx))
+}
+
+// moveGhost 把手中球的虚影挪到指针处，并夹进台面内沿。
+//
+// 夹在本地做而不是等服务端拒绝：越界的虚影会画到库边木框外面，
+// 看起来像球穿进了桌子。真正落位时服务端仍会校验一次。
+function moveGhost(point: Point) {
+  ghost.value = clampIntoCueArea(point)
+}
+
+// onDrag 处理画布拖动：只认水平位移，换算出新的瞄准角。
+//
+// 触摸屏上没有悬停，转角度就靠这一条；鼠标上它只是「按住微调」的快捷方式。
+// 锁定之后一律不理，理由同 onHover。
+function onDrag(payload: PoolDrag) {
+  // 手里握着球时拖动就是挪球。触摸屏没有悬停，这是手机上唯一的挪法。
+  if (mustPlace.value) {
+    if (payload.phase !== 'start' && payload.point) {
+      moveGhost(payload.point)
+    }
+    return
+  }
+  if (!canAim.value || aimLocked.value) {
     return
   }
   if (payload.phase === 'start') {
@@ -659,7 +784,7 @@ function onDrag(payload: PoolDrag) {
   phi.value = rotateByDrag(dragBase, payload.dx)
 }
 
-// onNudge 处理底部微调尺上报的度数增量。
+// onNudge 处理底部微调按钮与键盘方向键上报的度数增量。
 function onNudge(deltaDeg: number) {
   if (!canAim.value) {
     return
@@ -667,13 +792,43 @@ function onNudge(deltaDeg: number) {
   phi.value = adjustPhi(phi.value, deltaDeg)
 }
 
-// onTap 处理台面点按。只在手中球时有用：落位母球。
+// onTap 处理台面点按。两种用意，按当前状态分流：
+//   - 手里握着母球：把虚影挪到点到的位置（不落位，落位要点下面的按钮）；
+//   - 平时：锁定 / 解锁方向。锁上之后才能安心去拖力度条。
+function onTap(point: Point) {
+  if (mustPlace.value) {
+    moveGhost(point)
+    return
+  }
+  if (!canAim.value) {
+    return
+  }
+  aimLocked.value = !aimLocked.value
+  if (aimLocked.value) {
+    showNotice('方向已锁定，拖右边的力度条出杆')
+    return
+  }
+  showNotice('可以重新瞄准了')
+}
+
+// confirmPlace 把虚影停下的位置交给服务端。
+//
+// 单独一步确认，是为了让手里这颗球可以反复挪：点一下台面就落定的话，
+// 手一抖就得等下一次犯规才能再摆。真人台球里这颗球本来就是自己拿着放的。
+function confirmPlace() {
+  if (!ghost.value) {
+    return
+  }
+  placeCue(ghost.value)
+}
+
+// placeCue 把母球放到点到的位置。
 //
 // 不做乐观更新：服务端落位成功会广播一份完整快照，母球位置从那里来。
 // 先在本地挪过去的话，一旦被判越界（或落点在别的球上）就得再挪回来，
 // 中间那一帧「球压在别的球上」看起来像渲染错乱。
-function onTap(point: Point) {
-  if (!mustPlace.value || placing.value) {
+function placeCue(point: Point) {
+  if (placing.value) {
     return
   }
   const spot = clampIntoCueArea(point)
@@ -733,8 +888,9 @@ function shoot() {
     return
   }
   shotPending.value = true
-  // 出杆之后力度归零，下一杆从头拖。
+  // 出杆之后力度归零、方向解锁：下一杆从「自由瞄准」开始。
   power.value = 0
+  aimLocked.value = false
 }
 
 // isPlaying 表示对局还在进行、也还没出结果。
@@ -780,20 +936,47 @@ async function rematch() {
   const snap = snapshot.value
   const other: Seat = (mySeat.value ?? 0) === 0 ? 1 : 0
   const target = snap ? snap.players[other].user_id : 0
+  // 昵称一起带过去：回大厅时在线名单还没拉回来，那里现查会先显示成「对方」。
+  const nickname = snap ? snap.players[other].nickname : ''
   backToLobby()
   if (target === 0) {
     return
   }
   try {
-    await pool.invite(target)
+    await pool.invite(target, nickname)
   } catch {
     // 对方已经下线、或者互相关注的关系变了，接口会拒。
     // 拦截器已经弹过提示，回到大厅重新挑人即可。
   }
 }
 
-// retryConnect 在放弃之后人工重试一次。
+// onKey 让桌面端用方向键微调：0.1°，按住 Shift 是 1°。
 //
+// 鼠标瞄准想要更细的一档时，用手去够底部那两个按钮会带偏指针，
+// 键盘是这一页唯一「不会动到指针」的微调方式。
+function onKey(e: KeyboardEvent) {
+  if (!canAim.value) {
+    return
+  }
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') {
+    return
+  }
+  // 方向键默认会滚动页面。对局页本来就不滚，但拦一下更稳。
+  e.preventDefault()
+  const step = e.shiftKey ? 1 : 0.1
+  onNudge(e.key === 'ArrowLeft' ? -step : step)
+}
+
+// pointerIsCoarse 判断当前是不是触摸为主的设备。
+// 提示文案要按它换：手机上「移动鼠标」是句废话。
+function pointerIsCoarse(): boolean {
+  if (typeof window.matchMedia !== 'function') {
+    return false
+  }
+  return window.matchMedia('(pointer: coarse)').matches
+}
+
+// retryConnect 在放弃之后人工重试一次。
 // 走到 gaveup 只说明「自动重连的窗口走完了」，不代表对局没了：
 // 服务端不会因为断线判负，重连上来照样拿得到完整快照。
 function retryConnect() {
@@ -834,7 +1017,23 @@ function cleanup() {
     socket.close()
     socket = null
   }
+  window.removeEventListener('keydown', onKey)
 }
+
+// 第一次轮到我时教一遍操作。之后每回合都弹一条就成了噪音——
+// 玩家第二次就记住了，第三次只会觉得挡住球台。
+let hintShown = false
+watch(canAim, (allowed) => {
+  if (!allowed || hintShown) {
+    return
+  }
+  hintShown = true
+  if (pointerIsCoarse()) {
+    showNotice('拖动台面瞄准，点一下台面锁定方向')
+    return
+  }
+  showNotice('移动鼠标瞄准，点一下台面锁定方向')
+})
 
 onMounted(() => {
   const token = getToken()
@@ -871,6 +1070,8 @@ onMounted(() => {
   tickTimer = setInterval(() => {
     nowTick.value = Date.now()
   }, 1000)
+
+  window.addEventListener('keydown', onKey)
 })
 
 onBeforeUnmount(cleanup)
@@ -893,7 +1094,9 @@ onBeforeRouteLeave(() => {
   display: flex;
   flex-direction: column;
   height: 100dvh;
-  background: #0e1116;
+  /* 参考视频的底色不是纯黑，是一层带一点紫的深灰，中间偏亮。
+     纯黑会把中灰的外框与绿呢一起压死，看着像贴纸。 */
+  background: radial-gradient(120% 80% at 50% 40%, #2d2e3b 0%, #20212c 58%, #171720 100%);
 }
 
 .pm__bar {
@@ -901,7 +1104,10 @@ onBeforeRouteLeave(() => {
   flex: none;
   align-items: center;
   gap: 8px;
+  width: 100%;
+  max-width: 820px;
   height: 48px;
+  margin: 0 auto;
   padding: 0 10px;
   color: #e8eaed;
 }
@@ -947,40 +1153,61 @@ onBeforeRouteLeave(() => {
   position: relative;
   flex: 1;
   min-height: 0;
-  padding: 0 40px 4px 8px;
+  width: 100%;
+  max-width: 820px;
+  margin: 0 auto;
+  /* 居中与球台比例走 .fs-table-stage（styles/index.css），这里只管留白。
+     右边比左边多留一点：力度条挂在球台外面 24px 处，两边留白差 22px，
+     正好让「球台 + 力度条」这一组的中心落在屏幕中线上。 */
+  padding: 0 34px 4px 12px;
 }
 
-/* 力度条浮在球台右侧的留白里。
+/* 球台容器：高度占满，宽度按球台的真实宽高比推出来。
+   这一步是「力度条贴着球台」的关键——不让 canvas 自己在宽屏里留出几百像素，
+   而是让容器的宽度就等于球台画出来的宽度。 */
+.pm__table {
+  position: relative;
+}
+
+/* 力度条浮在球台右侧的留白里，紧挨着库边。
    高度取屏高的 56% 并且封顶 360px，不跟着球台拉伸：
    拉满整屏时滑块有 700px 高，拖一格 1% 要有 7px 精度，反而更难控制，
    视觉上也会像一根栏杆。 */
 .pm__power {
   position: absolute;
   top: 50%;
-  right: 4px;
-  width: 32px;
-  height: min(56%, 360px);
+  /* 挂到球台外框外面一点，但贴着库边：从框沿到滑轨只有 12px 左右。
+     以前是 -44px，宽屏上眼睛要在球台与力度条之间来回跳。 */
+  right: -24px;
+  width: 30px;
+  height: min(48%, 300px);
   transform: translateY(-50%);
 }
 
 .pm__foot {
   flex: none;
+  width: 100%;
+  max-width: 820px;
+  margin: 0 auto;
   padding: 2px 10px 8px;
 }
 
 /* 提示条浮在球台上方而不是顶栏里：
    犯规、掉线这些消息和球台是同一件事的上下文，
-   放到顶栏会和双方条抢那一行的位置。 */
+   放到顶栏会和双方条抢那一行的位置。
+   圆角给 14px 而不是胶囊形：犯规说明会折成两行，胶囊圆角在换行后像一块药片。 */
 .pm__notice {
   position: absolute;
-  top: 8px;
+  top: 16px;
   left: 50%;
-  max-width: calc(100% - 24px);
+  max-width: min(88%, 340px);
   padding: 7px 14px;
   font-size: 12px;
+  line-height: 1.5;
   color: #fff;
+  text-align: center;
   background: rgba(18, 22, 30, 0.9);
-  border-radius: 999px;
+  border-radius: 14px;
   transform: translateX(-50%);
   pointer-events: none;
 }
@@ -999,16 +1226,37 @@ onBeforeRouteLeave(() => {
 /* 手中球提示贴在球台底部：手指正在台面上找落点，
    提示放在离手指最近的地方最不容易被忽略。 */
 .pm__place {
-  position: absolute;
-  bottom: 10px;
-  left: 50%;
-  padding: 6px 14px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.pm__place-tip {
   font-size: 12px;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.pm__place-ok {
+  padding: 7px 20px;
+  font-size: 13px;
+  font-weight: 600;
   color: #0e1116;
-  background: rgba(240, 192, 47, 0.92);
+  cursor: pointer;
+  background: #f0c02f;
+  border: 0;
   border-radius: 999px;
-  transform: translateX(-50%);
-  pointer-events: none;
+  transition: filter 0.15s ease;
+}
+
+.pm__place-ok:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.pm__place-ok:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .pm__gone {

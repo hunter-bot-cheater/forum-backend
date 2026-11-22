@@ -6,15 +6,6 @@
       <p class="rs__kicker">{{ won ? '这局你赢了' : '这局输了' }}</p>
       <p class="rs__reason">{{ reasonText }}</p>
 
-      <div v-if="delta !== null" class="rs__elo">
-        <span class="rs__elo-label">积分</span>
-        <!-- 增长用红色、下降用绿色（国内习惯，与股市一致）。
-             不用 ± 号让用户自己读：颜色加符号一起看才不容易看反。 -->
-        <span class="rs__elo-delta" :class="delta >= 0 ? 'is-up' : 'is-down'">
-          {{ delta > 0 ? '+' : '' }}{{ delta }}
-        </span>
-      </div>
-
       <div class="rs__actions">
         <button class="rs__btn rs__btn--ghost" type="button" @click="emit('lobby')">回大厅</button>
         <button class="rs__btn rs__btn--primary" type="button" @click="emit('again')">再约一局</button>
@@ -38,11 +29,6 @@ const props = defineProps<{
   // reason 是服务端的 reason 码：eight_legal / eight_early / eight_with_foul /
   // timeout / leave。
   reason: string
-  // delta 是查看者自己的积分变化，null 表示这一局没有积分数据。
-  //
-  // 为什么允许 null：结算帧里的 elo 字段目前恒为 0（积分是在落库那一步算的，
-  // 那一刻广播已经发出去了）。用 0 展示会写成「+0」，看起来像积分没生效。
-  delta: number | null
 }>()
 
 const emit = defineEmits<{
@@ -85,36 +71,9 @@ const reasonText = computed(() => reasonLabel(props.reason, props.won))
 }
 
 .rs__reason {
-  margin: 0 0 20px;
+  margin: 0 0 24px;
   font-size: 13px;
   color: #8a919c;
-}
-
-.rs__elo {
-  display: flex;
-  align-items: baseline;
-  justify-content: center;
-  gap: 8px;
-  margin-bottom: 24px;
-}
-
-.rs__elo-label {
-  font-size: 12px;
-  color: #8a919c;
-}
-
-.rs__elo-delta {
-  font-size: 22px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-
-.rs__elo-delta.is-up {
-  color: #e0553f;
-}
-
-.rs__elo-delta.is-down {
-  color: #35a06a;
 }
 
 .rs__actions {
