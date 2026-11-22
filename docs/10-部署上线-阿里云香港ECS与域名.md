@@ -1615,9 +1615,10 @@ ALTER TABLE pool_matches MODIFY p1_id BIGINT UNSIGNED NULL;
 | 用户看到 | 先查 | 多半是 |
 |---|---|---|
 | 「球桌暂时算不动」 | `docker compose ps pool-sim`、`logs pool-sim` | 容器在 `starting`（等十秒）或已经挂了 |
-| 输房号提示「房间不存在或已满」 | 上一条 SQL，看那间房的 `status` 与 `p1_id` | 房被两小时规则收掉了，或对面已经坐人 |
+| 「房号不对，或者这个房间已经开始了」 | 上一条 SQL，看那间房的 `status` | 房被两小时规则收掉了，或那局已经开打、对面并不缺人 |
+| 「这个房间已经有人了」 | 同一行，看 `p1_id` | 对面已经坐人；两个人几乎同时输同一个号时，只有一个能进 |
+| 「你正在对局中，打完再约」 | `SELECT * FROM pool_matches WHERE status='playing'` 里有没有他 | 库里那局没结算（进程重启过最常见），等结算或手动改 `finished` |
 | 进大厅立刻被踢回登录 | `logs api \| grep 401` | 登录态过期，与台球无关 |
-| 一直显示「你正在对局中」 | `SELECT * FROM pool_matches WHERE status='playing'` | 进程重启过，那局已经没了但库里还挂着；等它结算或手动改 `finished` |
 | 两边都点了准备却进不去 | `logs api \| grep 'mark pool match playing'` | 改状态那步失败，通常伴随数据库报错 |
 
 ---
