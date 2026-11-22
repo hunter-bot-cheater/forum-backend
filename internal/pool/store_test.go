@@ -38,7 +38,7 @@ func seedMatch(t *testing.T, db *gorm.DB, status string) (*model.PoolMatch, *mod
 	match := &model.PoolMatch{
 		RoomCode: fmt.Sprintf("%06d", seedSeq),
 		P0ID:     p0.ID,
-		P1ID:     p1.ID,
+		P1ID:     &p1.ID,
 		Status:   status,
 	}
 	if err := db.Create(match).Error; err != nil {
@@ -194,7 +194,10 @@ func TestFinishMatchIgnoresWaitingRoom(t *testing.T) {
 }
 
 // 过期只作用于还在等人的房间，进行中与已结算的不能被改成 expired。
-func TestExpireMatchOnlyTouchesWaiting(t *testing.T) {
+//
+// 判据是 created_at：只有「开得够久」的才收。这里三局都是刚建的，
+// 所以要传一个未来的时间点才会命中；换成过去的时间点则一间都不该动。
+func TestExpireStaleWaitingOnlyTouchesOldWaiting(t *testing.T) {
 	db := testutil.NewDB(t)
 	store := NewStore(db)
 	ctx := context.Background()
@@ -203,18 +206,25 @@ func TestExpireMatchOnlyTouchesWaiting(t *testing.T) {
 	playing, _, _ := seedMatch(t, db, model.PoolStatusPlaying)
 	finished, _, _ := seedMatch(t, db, model.PoolStatusFinished)
 
-	for _, id := range []uint{waiting.ID, playing.ID, finished.ID} {
-		if err := store.ExpireMatch(ctx, id); err != nil {
-			t.Fatalf("标记过期失败: %v", err)
-		}
-	}
-
 	read := func(id uint) string {
 		var row model.PoolMatch
 		if err := db.First(&row, id).Error; err != nil {
 			t.Fatalf("读回对局 %d 失败: %v", id, err)
 		}
 		return row.Status
+	}
+
+	// 截止时间在过去：三局都比它新，一间都不该被标掉。
+	if _, err := store.ExpireStaleWaiting(ctx, time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("标记过期失败: %v", err)
+	}
+	if got := read(waiting.ID); got != model.PoolStatusWaiting {
+		t.Fatalf("刚建的房间被收掉了：%s", got)
+	}
+
+	// 截止时间在未来：只有 waiting 那一条会变。
+	if _, err := store.ExpireStaleWaiting(ctx, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("标记过期失败: %v", err)
 	}
 	if got := read(waiting.ID); got != model.PoolStatusExpired {
 		t.Errorf("等待中的房间 = %s，期望 expired", got)
@@ -337,7 +347,7 @@ func TestRecentMatchesPaging(t *testing.T) {
 		match := &model.PoolMatch{
 			RoomCode: roomCode,
 			P0ID:     p0ID,
-			P1ID:     p1ID,
+			P1ID:     &p1ID,
 			Status:   status,
 			EndedAt:  endedAt,
 		}

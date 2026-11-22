@@ -19,9 +19,13 @@ import (
 	"forum-backend/pkg/response"
 )
 
-// InvitePusher 是邀请到达时用的实时推送能力。抽成接口只为测试时能塞假实现。
-type InvitePusher interface {
+// Realtime 是台球要用到的那部分实时能力：推一条消息，以及查谁现在在线。
+//
+// 抽成接口只为测试时能塞假实现；生产里就是全进程唯一的 *realtime.Hub。
+type Realtime interface {
 	Push(userID uint, msg realtime.PushMessage)
+	IsOnline(userID uint) bool
+	OnlineUserIDs() []uint
 }
 
 // UserBriefs 是「按 id 批量取展示资料」的读接口。
@@ -38,23 +42,23 @@ type Handler struct {
 	invites *Invites
 	store   *Store
 	users   UserBriefs
-	pusher  InvitePusher
+	hub     Realtime
 }
 
 // NewHandler 由 router 在装配期调用。
-func NewHandler(manager *Manager, invites *Invites, store *Store, users UserBriefs, pusher InvitePusher) *Handler {
-	return &Handler{manager: manager, invites: invites, store: store, users: users, pusher: pusher}
+func NewHandler(manager *Manager, invites *Invites, store *Store, users UserBriefs, hub Realtime) *Handler {
+	return &Handler{manager: manager, invites: invites, store: store, users: users, hub: hub}
 }
 
 // CreateInvite godoc
-// @Summary      邀请关注的人打一局
-// @Description  只能邀请自己关注的人；同一个人同时只能挂一条待接受的邀请。
+// @Summary      邀请一个人打一局
+// @Description  对方必须在线；房间就是我当前的那个房间，邀请只是把房号推给他。
 // @Tags         pool
 // @Accept       json
 // @Produce      json
 // @Param        body  body  pool.inviteCreateReq  true  "被邀请者"
 // @Success      200   {object}  httputil.SwaggerEnvelope{data=pool.inviteResp}
-// @Failure      400   {string}  string  "参数不合法或对方不在你的关注列表里"
+// @Failure      400   {string}  string  "参数不合法或对方不在线"
 // @Failure      401   {string}  string  "未登录"
 // @Failure      409   {string}  string  "已有一条待接受的邀请"
 // @Security     Bearer
@@ -78,49 +82,28 @@ func (h *Handler) CreateInvite(c *gin.Context) {
 		return
 	}
 
-	following, err := h.store.IsFollowing(ctx, fromID, req.ToUserID)
-	if err != nil {
-		httputil.LogRequestError(c, "check following", err)
-		response.Error(c, http.StatusInternalServerError, "服务暂时不可用")
-		return
-	}
-	if !following {
-		response.Error(c, http.StatusBadRequest, "只能邀请你关注的人")
+	// 不再要求关注：大厅里能看到全部在线的人，谁都可以约。
+	// 但要求在线——离线的邀请只能干等一分钟，对方根本不会知道。
+	if !h.hub.IsOnline(req.ToUserID) {
+		response.Error(c, http.StatusBadRequest, "对方不在线，把房号发给他更快")
 		return
 	}
 
-	briefs, err := h.users.Briefs(ctx, []uint{fromID, req.ToUserID})
+	// 邀请指向我自己的房间：房号在我这一屏上，他接受之后进的就是这个房间。
+	match, seat, err := h.myRoom(ctx, fromID)
 	if err != nil {
-		httputil.LogRequestError(c, "load player briefs", err)
-		response.Error(c, http.StatusInternalServerError, "服务暂时不可用")
+		httputil.LogRequestError(c, "open my room", err)
+		response.Error(c, http.StatusInternalServerError, "开房失败，请重试")
+		return
+	}
+	if seat != Seat0 {
+		response.Error(c, http.StatusConflict, "你已经在别人的房间里了，先退出来")
 		return
 	}
 
-	match, err := h.createRoom(ctx, fromID, req.ToUserID)
+	roomCode := match.RoomCode()
+	invite, err := h.invites.Create(fromID, req.ToUserID, match.ID(), roomCode)
 	if err != nil {
-		if errors.Is(err, ErrInviteBusy) {
-			response.Error(c, http.StatusConflict, "你已有一条待接受的邀请")
-			return
-		}
-		httputil.LogRequestError(c, "create pool room", err)
-		response.Error(c, http.StatusInternalServerError, "建房失败，请重试")
-		return
-	}
-
-	players := [2]PlayerBrief{
-		briefOf(briefs, fromID),
-		briefOf(briefs, req.ToUserID),
-	}
-	h.manager.Create(newRoomState(match.ID, match.RoomCode, players))
-
-	invite, err := h.invites.Create(fromID, req.ToUserID, match.ID, match.RoomCode)
-	if err != nil {
-		// 建房已经成功但邀请发不出去（并发重复邀请），把房间收掉再报 409，
-		// 否则会留下一个没人能进的房间。库里那行也标成过期，免得列表里挂着。
-		h.manager.Remove(match.ID)
-		if expireErr := h.store.ExpireMatch(ctx, match.ID); expireErr != nil {
-			slog.ErrorContext(ctx, "expire pool match", "match_id", match.ID, "error", expireErr)
-		}
 		if errors.Is(err, ErrInviteBusy) {
 			response.Error(c, http.StatusConflict, "你已有一条待接受的邀请")
 			return
@@ -130,50 +113,32 @@ func (h *Handler) CreateInvite(c *gin.Context) {
 		return
 	}
 
+	briefs, err := h.users.Briefs(ctx, []uint{fromID})
+	if err != nil {
+		httputil.LogRequestError(c, "load player briefs", err)
+		response.Error(c, http.StatusInternalServerError, "服务暂时不可用")
+		return
+	}
+
 	// 邀请到达时推一条实时消息，对方的任意页面都会弹出请求卡片。
 	// 推送失败不影响邀请本身：对方刷新一下仍能从 pending 列表里看到。
-	h.pusher.Push(req.ToUserID, realtime.PushMessage{
+	h.hub.Push(req.ToUserID, realtime.PushMessage{
 		Type: "pool_invite",
 		Data: pendingInviteResp{
 			InviteID:  invite.ID,
-			MatchID:   match.ID,
-			RoomCode:  match.RoomCode,
-			From:      toPlayerResp(players[0]),
+			MatchID:   match.ID(),
+			RoomCode:  roomCode,
+			From:      toPlayerResp(briefOf(briefs, fromID)),
 			ExpiresIn: int(InviteTTL / time.Second),
 		},
 	})
 
 	response.OK(c, inviteResp{
 		InviteID:  invite.ID,
-		MatchID:   match.ID,
-		RoomCode:  match.RoomCode,
+		MatchID:   match.ID(),
+		RoomCode:  roomCode,
 		ExpiresIn: int(InviteTTL / time.Second),
 	})
-}
-
-// createRoom 建房。房号撞唯一索引就换一个重试。
-//
-// 重试而不是先查后用：查与插之间有窗口，唯一索引是唯一可靠的判据。
-func (h *Handler) createRoom(ctx context.Context, fromID, toID uint) (*matchRow, error) {
-	var lastErr error
-	for attempt := 0; attempt < 5; attempt++ {
-		code, err := NewRoomCode()
-		if err != nil {
-			return nil, err
-		}
-		created, err := h.store.CreateMatch(ctx, fromID, toID, code)
-		if err == nil {
-			return &matchRow{ID: created.ID, RoomCode: created.RoomCode}, nil
-		}
-		lastErr = err
-	}
-	return nil, lastErr
-}
-
-// matchRow 是建房结果的内部表示，避免 handler 其它地方依赖 GORM 模型。
-type matchRow struct {
-	ID       uint
-	RoomCode string
 }
 
 // PendingInvites godoc
@@ -236,6 +201,7 @@ func (h *Handler) PendingInvites(c *gin.Context) {
 // @Router       /pool/invites/{id}/accept [post]
 // AcceptInvite 处理 POST /api/pool/invites/:id/accept。
 func (h *Handler) AcceptInvite(c *gin.Context) {
+	ctx := c.Request.Context()
 	userID, ok := httputil.CurrentUserID(c)
 	if !ok {
 		response.Error(c, http.StatusUnauthorized, "未登录")
@@ -246,14 +212,42 @@ func (h *Handler) AcceptInvite(c *gin.Context) {
 	if !ok {
 		return
 	}
+
+	// 先把座位占下来再改邀请状态：房间可能已经被别人用房号进了，
+	// 那时候这条邀请就该算失效，而不是把人放进一个满员的房间。
+	joined, err := h.store.JoinRoom(ctx, invite.MatchID, userID)
+	if err != nil {
+		httputil.LogRequestError(c, "join room by invite", err)
+		response.Error(c, http.StatusInternalServerError, "进房失败，请重试")
+		return
+	}
+	if !joined {
+		// 座位已经有人了（大概是房主直接把房号发给了别人）。
+		row, err := h.store.Match(ctx, invite.MatchID)
+		if err == nil && row.HasPlayer(userID) {
+			// 自己早就在房间里了：当成接受成功，重复点也只会到这里。
+			h.invites.SetStatus(invite.ID, InviteAccepted)
+			response.OK(c, acceptInviteResp{MatchID: invite.MatchID, RoomCode: invite.RoomCode})
+			return
+		}
+		h.invites.SetStatus(invite.ID, InviteExpired)
+		response.Error(c, http.StatusConflict, msgRoomTaken)
+		return
+	}
+
 	if !h.invites.SetStatus(invite.ID, InviteAccepted) {
 		response.Error(c, http.StatusNotFound, "邀请已失效")
 		return
 	}
 
-	// 通知邀请人：对方接受了，快进房间。
-	// 邀请人此时可能还停在大厅，这条消息让页面直接跳到房间页。
-	h.pusher.Push(invite.FromID, realtime.PushMessage{
+	if err := h.fillJoinedSeat(ctx, invite.MatchID, userID); err != nil {
+		httputil.LogRequestError(c, "fill seat after invite", err)
+		response.Error(c, http.StatusInternalServerError, "进房失败，请重试")
+		return
+	}
+
+	// 通知邀请人：对方接受了，房间页会立刻把空位换成人。
+	h.hub.Push(invite.FromID, realtime.PushMessage{
 		Type: "pool_invite_accepted",
 		Data: acceptInviteResp{MatchID: invite.MatchID, RoomCode: invite.RoomCode},
 	})
@@ -285,10 +279,9 @@ func (h *Handler) DeclineInvite(c *gin.Context) {
 	}
 	h.invites.SetStatus(invite.ID, InviteDeclined)
 
-	// 房间没人来了，直接收掉，房号随之释放。
-	h.manager.Remove(invite.MatchID)
-
-	h.pusher.Push(invite.FromID, realtime.PushMessage{
+	// 房间不跟着收：邀请人还在自己那间房里等着，房号还要留着给别人用。
+	// 收掉反而是错的——他报给第三个人的房号会突然失效。
+	h.hub.Push(invite.FromID, realtime.PushMessage{
 		Type: "pool_invite_declined",
 		Data: acceptInviteResp{MatchID: invite.MatchID, RoomCode: invite.RoomCode},
 	})
@@ -522,22 +515,27 @@ func (h *Handler) Replay(c *gin.Context) {
 		return
 	}
 
-	briefs, err := h.users.Briefs(ctx, []uint{match.P0ID, match.P1ID})
+	// 能回放的对局一定结算过，座位 1 上一定有人；OpponentOf 的 0 分支
+	// 只是让这里不必写 nil 判断。
+	opponentID := match.OpponentOf(userID)
+	briefs, err := h.users.Briefs(ctx, []uint{match.P0ID, opponentID})
 	if err != nil {
 		slog.WarnContext(ctx, "load replay briefs", "error", err)
 		briefs = map[uint]user.Brief{}
 	}
 
 	winner := Seat0
-	if *match.WinnerID == match.P1ID {
+	if *match.WinnerID == opponentID {
 		winner = Seat1
 	}
 
 	resp := replayResp{
 		MatchID: match.ID,
+		// 两个座位按库里的顺序摆：座位号同时是「谁开的球」，
+		// 按观众翻转会让同一条回放在两个人眼里座位号不一致。
 		Players: [2]playerResp{
 			toPlayerResp(briefOf(briefs, match.P0ID)),
-			toPlayerResp(briefOf(briefs, match.P1ID)),
+			toPlayerResp(briefOf(briefs, opponentID)),
 		},
 		Winner: winner,
 		Reason: match.WinReason,
@@ -617,12 +615,9 @@ func pageParams(c *gin.Context) (int, int) {
 	return page, size
 }
 
-// opponentOf 返回这条对局里「不是 userID」的那一方。
+// opponentOf 返回这条对局里「不是 userID」的那一方，不在局里返回 0。
 func opponentOf(match model.PoolMatch, userID uint) uint {
-	if match.P0ID == userID {
-		return match.P1ID
-	}
-	return match.P0ID
+	return match.OpponentOf(userID)
 }
 
 // seatInMatch 判断这个用户在库里那条对局中坐哪边。
@@ -630,7 +625,7 @@ func seatInMatch(match *model.PoolMatch, userID uint) (Seat, bool) {
 	if match.P0ID == userID {
 		return Seat0, true
 	}
-	if match.P1ID == userID {
+	if match.HasPlayer(userID) && match.P0ID != userID {
 		return Seat1, true
 	}
 	return 0, false

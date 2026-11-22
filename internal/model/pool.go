@@ -3,8 +3,8 @@ package model
 
 import "time"
 
-// 对局状态。房间与对局共用一张表：邀请发出时就有 room_code 与 status=waiting，
-// 双方准备齐转 playing，结算转 finished，超时没人来转 expired。
+// 对局状态。房间与对局共用一张表：开房时就有 room_code 与 status=waiting，
+// 双方准备齐转 playing，结算转 finished，长时间没人来转 expired。
 //
 // 不把「房间」独立成一张表，是因为房间除了状态与两个人之外没有别的字段，
 // 分表后每次读房间都要 join 一次，而它本来就是这条对局的前半生。
@@ -12,21 +12,24 @@ const (
 	PoolStatusWaiting  = "waiting"  // 房间已建，还没双方就绪
 	PoolStatusPlaying  = "playing"  // 对局进行中
 	PoolStatusFinished = "finished" // 已结算
-	PoolStatusExpired  = "expired"  // 90 秒没人进齐，房间自动解散
+	PoolStatusExpired  = "expired"  // 长时间没人来，房间自动解散
 )
 
 // PoolMatch 是一局八球对战。
 //
-// RoomCode 是 6 位数字，给「输房间号进房」这条备用入口用，唯一索引兜住并发重号。
-// 主入口是邀请，房号只是兜底。
+// RoomCode 是 6 位数字，房间页把它显示出来，告诉别人就能进同一个房间；
+// 唯一索引兜住并发重号。
 //
-// P0 / P1 分别对应座位 0 与 1：开球方是座位 0，由邀请发起人占据，
+// P0 / P1 分别对应座位 0 与 1：开球方是座位 0，由开房的人占据，
 // 这样「谁先开球」不需要额外字段，从房间归属就能推出来。
 type PoolMatch struct {
 	ID       uint   `gorm:"primaryKey" json:"id"`
 	RoomCode string `gorm:"size:6;not null;uniqueIndex:uk_pool_room" json:"room_code"`
 	P0ID     uint   `gorm:"not null;index:idx_pool_p0,priority:1" json:"p0_id"`
-	P1ID     uint   `gorm:"not null;index:idx_pool_p1,priority:1" json:"p1_id"`
+	// P1ID 可空：房间建好时可以只有房主，等对方输房号进来（或接受邀请）再补上。
+	// 用 NULL 而不是 0 表示空位——0 不是合法用户，用它会让每个读这行的地方
+	// 都得多一条「0 是不是真的没人」的特例。
+	P1ID *uint `gorm:"index:idx_pool_p1,priority:1" json:"p1_id"`
 
 	Status string `gorm:"size:16;not null;default:waiting" json:"status"`
 
@@ -39,6 +42,37 @@ type PoolMatch struct {
 	EndedAt   *time.Time `json:"ended_at"`
 	CreatedAt time.Time  `json:"created_at"`
 	UpdatedAt time.Time  `json:"updated_at"`
+}
+
+// HasPlayer 判断某人是不是这一局的两个座位上的人。
+//
+// 座位 1 可能还空着（房间里只有房主），所以不能直接比 id——nil 与任何数都不相等，
+// 每个调用点自己写一遍很容易漏。
+func (m *PoolMatch) HasPlayer(userID uint) bool {
+	if userID == 0 {
+		return false
+	}
+	if m.P0ID == userID {
+		return true
+	}
+	return m.P1ID != nil && *m.P1ID == userID
+}
+
+// OpponentOf 返回 userID 的对手。座位 1 空着、或 userID 不在这局里时返回 0。
+//
+// 战绩与回放都用它取「另一个人是谁」：刚建好的房间里没有对手，
+// 那些页面本来也不该看到这种行（它们只读 finished）。
+func (m *PoolMatch) OpponentOf(userID uint) uint {
+	if m.P0ID == userID {
+		if m.P1ID != nil {
+			return *m.P1ID
+		}
+		return 0
+	}
+	if m.P1ID != nil && *m.P1ID == userID {
+		return m.P0ID
+	}
+	return 0
 }
 
 // PoolShot 是一杆的完整记录，回放靠它按 seq 顺序重播。

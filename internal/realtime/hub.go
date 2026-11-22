@@ -102,6 +102,31 @@ func (h *Hub) Push(userID uint, msg PushMessage) {
 	}
 }
 
+// IsOnline 判断这个人现在有没有至少一条连接。
+//
+// 台球用它回答「这个人现在能不能收到邀请」：不在线的人点了邀请也只能等一分钟，
+// 而对方根本不会知道。
+func (h *Hub) IsOnline(userID uint) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	_, ok := h.clients[userID]
+	return ok
+}
+
+// OnlineUserIDs 返回当前在线的用户 id，顺序不保证。
+//
+// 调用方要自己过滤（排除自己、排除正在对局的人）与排序，Hub 不替它决定。
+func (h *Hub) OnlineUserIDs() []uint {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	ids := make([]uint, 0, len(h.clients))
+	for userID := range h.clients {
+		ids = append(ids, userID)
+	}
+	return ids
+}
+
 // OnlineUsers 返回当前有连接的用户数。
 func (h *Hub) OnlineUsers() int {
 	h.mu.RLock()

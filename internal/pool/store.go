@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"time"
 
@@ -28,7 +29,9 @@ func NewStore(db *gorm.DB) *Store {
 }
 
 // CreateMatch 建一条等待中的对局。房号撞唯一索引时返回错误，由调用方换一个号重试。
-func (s *Store) CreateMatch(ctx context.Context, p0, p1 uint, roomCode string) (*model.PoolMatch, error) {
+//
+// p1 传 nil 表示「房间里只有房主」，等对方输房号进来再补上。
+func (s *Store) CreateMatch(ctx context.Context, p0 uint, p1 *uint, roomCode string) (*model.PoolMatch, error) {
 	match := &model.PoolMatch{
 		RoomCode: roomCode,
 		P0ID:     p0,
@@ -39,6 +42,90 @@ func (s *Store) CreateMatch(ctx context.Context, p0, p1 uint, roomCode string) (
 		return nil, err
 	}
 	return match, nil
+}
+
+// WaitingMatchFor 找这个人当前所在的等待房间（房主或刚进来的那一方）。
+//
+// 一个用户同时只该有一个等待房间，但历史上可能有多个（邀请流程留下的），
+// 取最新的一条：旧的那些已经没人会去点了，等清扫把它们标掉。
+func (s *Store) WaitingMatchFor(ctx context.Context, userID uint) (*model.PoolMatch, error) {
+	var match model.PoolMatch
+	err := s.db.WithContext(ctx).
+		Where("status = ? AND (p0_id = ? OR p1_id = ?)", model.PoolStatusWaiting, userID, userID).
+		Order("id DESC").
+		First(&match).Error
+	if err != nil {
+		return nil, err
+	}
+	return &match, nil
+}
+
+// MatchByRoomCode 按房号找一条等待中的房间。
+//
+// 只认 waiting：房号在房间开始或过期之后就该失效，否则输同一串数字会进到
+// 一局正在打的、甚至已经结算的对局里。
+func (s *Store) MatchByRoomCode(ctx context.Context, roomCode string) (*model.PoolMatch, error) {
+	var match model.PoolMatch
+	err := s.db.WithContext(ctx).
+		Where("room_code = ? AND status = ?", roomCode, model.PoolStatusWaiting).
+		First(&match).Error
+	if err != nil {
+		return nil, err
+	}
+	return &match, nil
+}
+
+// JoinRoom 把 userID 放到座位 1 上。座位已经被占、或房间已经不在了会返回 false。
+//
+// 判据交给一条带条件的 UPDATE 而不是「先查再写」：两个人几乎同时输同一个房号时，
+// 先查再写会让两个人都看到空位。RowsAffected == 0 就说明这条 UPDATE 没抢到。
+func (s *Store) JoinRoom(ctx context.Context, matchID, userID uint) (bool, error) {
+	result := s.db.WithContext(ctx).Model(&model.PoolMatch{}).
+		Where("id = ? AND status = ? AND p1_id IS NULL AND p0_id <> ?",
+			matchID, model.PoolStatusWaiting, userID).
+		Update("p1_id", userID)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
+}
+
+// ExpireStaleWaiting 把开了太久还没凑齐人的房间标成过期。
+//
+// 房间现在由用户随手就开（进大厅就有一个），不清理的话库里会积一堆 waiting 行，
+// 房号也会被一直占着。返回标记了多少行，方便观察日志。
+func (s *Store) ExpireStaleWaiting(ctx context.Context, before time.Time) (int64, error) {
+	result := s.db.WithContext(ctx).Model(&model.PoolMatch{}).
+		Where("status = ? AND created_at < ?", model.PoolStatusWaiting, before).
+		Update("status", model.PoolStatusExpired)
+	return result.RowsAffected, result.Error
+}
+
+// ExpireRooms 每 interval 清一次「开了超过 ttl 还没开打」的房间，直到 ctx 取消。
+//
+// 判据用 created_at 而不是「最近一次有动静」：房间页的轮询不写库，
+// 按动静判会把有人守着、只是还没等到人的房间误收掉。
+// 代价是一间被守了两小时的房间会解散、房号作废——那是可以接受的：
+// 真等了两个小时的人重新进一次大厅就有新房号了。
+func ExpireRooms(ctx context.Context, store *Store, interval, ttl time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			count, err := store.ExpireStaleWaiting(ctx, now.Add(-ttl))
+			if err != nil {
+				slog.ErrorContext(ctx, "expire stale pool rooms", "error", err)
+				continue
+			}
+			if count > 0 {
+				slog.InfoContext(ctx, "expired stale pool rooms", "count", count)
+			}
+		}
+	}
 }
 
 // Match 按 id 读一条对局。
@@ -61,11 +148,27 @@ func (s *Store) MarkPlaying(ctx context.Context, matchID uint) error {
 		}).Error
 }
 
-// ExpireMatch 把一条没人进的房间标成过期。房号随之作废，可以被重新生成。
-func (s *Store) ExpireMatch(ctx context.Context, matchID uint) error {
-	return s.db.WithContext(ctx).Model(&model.PoolMatch{}).
-		Where("id = ? AND status = ?", matchID, model.PoolStatusWaiting).
-		Update("status", model.PoolStatusExpired).Error
+// FollowingSet 批量判断「我关注了这几个人里的哪些」。
+//
+// 在线名单一次要标几十个人，逐个查就是几十条 SQL；这里一条 IN 查询拿回来。
+// 只有 candidates 为空时才需要特判——空 IN 在部分数据库上是语法错误。
+func (s *Store) FollowingSet(ctx context.Context, followerID uint, candidates []uint) (map[uint]bool, error) {
+	set := make(map[uint]bool, len(candidates))
+	if len(candidates) == 0 {
+		return set, nil
+	}
+
+	var ids []uint
+	err := s.db.WithContext(ctx).Model(&model.Follow{}).
+		Where("follower_id = ? AND followee_id IN ?", followerID, candidates).
+		Pluck("followee_id", &ids).Error
+	if err != nil {
+		return nil, fmt.Errorf("load following set: %w", err)
+	}
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set, nil
 }
 
 // IsFollowing 判断 follower 有没有关注 followee。

@@ -1,8 +1,10 @@
 package pool
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -40,19 +42,28 @@ func (f fakeUsers) Briefs(_ context.Context, ids []uint) (map[uint]user.Brief, e
 }
 
 // fakePusher 什么也不推：读接口不该产生推送，用例也不需要它。
+//
+// 在线名单默认「谁都不在线」，需要它的用例自己换成 fakePresence。
 type fakePusher struct{}
 
 func (fakePusher) Push(uint, realtime.PushMessage) {}
+func (fakePusher) IsOnline(uint) bool              { return false }
+func (fakePusher) OnlineUserIDs() []uint           { return nil }
 
-// newRestEngine 起一个只挂了台球读接口的 gin 引擎。
+// newRestEngine 起一个挂了台球 HTTP 接口的 gin 引擎，实时能力用「谁都不在线」的假实现。
+func newRestEngine(t *testing.T, db *gorm.DB, manager *Manager, names map[uint]string) *gin.Engine {
+	return newEngine(t, db, manager, names, fakePusher{})
+}
+
+// newEngine 同 newRestEngine，但实时能力的实现由用例指定（在线名单、推送记录）。
 //
 // userID 直接从请求头里取，绕开 JWT：这里要验的是 handler 的行为，
 // 而 token 的解析在 middleware 里已经由它自己的用例覆盖。
-func newRestEngine(t *testing.T, db *gorm.DB, manager *Manager, names map[uint]string) *gin.Engine {
+func newEngine(t *testing.T, db *gorm.DB, manager *Manager, names map[uint]string, hub Realtime) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
-	handler := NewHandler(manager, NewInvites(), NewStore(db), fakeUsers{names: names}, fakePusher{})
+	handler := NewHandler(manager, NewInvites(), NewStore(db), fakeUsers{names: names}, hub)
 
 	engine := gin.New()
 	engine.Use(func(c *gin.Context) {
@@ -68,6 +79,15 @@ func newRestEngine(t *testing.T, db *gorm.DB, manager *Manager, names map[uint]s
 	engine.GET("/api/pool/live", handler.Live)
 	engine.GET("/api/pool/records", handler.Records)
 	engine.GET("/api/pool/matches/:id/replay", handler.Replay)
+	engine.POST("/api/pool/rooms/my", handler.MyRoom)
+	engine.GET("/api/pool/rooms/:id", handler.Room)
+	engine.POST("/api/pool/rooms/:id/ready", handler.Ready)
+	engine.POST("/api/pool/rooms/join", handler.JoinRoom)
+	engine.GET("/api/pool/online", handler.Online)
+	engine.POST("/api/pool/invites", handler.CreateInvite)
+	engine.GET("/api/pool/invites/pending", handler.PendingInvites)
+	engine.POST("/api/pool/invites/:id/accept", handler.AcceptInvite)
+	engine.POST("/api/pool/invites/:id/decline", handler.DeclineInvite)
 	return engine
 }
 
@@ -76,6 +96,29 @@ func do(t *testing.T, engine *gin.Engine, path string, userID uint) (int, []byte
 	t.Helper()
 
 	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if userID != 0 {
+		req.Header.Set("X-Test-User", strconv.FormatUint(uint64(userID), 10))
+	}
+	recorder := httptest.NewRecorder()
+	engine.ServeHTTP(recorder, req)
+	return recorder.Code, recorder.Body.Bytes()
+}
+
+// postJSON 发一次带 JSON 体的 POST，返回状态码与响应体。body 传 nil 表示空体。
+func postJSON(t *testing.T, engine *gin.Engine, path string, userID uint, body any) (int, []byte) {
+	t.Helper()
+
+	var reader io.Reader
+	if body != nil {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("请求体不能序列化：%v", err)
+		}
+		reader = bytes.NewReader(payload)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, path, reader)
+	req.Header.Set("Content-Type", "application/json")
 	if userID != 0 {
 		req.Header.Set("X-Test-User", strconv.FormatUint(uint64(userID), 10))
 	}

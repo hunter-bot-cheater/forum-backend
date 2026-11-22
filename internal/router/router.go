@@ -386,6 +386,9 @@ func New(deps Deps) (*gin.Engine, error) {
 			auth.POST("/pool/invites", poolRest.CreateInvite)
 			auth.POST("/pool/invites/:id/accept", poolRest.AcceptInvite)
 			auth.POST("/pool/invites/:id/decline", poolRest.DeclineInvite)
+			auth.POST("/pool/rooms/my", poolRest.MyRoom)
+			auth.POST("/pool/rooms/join", poolRest.JoinRoom)
+			auth.GET("/pool/online", poolRest.Online)
 			auth.GET("/pool/rooms/:id", poolRest.Room)
 			auth.POST("/pool/rooms/:id/ready", poolRest.Ready)
 			// 战绩与回放读的是库，不碰内存里的 actor：

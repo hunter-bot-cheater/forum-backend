@@ -113,6 +113,7 @@ const (
 	cmdLeave
 	cmdDisconnect
 	cmdWatch
+	cmdFillSeat
 	cmdClose
 )
 
@@ -124,6 +125,7 @@ type command struct {
 	kind   cmdKind
 	seat   Seat
 	conn   Conn
+	brief  PlayerBrief
 	params sim.CueParams
 	seq    int
 	x, y   float64
@@ -171,6 +173,10 @@ type Match struct {
 	// 后台清扫每秒扫一遍全部对局，为一局多排一次命令没有意义。
 	finishedAtMu sync.Mutex
 	finishedAt   time.Time
+
+	// lastActive 是最近一次有人跟这局说话的时刻（UnixNano），给「房间是不是没人理了」用。
+	// 用原子量而不是走命令往返：清扫是后台动作，为一局排一次命令不值得。
+	lastActive int64
 }
 
 // NewMatch 创建并启动一局。state 里的球位、座位与玩家资料由调用方准备好。
@@ -192,6 +198,8 @@ func NewMatch(state MatchState, opts Options) *Match {
 	}
 	match.state = state
 	match.state.Deadline = time.Now().Add(opts.TurnTimeout)
+	// 先记一次活跃再发布摘要：房间刚建好就没人理的话，清扫要能算出「已经放了多久」。
+	match.touch()
 	// 先发布一份初始摘要再起协程：房间阶段的对局也可能被列表读到。
 	match.publishLive()
 
@@ -200,7 +208,6 @@ func NewMatch(state MatchState, opts Options) *Match {
 }
 
 // publishLive 把当前状态里的几个字段抄进 atomic 指针。只在 actor 里调用。
-//
 // 每条命令处理完都发布一次，而不是只在换人时发：
 // 球的序号、状态（开局 / 结束）都会变，漏发就会让列表显示上一杆的序号。
 func (m *Match) publishLive() {
@@ -260,6 +267,24 @@ func (m *Match) PlaceCue(seat Seat, x, y float64) error {
 // Leave 主动退出，判负。
 func (m *Match) Leave(seat Seat) error {
 	return m.call(command{kind: cmdLeave, seat: seat})
+}
+
+// ID 返回对局编号。房间号与编号建好之后就不再变，所以在 actor 外面直读。
+func (m *Match) ID() uint {
+	return m.state.MatchID
+}
+
+// RoomCode 返回房号。与 ID 同理：建好之后不变，HTTP 层直接读，不必排队等 actor。
+func (m *Match) RoomCode() string {
+	return m.state.RoomCode
+}
+
+// FillSeat 把某个座位上的玩家资料补上。房间刚有人进来时调用。
+//
+// 只改资料、不动座位归属：座位 1 空着这件事在库里是 p1_id 为 NULL，
+// 在内存里就是 Players[1] 的两项都是零值。
+func (m *Match) FillSeat(seat Seat, brief PlayerBrief) error {
+	return m.call(command{kind: cmdFillSeat, seat: seat, brief: brief})
 }
 
 // SetReady 设置某个座位的准备状态。双方都准备好时对局自动开局。
@@ -352,6 +377,9 @@ func (m *Match) run() {
 				m.shutdown()
 				return
 			}
+			// 任何一条命令都算「有人在这局上」：大厅与房间页是纯 HTTP 轮询，
+			// 没有长连接，光看连接数分不出「有人守着」与「人早走了」。
+			m.touch()
 			m.handle(cmd)
 			m.publishLive()
 			m.armTimer(timer)
@@ -396,6 +424,8 @@ func (m *Match) handle(cmd command) {
 		cmd.reply <- m.handleLeave(cmd)
 	case cmdReady:
 		cmd.reply <- m.handleReady(cmd)
+	case cmdFillSeat:
+		cmd.reply <- m.handleFillSeat(cmd)
 	case cmdDisconnect:
 		cmd.reply <- m.handleDisconnect(cmd)
 	}
@@ -643,6 +673,20 @@ func (m *Match) handleLeave(cmd command) error {
 	m.state.Deadline = time.Time{}
 	m.finish(WinLeave)
 	m.broadcast(m.wrap(MsgResult, ResultData{Winner: winner, Reason: WinLeave}))
+	return nil
+}
+
+// handleFillSeat 把进房的人的昵称与头像填到座位上。
+//
+// 顺手把这一侧的准备标记清掉：座位可能刚换过人（上一任准备好了又走了），
+// 留着那个 true 会让「两个人都准备了」在对局还没开始时就成立。
+func (m *Match) handleFillSeat(cmd command) error {
+	if !cmd.seat.Valid() {
+		return ErrBadParams
+	}
+	m.state.Players[cmd.seat] = cmd.brief
+	m.state.Ready[cmd.seat] = false
+	m.broadcastState()
 	return nil
 }
 

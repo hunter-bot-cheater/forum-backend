@@ -63,6 +63,32 @@ type readyReq struct {
 	Ready bool `json:"ready"`
 }
 
+// joinRoomReq 是「按房号进房」的请求体。
+type joinRoomReq struct {
+	RoomCode string `json:"room_code"`
+}
+
+// roomJoinedResp 是「有人进了我的房间」那条推送。
+//
+// 带上进房人的昵称与头像：房主那一屏要立刻把空位换成人，
+// 只给一个 id 的话还得再请求一次用户资料。
+type roomJoinedResp struct {
+	MatchID  uint       `json:"match_id"`
+	RoomCode string     `json:"room_code"`
+	Player   playerResp `json:"player"`
+}
+
+// onlineUserResp 是「现在在线的人」里的一条。
+//
+// following 只用来分组与排序（关注的排前面），不作为「能不能邀请」的条件：
+// 台球不该是只有互相关注才能玩的游戏。
+type onlineUserResp struct {
+	UserID    uint   `json:"user_id"`
+	Nickname  string `json:"nickname"`
+	Avatar    string `json:"avatar"`
+	Following bool   `json:"following"`
+}
+
 // ratingResp 是战绩汇总。
 //
 // 不发胜率：它是一个派生值，发出去就有「后端算的还是前端算的」两种口径。
