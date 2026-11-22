@@ -995,10 +995,20 @@ curl -I --resolve jiushixixi.xyz:80:<你的公网IP> http://jiushixixi.xyz
 | 房号进房 | 用第二个账号在 `/pool` 的「有房号？直接进」里输那六位 | 第二个账号的标题变成「你在对方的房间里」，房号一致；第一个账号两秒内看到对面坐了人 |
 | 台球开局 | 两个账号各点「准备」 | 两边都跳到 `/pool/match/<id>`，座位 0 的一方显示「你」，另一方显示「对手回合」 |
 | 台球仿真 | 对局页瞄准出杆 | 球真的动；若显示「球桌暂时算不动」说明 `pool-sim` 没起来（见 13.6） |
-| 房间回收 | `docker compose exec -T mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" forum -e "SELECT status, COUNT(*) FROM pool_matches GROUP BY status"` | 只有 `waiting` / `playing` / `finished` / `expired` 四种；`waiting` 不应持续增长 |
+| 房间回收 | `docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" forum -e "SELECT status, COUNT(*) FROM pool_matches GROUP BY status"'` | 只有 `waiting` / `playing` / `finished` / `expired` 四种；`waiting` 不应持续增长 |
 
 第 8 项（端口未开）容易被忽略，但它验证的正是你安全组配对了没有。第 11 项如果失败，回到 7.2 检查 `ws.allowed_origins`。
 台球那几项失败时先看 `docker compose logs --tail=100 api | grep pool`：开会话、抢座位、仿真失败都会留痕。
+
+台球这几条验收天生要两个账号同时在线，而接口是**按 IP 限流**的（`config/config.yaml` 的 `rate_limit`，默认容量 10、每秒补 2）。同一台电脑开两个浏览器窗口，等于两个人共用一个桶，第二个一进大厅就可能弹「请求过于频繁，请 1 秒后重试」——这是限流在起作用，不是功能坏了。测的时候把容量放宽一点，验完改回来：
+
+```yaml
+rate_limit:
+  capacity: 30
+  rate: 5
+```
+
+改完 `docker compose restart api` 生效（这一项是标量，从配置文件读，不用重建镜像）。
 
 ---
 
