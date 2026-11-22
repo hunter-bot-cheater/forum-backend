@@ -509,6 +509,23 @@ func (h *Handler) fillJoinedSeat(ctx context.Context, matchID, userID uint) erro
 	return match.FillSeat(Seat1, brief)
 }
 
+// occupiesPlayers 判断一份房间状态是否还占着座位上的人。
+//
+// 只有「正在打」与「两边坐齐的等待房」算占人。已结束、已过期的对局不占：
+// 那些 actor 还留在 manager 里（结算页、再来一局都还要用到它），
+// 早先的写法把它们也算忙，结果两个人打完一局就永远从在线名单里消失了——
+// 表现就是「明明人在线，另一个号却看不到他」。
+func occupiesPlayers(info LiveInfo) bool {
+	switch info.Status {
+	case model.PoolStatusPlaying:
+		return true
+	case model.PoolStatusWaiting:
+		return info.Players[Seat1].UserID != 0
+	default:
+		return false
+	}
+}
+
 // Online godoc
 // @Summary      现在在线的人
 // @Description  邀请面板用。只排除自己、正在对局与即将开打的人；空等着的房间不算忙。
@@ -538,7 +555,7 @@ func (h *Handler) Online(c *gin.Context) {
 		if !ok {
 			continue
 		}
-		if info.Status == model.PoolStatusWaiting && info.Players[1].UserID == 0 {
+		if !occupiesPlayers(info) {
 			continue
 		}
 		for seat := Seat0; seat <= Seat1; seat++ {

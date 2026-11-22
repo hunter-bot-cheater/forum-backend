@@ -108,6 +108,7 @@ const (
 	cmdJoin cmdKind = iota
 	cmdShoot
 	cmdPlaceCue
+	cmdAim
 	cmdSnapshot
 	cmdReady
 	cmdLeave
@@ -264,6 +265,36 @@ func (m *Match) PlaceCue(seat Seat, x, y float64) error {
 	return m.call(command{kind: cmdPlaceCue, seat: seat, x: x, y: y})
 }
 
+// RelayAim 把一方的瞄准姿态转给对面与观战者。
+//
+// 与 Shoot 不同，它不等回执、也不占用调用方：瞄准是每几十毫秒一帧的连续动作，
+// actor 正在算一杆（开球要一两秒）时宁可丢掉这几帧，也不能让 WS 读循环堵在那里，
+// 那会把对端的 uptime 与心跳一起拖垮。丢帧的代价只是对面看到的杆子顿一下。
+func (m *Match) RelayAim(seat Seat, phi, power float64) {
+	select {
+	case <-m.done:
+		return
+	case m.cmd <- command{kind: cmdAim, seat: seat, params: sim.CueParams{Phi: phi, Power: power}}:
+	default:
+		// actor 正忙，丢掉这一帧。
+	}
+}
+
+// handleAim 广播一条瞄准帧。
+//
+// 只转发不落库、不进快照：它随时会被下一帧覆盖，重连的人从下一帧开始看就行。
+// 轮次对不上的一律丢弃——否则对手停在自己回合时画出的杆子会一直挂在那边。
+func (m *Match) handleAim(cmd command) {
+	if m.state.Status != model.PoolStatusPlaying || cmd.seat != m.state.Turn {
+		return
+	}
+	m.broadcastExcept(cmd.seat, m.wrap(MsgAim, AimData{
+		Seat:  cmd.seat,
+		Phi:   cmd.params.Phi,
+		Power: cmd.params.Power,
+	}))
+}
+
 // Leave 主动退出，判负。
 func (m *Match) Leave(seat Seat) error {
 	return m.call(command{kind: cmdLeave, seat: seat})
@@ -418,6 +449,9 @@ func (m *Match) handle(cmd command) {
 		cmd.reply <- m.handleShoot(cmd)
 	case cmdPlaceCue:
 		cmd.reply <- m.handlePlaceCue(cmd)
+	case cmdAim:
+		// 瞄准帧没有回执：进来只为走一遍单写者约束，让广播与状态改动同源。
+		m.handleAim(cmd)
 	case cmdSnapshot:
 		cmd.state <- m.state.snapshot(cmd.seat, time.Now())
 	case cmdLeave:
@@ -839,6 +873,22 @@ func (m *Match) broadcast(msg Message) {
 		if conn != nil {
 			conn.Send(msg)
 		}
+	}
+	for _, conn := range m.spectators {
+		conn.Send(msg)
+	}
+}
+
+// broadcastExcept 发给除某个座位以外的所有人（观战者全都发）。
+//
+// 瞄准帧用它：发回给本人只会让本地画面被自己的旧帧顶一下，
+// 让杆子抖一下，纯属浪费一条消息。
+func (m *Match) broadcastExcept(seat Seat, msg Message) {
+	for index, conn := range m.conns {
+		if conn == nil || Seat(index) == seat {
+			continue
+		}
+		conn.Send(msg)
 	}
 	for _, conn := range m.spectators {
 		conn.Send(msg)

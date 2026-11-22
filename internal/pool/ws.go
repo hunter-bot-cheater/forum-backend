@@ -169,6 +169,21 @@ func (h *WSHandler) dispatch(match *Match, seat Seat, conn *wsConn, msg ClientMe
 			conn.Send(errorMessage(msg.Seq, codeOf(err), messageOf(err)))
 		}
 
+	case CmdAim:
+		// 瞄准帧只转发，不回应：错了（不在你的回合、参数越界）悄悄丢弃即可，
+		// 给每帧都回一条错误会把对端刷屏，而下一帧本来就是对的。
+		var payload struct {
+			Phi   float64 `json:"phi"`
+			Power float64 `json:"power"`
+		}
+		if err := json.Unmarshal(msg.Data, &payload); err != nil {
+			return
+		}
+		if payload.Power < 0 || payload.Power > 1 {
+			return
+		}
+		match.RelayAim(seat, payload.Phi, payload.Power)
+
 	case CmdResume:
 		// 重连就是重新进房：快照会重发一遍，客户端按快照对齐即可。
 		// 这里不做任何「补发遗漏消息」的处理，快照本身就是收敛点。

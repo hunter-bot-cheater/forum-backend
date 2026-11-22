@@ -609,3 +609,56 @@ func waitFor(t *testing.T, timeout time.Duration, check func() bool) {
 	}
 	t.Fatalf("等待超时（%s）", timeout)
 }
+
+// 瞄准帧要转给对面与观战者，但不能回显给自己。
+//
+// 回显没有意义：本地的杆子已经是这个角度了，收到一条旧帧只会让它抖一下。
+func TestRelayAimReachesOpponentAndSpectators(t *testing.T) {
+	match, conn0, conn1 := newTestMatch(t, &fakeSim{shot: quietShot()})
+	watcher := &fakeConn{}
+	if err := match.Watch(watcher); err != nil {
+		t.Fatalf("观战进房失败：%v", err)
+	}
+
+	match.RelayAim(Seat0, 1.25, 0.42)
+
+	// RelayAim 是异步投递的（不占调用方），这里等它落到 actor 里再断言。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := conn1.last(MsgAim); ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	msg, ok := conn1.last(MsgAim)
+	if !ok {
+		t.Fatal("对手没收到 aim 帧")
+	}
+	data, ok := msg.Data.(AimData)
+	if !ok {
+		t.Fatalf("aim 帧的数据类型 = %T", msg.Data)
+	}
+	if data.Seat != Seat0 || data.Phi != 1.25 || data.Power != 0.42 {
+		t.Errorf("aim 帧内容不对：%+v", data)
+	}
+	if _, ok := watcher.last(MsgAim); !ok {
+		t.Error("观战者没收到 aim 帧")
+	}
+	if _, ok := conn0.last(MsgAim); ok {
+		t.Error("不该把 aim 帧回显给出杆的人")
+	}
+}
+
+// 不是自己回合时发来的瞄准帧一律丢弃，否则上一手留下的杆子会一直挂着。
+func TestRelayAimIgnoredWhenNotYourTurn(t *testing.T) {
+	match, _, conn1 := newTestMatch(t, &fakeSim{shot: quietShot()})
+
+	// 开局是座位 0 的回合，座位 1 发来的帧应当被丢掉。
+	match.RelayAim(Seat1, 0.5, 0.9)
+	time.Sleep(80 * time.Millisecond)
+
+	if _, ok := conn1.last(MsgAim); ok {
+		t.Error("对手回合之外的瞄准帧不该被转发")
+	}
+}

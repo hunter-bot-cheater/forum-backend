@@ -21,6 +21,7 @@ const (
 	MsgFoul   = "foul"   // 犯规说明
 	MsgResult = "result" // 结算
 	MsgPeer   = "peer"   // 对手状态：joined / left / offline / declined
+	MsgAim    = "aim"    // 一方正在瞄准：角度与力度，实时转给对面与观战者
 	MsgError  = "error"  // 业务错误，seq 与请求配对
 )
 
@@ -29,6 +30,7 @@ const (
 	CmdJoin     = "join"
 	CmdShoot    = "shoot"
 	CmdPlaceCue = "place_cue"
+	CmdAim      = "aim"
 	CmdLeave    = "leave"
 	CmdResume   = "resume"
 )
@@ -124,6 +126,16 @@ type ResultData struct {
 type PeerData struct {
 	Event string `json:"event"`
 	Seat  Seat   `json:"seat"`
+}
+
+// AimData 是某个人此刻的瞄准姿态，转给对面与观战者用。
+//
+// 只带角度与力度：球杆画在哪、拉多远都由客户端自己算，服务端不掺和外观。
+// 这条消息不进状态机，丢了也无所谓——下一帧马上就到。
+type AimData struct {
+	Seat  Seat    `json:"seat"`
+	Phi   float64 `json:"phi"`
+	Power float64 `json:"power"`
 }
 
 // ErrorData 是业务错误。Code 是稳定标识，Message 是给玩家看的中文。

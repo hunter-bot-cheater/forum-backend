@@ -869,6 +869,54 @@ func TestOnlineListsIdlePeopleWhoOwnEmptyRooms(t *testing.T) {
 	}
 }
 
+// 一局打完，两个人的 actor 还留在 manager 里（结算与「再来一局」要用），
+// 但不能因此把他们一直当成「忙」。
+//
+// 这是「时常看不到已经在线的另一个号」的回归用例：以前只有「空房」被排除，
+// finished / expired 都被算成占人，打完一局两个人就从别人的在线名单里消失了。
+func TestOccupiesPlayersOnlyWhilePlayingOrBothSeated(t *testing.T) {
+	one := PlayerBrief{UserID: 1, Nickname: "甲"}
+	two := PlayerBrief{UserID: 2, Nickname: "乙"}
+
+	cases := []struct {
+		name string
+		info LiveInfo
+		want bool
+	}{
+		{
+			name: "正在打",
+			info: LiveInfo{Status: model.PoolStatusPlaying, Players: [2]PlayerBrief{one, two}},
+			want: true,
+		},
+		{
+			name: "等待房两边坐齐",
+			info: LiveInfo{Status: model.PoolStatusWaiting, Players: [2]PlayerBrief{one, two}},
+			want: true,
+		},
+		{
+			name: "等待房只有一个人：空房说明他闲着",
+			info: LiveInfo{Status: model.PoolStatusWaiting, Players: [2]PlayerBrief{one}},
+			want: false,
+		},
+		{
+			name: "已结束：人已经回到大厅",
+			info: LiveInfo{Status: model.PoolStatusFinished, Players: [2]PlayerBrief{one, two}},
+			want: false,
+		},
+		{
+			name: "已过期：房间作废，人还在线",
+			info: LiveInfo{Status: model.PoolStatusExpired, Players: [2]PlayerBrief{one, two}},
+			want: false,
+		},
+	}
+
+	for _, item := range cases {
+		if got := occupiesPlayers(item.info); got != item.want {
+			t.Errorf("%s：occupiesPlayers = %v，期望 %v", item.name, got, item.want)
+		}
+	}
+}
+
 // 同一个人并发拉「我的房间」时只能开出一间。
 //
 // 真实现场是：大厅挂载拉一次，「再约一局」在同一刻发邀请，两条请求同时进来。
