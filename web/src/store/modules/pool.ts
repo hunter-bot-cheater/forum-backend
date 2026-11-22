@@ -139,6 +139,11 @@ export const usePoolStore = defineStore('pool', () => {
   async function accept(inviteId: string): Promise<AcceptInviteResp> {
     const resp = await acceptInvite(inviteId)
     removePending(inviteId)
+    // 服务端在接受时会把我发出去、还没被回应的邀请一并作废
+    // （我原来那间房已经没了，那条邀请点开也进不去）。
+    // 本地这张「已邀请 xxx，等对方接受」的卡片要跟着收掉，
+    // 否则大厅一直挂着一条永远不会被回应的邀请，还会占着快轮询。
+    clearOutgoing()
     return resp
   }
 

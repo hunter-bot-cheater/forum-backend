@@ -26,6 +26,12 @@ const InviteTTL = 60 * time.Second
 // 一个人同一时刻只能挂一条待接受的邀请，否则可以刷列表骚扰。
 var ErrInviteBusy = errors.New("pool: you already have a pending invite")
 
+// ErrInviteMutual 表示两个人几乎同时互相邀请。
+//
+// 这种情形必须拦下来：两边各建了一间房，谁先接受就把另一间作废，
+// 后点的人必然进不去，两个页面还会各显示一间自己的房。
+var ErrInviteMutual = errors.New("pool: the other side already invited you")
+
 // ErrInviteGone 表示邀请不存在、不是发给你的、或者已经用过 / 过期。
 var ErrInviteGone = errors.New("pool: invite is gone")
 
@@ -69,8 +75,16 @@ func (r *Invites) Create(fromID, toID, matchID uint, roomCode string) (*Invite, 
 	defer r.mu.Unlock()
 
 	for _, invite := range r.byID {
-		if invite.FromID == fromID && invite.Status == InvitePending && !r.expired(invite) {
+		if invite.Status != InvitePending || r.expired(invite) {
+			continue
+		}
+		if invite.FromID == fromID {
 			return nil, ErrInviteBusy
+		}
+		// 对方已经先邀请我了：这时候再发一条，等于两边各开一间房，
+		// 谁先接受谁就把另一间作废。直接让他去接受对方那条。
+		if invite.FromID == toID && invite.ToID == fromID {
+			return nil, ErrInviteMutual
 		}
 	}
 
@@ -138,6 +152,25 @@ func (r *Invites) SetStatus(id, status string) bool {
 	}
 	invite.Status = status
 	return true
+}
+
+// CancelOutgoing 把某个人发出去、还没被接受的邀请全部标成已失效，返回条数。
+//
+// 用在「他改去接受别人的邀请」时：他原来那间房会被作废，
+// 挂着的邀请再被点开也进不去了。不标掉的话对方页面上还留着一张
+// 看起来能点的卡片，点下去只会收到「房间已被占用」。
+func (r *Invites) CancelOutgoing(fromID uint) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	canceled := 0
+	for _, invite := range r.byID {
+		if invite.FromID == fromID && invite.Status == InvitePending {
+			invite.Status = InviteExpired
+			canceled++
+		}
+	}
+	return canceled
 }
 
 // Sweep 清掉已经过期的邀请，返回清掉的条数。

@@ -679,7 +679,10 @@ async function onInvite(person: OnlineUser) {
     // 拉一次让卡上的房号与邀请指向的那间对上；拉不到也不影响邀请本身。
     await loadRoom()
   } catch {
-    // 拦截器已提示。
+    // 拦截器已提示。这里再刷一次待处理邀请：
+    // 失败原因很可能是「对方已经邀请你了」（服务端会拦下互邀），
+    // 那条邀请可能在本地还没收到，刷一下让人能直接点接受。
+    void pool.refresh()
   } finally {
     busyId.value = 0
   }

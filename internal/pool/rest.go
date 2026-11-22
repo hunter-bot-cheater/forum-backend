@@ -47,6 +47,14 @@ type Handler struct {
 
 	// roomLocks 是开房用的一组分片锁，见 lockRoom。
 	roomLocks [roomLockStripes]sync.Mutex
+
+	// acceptMu 串行化「接受邀请」。
+	//
+	// 两个人互相邀请时，两个 accept 会并发跑：A 进 B 的房、B 进 A 的房，
+	// 各自成功之后再各自把「自己开的房」作废，正好把对方刚进去的那间也作废了，
+	// 最后两个人各坐在一间已作废的房里，谁都看不到谁。
+	// 这个接口一分钟也用不了几次，一把全局锁比按用户对加锁简单得多。
+	acceptMu sync.Mutex
 }
 
 // NewHandler 由 router 在装配期调用。
@@ -115,6 +123,11 @@ func (h *Handler) CreateInvite(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, ErrInviteBusy) {
 			response.Error(c, http.StatusConflict, "你已有一条待接受的邀请")
+			return
+		}
+		// 互相邀请：拦下来让他去接受对方那条，别两边各开一间房。
+		if errors.Is(err, ErrInviteMutual) {
+			response.Error(c, http.StatusConflict, "对方已经邀请你了，接受他那条邀请即可")
 			return
 		}
 		httputil.LogRequestError(c, "create invite", err)
@@ -217,6 +230,10 @@ func (h *Handler) AcceptInvite(c *gin.Context) {
 		return
 	}
 
+	// 整个接受过程串起来跑，理由见 Handler.acceptMu。
+	h.acceptMu.Lock()
+	defer h.acceptMu.Unlock()
+
 	invite, ok := h.usableInvite(c, userID)
 	if !ok {
 		return
@@ -261,6 +278,9 @@ func (h *Handler) AcceptInvite(c *gin.Context) {
 
 	// 接受邀请的人原来那间房也要作废：一个人同时只能在一间房里等。
 	h.retireOwnRooms(ctx, userID, invite.MatchID)
+	// 他发出去、还没被回应的邀请跟着作废：那间房已经没了，
+	// 对方再点接受只会看到「房间已被占用」。
+	h.invites.CancelOutgoing(userID)
 	// 以及「我曾以客人身份坐在别的房间」那种情况：房留着，座位要腾出来。
 	h.vacateGuestSeats(ctx, userID, invite.MatchID)
 
