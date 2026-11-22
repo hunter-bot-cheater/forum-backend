@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -43,6 +44,9 @@ type Handler struct {
 	store   *Store
 	users   UserBriefs
 	hub     Realtime
+
+	// roomLocks 是开房用的一组分片锁，见 lockRoom。
+	roomLocks [roomLockStripes]sync.Mutex
 }
 
 // NewHandler 由 router 在装配期调用。

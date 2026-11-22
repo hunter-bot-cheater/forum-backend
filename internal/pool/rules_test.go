@@ -78,26 +78,29 @@ func TestBreakWithPotKeepsTurn(t *testing.T) {
 	}
 }
 
-// 开球：没进球但四颗球碰库，同样有效，换人。
-func TestBreakWithFourRailsIsLegal(t *testing.T) {
+// 开球：没进球但三颗球碰库，同样有效，换人。
+//
+// 三颗是 breakRailBalls 的取值，理由见那里的注释：本仿真满力只有 7 m/s，
+// 按官方的四颗判，中档力度开球一律犯规。
+func TestBreakWithThreeRailsIsLegal(t *testing.T) {
 	verdict := JudgeShot(breakState(), shotOf(
 		hit(0.16, sim.CueBallID, "9"),
-		rail(0.5, "1"), rail(0.6, "2"), rail(0.7, "3"), rail(0.8, sim.CueBallID),
+		rail(0.5, "1"), rail(0.6, "2"), rail(0.7, "3"),
 	))
 
 	if verdict.Foul {
-		t.Fatalf("四颗球碰库的开球不该判犯规：%s", verdict.Reason)
+		t.Fatalf("三颗球碰库的开球不该判犯规：%s", verdict.Reason)
 	}
 	if verdict.NextSeat != Seat1 {
 		t.Errorf("开球没进球应当换人，NextSeat = %d", verdict.NextSeat)
 	}
 }
 
-// 开球：只有三颗球碰库且没进球，判犯规并给对手手中球。
-func TestBreakWithThreeRailsIsFoul(t *testing.T) {
+// 开球：只有两颗球碰库且没进球，判犯规并给对手手中球。
+func TestBreakWithTwoRailsIsFoul(t *testing.T) {
 	verdict := JudgeShot(breakState(), shotOf(
 		hit(0.16, sim.CueBallID, "9"),
-		rail(0.5, "1"), rail(0.6, "2"), rail(0.7, "3"),
+		rail(0.5, "1"), rail(0.6, "2"),
 	))
 
 	if !verdict.Foul || verdict.ReasonCode != FoulBreakNoSpread {

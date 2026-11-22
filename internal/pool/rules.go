@@ -14,7 +14,12 @@ import "forum-backend/internal/pool/sim"
 
 // breakRailBalls 是开球合法的门槛之一：至少这么多颗球碰过库。
 // 另一条门槛是「至少进一颗球」，两条满足一条就算开球有效。
-const breakRailBalls = 4
+//
+// 官方规则写的是四颗，那是按职业开球（母球 30 km/h 以上）定的。本仿真的满力
+// 只有 7 m/s（见 pool-sim 的 MAX_BALL_SPEED），实测同一杆开球：力度 0.9 才第一次
+// 凑到四颗碰库，0.5~0.8 只有两三颗。照四颗判，玩家用中档力度开球必然犯规、
+// 开局第一杆就把手中球送给对手。取三颗：半力以上开球有效，轻碰一下仍然算没打开。
+const breakRailBalls = 3
 
 // TimeoutLossThreshold 是连续超时判负的阈值。
 // 一次超时只警告并换人，第二次直接判负——否则挂机的人可以一直拖着不让对局结束。
@@ -89,7 +94,7 @@ type shotFacts struct {
 	pottedSet map[string]bool
 	// firstContact 是母球第一个碰到的球号。空串表示母球什么都没碰到（空杆）。
 	firstContact string
-	// cushionBalls 是碰过库的球号集合，开球的「四颗球碰库」按它数。
+	// cushionBalls 是碰过库的球号集合，开球的「几颗球碰库」按它数。
 	cushionBalls map[string]bool
 	// cushionAfterContact 表示首碰之后还有球碰过库。
 	cushionAfterContact bool
@@ -229,11 +234,11 @@ func judgeBreak(state RuleState, facts shotFacts) Verdict {
 		return verdict
 	}
 
-	// 开球有效的两条门槛，满足一条即可：进球，或至少四颗球碰库。
+	// 开球有效的两条门槛，满足一条即可：进球，或至少 breakRailBalls 颗球碰库。
 	if facts.pottedBalls() == 0 && len(facts.cushionBalls) < breakRailBalls {
 		verdict.Foul = true
 		verdict.ReasonCode = FoulBreakNoSpread
-		verdict.Reason = "开球没有把球打开（至少要有球进袋或四颗球碰库）"
+		verdict.Reason = "开球没有把球打开（至少要有球进袋或三颗球碰库）"
 		verdict.BallInHand = true
 		verdict.NextSeat = state.Shooter.Other()
 		return verdict

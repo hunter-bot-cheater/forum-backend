@@ -1,8 +1,10 @@
 package pool
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"sync"
 	"testing"
@@ -838,5 +840,83 @@ func TestReopenRejectedWhilePlaying(t *testing.T) {
 	}
 	if row.Status != model.PoolStatusPlaying {
 		t.Errorf("status = %q，期望仍是 playing", row.Status)
+	}
+}
+
+// 只挂着一间空房的人，在别人的在线名单里必须照常出现。
+//
+// 这条是「看不到其他人在线」那个 bug 的回归用例：曾经把「内存里有房间」
+// 一律当成忙，而每个人点进大厅都会自动有一间空房，于是名单永远是空的。
+func TestOnlineListsIdlePeopleWhoOwnEmptyRooms(t *testing.T) {
+	db := testutil.NewDB(t)
+	hub := &fakeHub{}
+	hub.setOnline(7, 8)
+	engine := newEngine(t, db, newRoomManager(t), map[uint]string{7: "甲", 8: "乙"}, hub)
+
+	// 两个人都先进大厅：各自有一间等人进来的空房。
+	openRoomFor(t, engine, 7)
+	openRoomFor(t, engine, 8)
+
+	status, body := do(t, engine, "/api/pool/online", 7)
+	if status != http.StatusOK {
+		t.Fatalf("状态码 = %d：%s", status, body)
+	}
+	var list []onlineUserResp
+	decodeData(t, body, &list)
+
+	if len(list) != 1 || list[0].UserID != 8 {
+		t.Fatalf("名单 = %+v，期望只有一间空房的乙", list)
+	}
+}
+
+// 同一个人并发拉「我的房间」时只能开出一间。
+//
+// 真实现场是：大厅挂载拉一次，「再约一局」在同一刻发邀请，两条请求同时进来。
+// 以前两边都查不到房间，各开一间，邀请指向其中一间、界面显示另一间，
+// 对方进了房，房主那一侧永远只有自己。
+func TestMyRoomConcurrentCallsShareOneRoom(t *testing.T) {
+	db := testutil.NewDB(t)
+	engine := newEngine(t, db, newRoomManager(t), map[uint]string{7: "甲"}, &fakeHub{})
+
+	const callers = 8
+	var wg sync.WaitGroup
+	codes := make([]int, callers)
+	ids := make([]uint, callers)
+
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			req := httptest.NewRequest(http.MethodPost, "/api/pool/rooms/my", nil)
+			req.Header.Set("X-Test-User", "7")
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, req)
+			codes[index] = recorder.Code
+			var payload struct {
+				Data roomResp `json:"data"`
+			}
+			_ = json.Unmarshal(recorder.Body.Bytes(), &payload)
+			ids[index] = payload.Data.MatchID
+		}(i)
+	}
+	wg.Wait()
+
+	for i, code := range codes {
+		if code != http.StatusOK {
+			t.Fatalf("第 %d 个请求状态码 = %d", i, code)
+		}
+		if ids[i] == 0 || ids[i] != ids[0] {
+			t.Fatalf("并发的 8 次开房拿到了不同的房间：%v", ids)
+		}
+	}
+
+	var count int64
+	if err := db.Model(&model.PoolMatch{}).
+		Where("p0_id = ? AND status = ?", 7, model.PoolStatusWaiting).
+		Count(&count).Error; err != nil {
+		t.Fatalf("统计房间失败：%v", err)
+	}
+	if count != 1 {
+		t.Errorf("库里有 %d 间 waiting 房间，期望 1 间", count)
 	}
 }

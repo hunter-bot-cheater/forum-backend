@@ -75,6 +75,25 @@ func (h *Handler) MyRoom(c *gin.Context) {
 	response.OK(c, toRoomResp(snapshot))
 }
 
+// roomLockStripes 是开房锁的分片数。
+//
+// 不按用户各建一把锁：那要么永远不回收（map 越用越大），要么要写一套清理逻辑。
+// 用户 id 是连续的，取模后分布均匀，64 片已经能让撞车概率低到可以忽略，
+// 真的撞上也只是同一个分片的两个人多等几毫秒。
+const roomLockStripes = 64
+
+// lockRoom 拿到这个用户的开房锁，返回解锁函数。
+//
+// 为什么必须串行：大厅挂载时拉一次「我的房间」，「再约一局」又在同一刻发邀请，
+// 两条请求都先查「我有没有房间」、都查不到、于是各开一间。邀请指向其中一间，
+// 界面上显示的是另一间（按 id 取最新），对方进了邀请的那间，
+// 房主那一侧永远只有自己——这就是「邀请再来一局后房间对不上」的真因。
+func (h *Handler) lockRoom(userID uint) func() {
+	mu := &h.roomLocks[userID%roomLockStripes]
+	mu.Lock()
+	return mu.Unlock
+}
+
 // myRoom 拿到我当前所在的那一局，没有就开一间新房。
 //
 // 「我当前的」优先取库里已有的：页面每次刷新都调它，
@@ -83,6 +102,10 @@ func (h *Handler) MyRoom(c *gin.Context) {
 // 正在打的对局也算「我的房间」：大厅每两秒问一次，若这里只认 waiting，
 // 开局那一刻就会另开一间新房，房主永远进不了自己的对局。
 func (h *Handler) myRoom(ctx context.Context, userID uint) (*Match, Seat, error) {
+	// 查与建之间不能有窗口：见 lockRoom 的说明。
+	unlock := h.lockRoom(userID)
+	defer unlock()
+
 	row, err := h.store.CurrentMatchFor(ctx, userID)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, 0, err
@@ -488,7 +511,7 @@ func (h *Handler) fillJoinedSeat(ctx context.Context, matchID, userID uint) erro
 
 // Online godoc
 // @Summary      现在在线的人
-// @Description  邀请面板用。排除自己与正在对局里的人，关注的排在前面。
+// @Description  邀请面板用。只排除自己、正在对局与即将开打的人；空等着的房间不算忙。
 // @Tags         pool
 // @Produce      json
 // @Success      200  {object}  httputil.SwaggerEnvelope{data=[]pool.onlineUserResp}
@@ -504,11 +527,18 @@ func (h *Handler) Online(c *gin.Context) {
 		return
 	}
 
-	// 正在对局里的人不列出来：邀请他只会得到一个「我在打」。
+	// 只有两种人算「现在约不了」：正在打，以及房间两边都坐齐了（马上开打）。
+	//
+	// 不能把「挂着一间等人进来的空房」也算进去：大厅里每个人一进来就自动有房，
+	// 于是所有人都变成 busy，在线名单永远是空的——这正是之前「看不到其他人在线」
+	// 的原因。空房恰恰说明他闲着呢。
 	busy := make(map[uint]struct{})
 	for _, match := range h.manager.List() {
 		info, ok := match.Live()
 		if !ok {
+			continue
+		}
+		if info.Status == model.PoolStatusWaiting && info.Players[1].UserID == 0 {
 			continue
 		}
 		for seat := Seat0; seat <= Seat1; seat++ {
