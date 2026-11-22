@@ -105,6 +105,17 @@ export function leaveRoom() {
   })
 }
 
+// 换一间房：把当前这间还没开打的作废，另开一间（房号会变）。
+//
+// 对面可能早就关了页面，而房间只要还有人轮询就一直活着。
+// 没有这个入口，房主面对的是一个永远不点准备的人，只能等两小时清扫。
+export function reopenRoom() {
+  return request<PoolRoom>({
+    url: '/pool/rooms/reopen',
+    method: 'post',
+  })
+}
+
 // 拉待接受的邀请。
 //
 // 实时到达靠全局 WS 推的 pool_invite，这个接口负责两件 WS 覆盖不到的事：

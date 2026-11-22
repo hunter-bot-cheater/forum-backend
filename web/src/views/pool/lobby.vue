@@ -1,228 +1,229 @@
 <template>
   <div class="pl">
     <header class="pl__head">
-      <div>
-        <h1 class="pl__title">台球对战</h1>
-        <p class="pl__sub">进来就有一间自己的房。把房号报给对方，或者从在线名单里点一个人邀请。</p>
+      <h1 class="pl__title">台球对战</h1>
+      <div class="pl__tools">
+        <button class="pl__tool" type="button" @click="toggleJoin">
+          {{ joinOpen ? '收起' : '输入房号' }}
+        </button>
+        <router-link class="pl__tool" to="/pool/records">我的战绩</router-link>
       </div>
-      <router-link class="pl__records" to="/pool/records">我的战绩</router-link>
     </header>
+
+    <!-- 输房号是「偶尔用一次」的入口，收进按钮后面：常驻一行输入框
+         会一直占着页面最显眼的位置，而大部分人是从在线名单里点人。 -->
+    <form v-if="joinOpen" class="pl__join" @submit.prevent="onJoin">
+      <input
+        ref="joinInput"
+        v-model="joinCode"
+        class="pl__join-input"
+        type="text"
+        inputmode="numeric"
+        autocomplete="off"
+        maxlength="6"
+        placeholder="六位房号"
+        @input="onJoinInput"
+      />
+      <button class="pl__join-btn" type="submit" :disabled="joinBusy || joinCode.length !== 6">
+        {{ joinBusy ? '进入中…' : '进入' }}
+      </button>
+    </form>
 
     <!-- 等待对方接受邀请。比房间卡靠前：发出邀请后最想知道的是「他到底看没看到」，
          而房间卡一直在那儿，早两秒晚两秒没关系。 -->
     <section v-if="outgoing" class="pl__waiting">
-      <div class="pl__waiting-main">
-        <span class="pl__waiting-label">已邀请 {{ outgoingName }}，等对方接受</span>
-      </div>
+      <span class="pl__waiting-label">已邀请 {{ outgoingName }}，等对方接受</span>
       <div class="pl__waiting-side">
         <span class="pl__waiting-tip">{{ waitLeft }} 秒后失效</span>
         <button class="pl__cancel" type="button" @click="pool.cancelOutgoing()">先不等了</button>
       </div>
     </section>
 
-    <!-- 我的房间。这一块是整页的主角：点进台球就该看见自己的头像、
-         对面那个空位，以及一串能被念出去的数字。 -->
-    <section class="pl__room">
-      <div class="pl__room-head">
-        <h2 class="pl__room-title">{{ isOwner ? '我的房间' : '你在对方的房间里' }}</h2>
-        <div class="pl__code">
-          <span class="pl__code-label">房号</span>
-          <span class="pl__code-value">{{ roomCode || '——' }}</span>
-          <button v-if="roomCode" class="pl__copy" type="button" @click="copyCode">
-            {{ copied ? '已复制' : '复制' }}
-          </button>
-        </div>
-      </div>
-
-      <!-- 开房失败与「房间还没回来」要分开：前者要有重试入口，
-           后者只是慢一拍，弹个错误反而更慌。 -->
-      <p v-if="roomFailed" class="pl__empty">
-        房间没开出来。<button class="pl__retry" type="button" @click="retryRoom">重试</button>
-      </p>
-
-      <div v-else-if="!room" class="pl__room-skeleton">
-        <el-skeleton :rows="3" animated />
-      </div>
-
-      <template v-else>
-        <div class="pl__seats">
-          <!-- 自己这一侧永远在左，不管服务端分配的座位号是 0 还是 1。 -->
-          <article class="pl__seat is-me" :class="{ 'is-ready': myReady }">
-            <div class="pl__seat-tag">你</div>
-            <el-avatar
-              :size="56"
-              :src="me?.avatar || undefined"
-              :style="{ backgroundColor: avatarColor(me?.nickname || '') }"
-            >
-              {{ initialOf(me?.nickname) }}
-            </el-avatar>
-            <span class="pl__seat-name">{{ me?.nickname || '我' }}</span>
-            <span class="pl__seat-ready">{{ myReady ? '已准备' : '未准备' }}</span>
-          </article>
-
-          <!-- 空位用虚线框：一眼能看出「这里还能坐一个人」，
-               而不是「对手掉线了」。 -->
-          <article v-if="otherEmpty" class="pl__seat is-empty">
-            <div class="pl__seat-tag">空位</div>
-            <div class="pl__seat-ghost">+</div>
-            <span class="pl__seat-name">等一个人</span>
-            <span class="pl__seat-ready">把房号发给他</span>
-          </article>
-
-          <article v-else class="pl__seat" :class="{ 'is-ready': otherReady }">
-            <div class="pl__seat-tag">{{ isOwner ? '对手' : '房主' }}</div>
-            <el-avatar
-              :size="56"
-              :src="other?.avatar || undefined"
-              :style="{ backgroundColor: avatarColor(other?.nickname || '') }"
-            >
-              {{ initialOf(other?.nickname) }}
-            </el-avatar>
-            <span class="pl__seat-name">{{ other?.nickname || '对手' }}</span>
-            <span class="pl__seat-ready">{{ otherReady ? '已准备' : '未准备' }}</span>
-          </article>
-        </div>
-
-        <p class="pl__hint">{{ roomHint }}</p>
-
-        <div class="pl__actions">
-          <button
-            class="pl__ready"
-            type="button"
-            :class="{ 'is-cancel': myReady }"
-            :disabled="!canReady"
-            @click="toggleReady"
-          >
-            {{ readyLabel }}
-          </button>
-          <!-- 只有坐在别人房间里的一方才有「退出」：自己的房间不需要退出，
-               关掉页面等清扫收掉就行。 -->
-          <button v-if="!isOwner" class="pl__leave" type="button" :disabled="leaving" @click="onLeave">
-            {{ leaving ? '退出中…' : '退出房间' }}
-          </button>
-        </div>
-      </template>
-    </section>
-
-    <!-- 房号进房。放在房间卡下面而不是弹层里：它是最朴素的一条路——
-         对方不在线、或者你懒得一个个找，报个数字就够了。 -->
-    <section v-if="isOwner" class="pl__panel">
-      <div class="pl__panel-head">
-        <h2 class="pl__panel-title">有房号？直接进</h2>
-      </div>
-      <form class="pl__join" @submit.prevent="onJoin">
-        <input
-          v-model="joinCode"
-          class="pl__join-input"
-          type="text"
-          inputmode="numeric"
-          autocomplete="off"
-          maxlength="6"
-          placeholder="对方的六位房号"
-          @input="onJoinInput"
-        />
-        <button class="pl__join-btn" type="submit" :disabled="joinBusy || joinCode.length !== 6">
-          {{ joinBusy ? '进入中…' : '进入' }}
-        </button>
-      </form>
-      <p class="pl__join-tip">
-        正在自己的房间里时也能进别人的房，进去之后这边的房号会先放下。
-      </p>
-    </section>
-
-    <!-- 在线名单。原本这里只列关注的人，现在列全部在线的：
-         台球不该是只有互相关注才能玩的游戏，关注只是排在前面。 -->
-    <section v-if="isOwner" class="pl__panel">
-      <div class="pl__panel-head">
-        <h2 class="pl__panel-title">现在在线的人</h2>
-        <span v-if="online.length > 0" class="pl__panel-count">{{ online.length }} 人</span>
-      </div>
-
-      <div v-if="onlineLoading && online.length === 0" class="pl__skeleton">
-        <el-skeleton :rows="3" animated />
-      </div>
-
-      <p v-else-if="onlineFailed" class="pl__empty">
-        在线名单没加载出来。<button class="pl__retry" type="button" @click="retryOnline">重试</button>
-      </p>
-
-      <p v-else-if="online.length === 0" class="pl__empty">
-        现在没有其他人在线。把房号 <b>{{ roomCode }}</b> 发给熟人，他输进来就能坐到你对面。
-      </p>
-
-      <ul v-else class="pl__list">
-        <li v-for="person in online" :key="person.user_id" class="pl__row">
-          <el-avatar
-            :size="40"
-            :src="person.avatar || undefined"
-            :style="{ backgroundColor: avatarColor(person.nickname) }"
-          >
-            {{ initialOf(person.nickname) }}
-          </el-avatar>
-          <div class="pl__who">
-            <span class="pl__name">{{ person.nickname || '有人' }}</span>
-            <span class="pl__handle">{{ person.following ? '已关注' : '在线' }}</span>
+    <!-- 在别人的房间里没有名单（也不该从这里邀请第三个人），
+         右栏整块收起，房间卡占满整行。 -->
+    <div class="pl__body" :class="{ 'is-solo': !isOwner }">
+      <div class="pl__main">
+        <!-- 我的房间。这一块是整页的主角：点进台球就该看见自己的头像、
+             对面那个空位，以及一串能被念出去的数字。 -->
+        <section class="pl__room">
+          <div class="pl__room-head">
+            <h2 class="pl__room-title">{{ isOwner ? '我的房间' : '对方的房间' }}</h2>
+            <div class="pl__code">
+              <span class="pl__code-label">房号</span>
+              <span class="pl__code-value">{{ roomCode || '——' }}</span>
+              <button v-if="roomCode" class="pl__copy" type="button" @click="copyCode">
+                {{ copied ? '已复制' : '复制' }}
+              </button>
+            </div>
           </div>
-          <!-- 正在邀请的那个人按钮变成「已发送」并禁用。
-               不禁用的话连点两下会拿到 409，用户看到一句「你已有一条待接受的邀请」
-               却不知道说的是哪一条。 -->
-          <button
-            class="pl__invite"
-            type="button"
-            :disabled="busyId === person.user_id || isWaitingOn(person.user_id)"
-            @click="onInvite(person)"
-          >
-            {{ isWaitingOn(person.user_id) ? '已发送' : busyId === person.user_id ? '发送中…' : '邀请' }}
-          </button>
-        </li>
-      </ul>
-    </section>
 
-    <!-- 正在进行的对局。没有人在打时整块不出现：
-         一块永远空着的「现在没有对局」比不显示更占地方。
-         但刷新失败时仍然要出现，否则用户没有任何地方能重试。 -->
-    <section v-if="live.length > 0 || liveFailed" class="pl__panel">
-      <div class="pl__panel-head">
-        <h2 class="pl__panel-title">正在进行的对局</h2>
-        <button v-if="liveFailed" class="pl__retry" type="button" @click="retryLive">
-          刷新失败，重试
-        </button>
-        <span v-else class="pl__panel-count">{{ live.length }} 场</span>
+          <!-- 开房失败与「房间还没回来」要分开：前者要有重试入口，
+               后者只是慢一拍，弹个错误反而更慌。 -->
+          <p v-if="roomFailed" class="pl__empty">
+            房间没开出来。<button class="pl__retry" type="button" @click="retryRoom">重试</button>
+          </p>
+
+          <div v-else-if="!room" class="pl__room-skeleton">
+            <el-skeleton :rows="3" animated />
+          </div>
+
+          <template v-else>
+            <div class="pl__seats">
+              <!-- 自己这一侧永远在左，不管服务端分配的座位号是 0 还是 1。 -->
+              <article class="pl__seat is-me" :class="{ 'is-ready': myReady }">
+                <div class="pl__seat-tag">你</div>
+                <el-avatar
+                  :size="56"
+                  :src="me?.avatar || undefined"
+                  :style="{ backgroundColor: avatarColor(me?.nickname || '') }"
+                >
+                  {{ initialOf(me?.nickname) }}
+                </el-avatar>
+                <span class="pl__seat-name">{{ me?.nickname || '我' }}</span>
+                <span class="pl__seat-ready">{{ myReady ? '已准备' : '未准备' }}</span>
+              </article>
+
+              <!-- 空位用虚线框：一眼能看出「这里还能坐一个人」，
+                   而不是「对手掉线了」。 -->
+              <article v-if="otherEmpty" class="pl__seat is-empty">
+                <div class="pl__seat-tag">空位</div>
+                <div class="pl__seat-ghost">+</div>
+                <span class="pl__seat-name">等一个人</span>
+              </article>
+
+              <article v-else class="pl__seat" :class="{ 'is-ready': otherReady }">
+                <div class="pl__seat-tag">{{ isOwner ? '对手' : '房主' }}</div>
+                <el-avatar
+                  :size="56"
+                  :src="other?.avatar || undefined"
+                  :style="{ backgroundColor: avatarColor(other?.nickname || '') }"
+                >
+                  {{ initialOf(other?.nickname) }}
+                </el-avatar>
+                <span class="pl__seat-name">{{ other?.nickname || '对手' }}</span>
+                <span class="pl__seat-ready">{{ otherReady ? '已准备' : '未准备' }}</span>
+              </article>
+            </div>
+
+            <div class="pl__actions">
+              <button
+                class="pl__ready"
+                type="button"
+                :class="{ 'is-cancel': myReady }"
+                :disabled="!canReady"
+                @click="toggleReady"
+              >
+                {{ readyLabel }}
+              </button>
+              <!-- 客人给「退出」，房主给「换一间」：
+                   对面可能早就关了页面，房主不该被一间凑不齐的房锁住。 -->
+              <button
+                v-if="!isOwner"
+                class="pl__leave"
+                type="button"
+                :disabled="leaving"
+                @click="onLeave"
+              >
+                {{ leaving ? '退出中…' : '退出' }}
+              </button>
+              <button v-else class="pl__leave" type="button" :disabled="reopening" @click="onReopen">
+                {{ reopening ? '换房中…' : '换一间' }}
+              </button>
+            </div>
+          </template>
+        </section>
+
+        <!-- 正在进行的对局。没有人在打时整块不出现：
+             一块永远空着的「现在没有对局」比不显示更占地方。
+             但刷新失败时仍然要出现，否则用户没有任何地方能重试。 -->
+        <section v-if="live.length > 0 || liveFailed" class="pl__live">
+          <div class="pl__panel-head">
+            <h2 class="pl__panel-title">正在进行的对局</h2>
+            <button v-if="liveFailed" class="pl__retry" type="button" @click="retryLive">
+              刷新失败，重试
+            </button>
+            <span v-else class="pl__panel-count">{{ live.length }} 场</span>
+          </div>
+
+          <p v-if="live.length === 0" class="pl__empty">对局列表没加载出来。刷新一下试试。</p>
+
+          <ul v-else class="pl__list">
+            <li v-for="item in live" :key="item.match_id" class="pl__row">
+              <div class="pl__who">
+                <span class="pl__name">
+                  {{ nameOfPlayer(item, 0) }} vs {{ nameOfPlayer(item, 1) }}
+                </span>
+                <span class="pl__handle">
+                  第 {{ item.shot_seq }} 杆 · {{ item.spectators }}/{{ item.spectators_max }} 人
+                </span>
+              </div>
+              <!-- 自己正在打的那一局不能给「观战」：观战连接会以玩家身份
+                   被服务端安排到座位上，等于把自己的对局连接顶掉。 -->
+              <router-link
+                v-if="isMine(item)"
+                class="pl__watch"
+                :to="'/pool/match/' + String(item.match_id)"
+              >
+                回到对局
+              </router-link>
+              <router-link
+                v-else-if="item.spectators < item.spectators_max"
+                class="pl__watch"
+                :to="'/pool/watch/' + String(item.match_id)"
+              >
+                观战
+              </router-link>
+              <span v-else class="pl__watch is-full">已满</span>
+            </li>
+          </ul>
+        </section>
       </div>
 
-      <p v-if="live.length === 0" class="pl__empty">
-        对局列表没加载出来。刷新一下试试。
-      </p>
+      <!-- 在线名单竖在右边并单独滚动：人多的时候页面不该被这张名单拉着一起变长。
+           只列全部在线的（关注的人排前面）——台球不该是互相关注才能玩的游戏。 -->
+      <aside v-if="isOwner" class="pl__side">
+        <div class="pl__panel-head">
+          <h2 class="pl__panel-title">在线</h2>
+          <span v-if="online.length > 0" class="pl__panel-count">{{ online.length }}</span>
+        </div>
 
-      <ul v-else class="pl__list">
-        <li v-for="item in live" :key="item.match_id" class="pl__row">
-          <div class="pl__who">
-            <span class="pl__name">{{ nameOfPlayer(item, 0) }} vs {{ nameOfPlayer(item, 1) }}</span>
-            <span class="pl__handle">
-              第 {{ item.shot_seq }} 杆 · {{ item.spectators }}/{{ item.spectators_max }} 人在看
-            </span>
+        <div class="pl__side-body">
+          <div v-if="onlineLoading && online.length === 0" class="pl__skeleton">
+            <el-skeleton :rows="3" animated />
           </div>
-          <!-- 自己正在打的那一局不能给「观战」：观战连接会以玩家身份
-               被服务端安排到座位上，等于把自己的对局连接顶掉。
-               换成「回到对局」，点击行为与用户的意图也一致。 -->
-          <router-link
-            v-if="isMine(item)"
-            class="pl__watch"
-            :to="'/pool/match/' + String(item.match_id)"
-          >
-            回到对局
-          </router-link>
-          <router-link
-            v-else-if="item.spectators < item.spectators_max"
-            class="pl__watch"
-            :to="'/pool/watch/' + String(item.match_id)"
-          >
-            观战
-          </router-link>
-          <span v-else class="pl__watch is-full">已满</span>
-        </li>
-      </ul>
-    </section>
+
+          <p v-else-if="onlineFailed" class="pl__empty">
+            名单没加载出来。<button class="pl__retry" type="button" @click="retryOnline">重试</button>
+          </p>
+
+          <p v-else-if="online.length === 0" class="pl__empty">暂无其他人在线</p>
+
+          <ul v-else class="pl__list">
+            <li v-for="person in online" :key="person.user_id" class="pl__row">
+              <el-avatar
+                :size="36"
+                :src="person.avatar || undefined"
+                :style="{ backgroundColor: avatarColor(person.nickname) }"
+              >
+                {{ initialOf(person.nickname) }}
+              </el-avatar>
+              <span class="pl__name">{{ person.nickname || '有人' }}</span>
+              <!-- 正在邀请的那个人按钮变成「已发送」并禁用。
+                   不禁用的话连点两下会拿到 409，用户看到一句「你已有一条待接受的邀请」
+                   却不知道说的是哪一条。 -->
+              <button
+                class="pl__invite"
+                type="button"
+                :disabled="busyId === person.user_id || isWaitingOn(person.user_id)"
+                @click="onInvite(person)"
+              >
+                {{ isWaitingOn(person.user_id) ? '已发送' : busyId === person.user_id ? '发送中…' : '邀请' }}
+              </button>
+            </li>
+          </ul>
+        </div>
+      </aside>
+    </div>
   </div>
 </template>
 
@@ -231,12 +232,12 @@
 //
 // 页面上是三件同一层意思的事：
 //   - 我的房间：自己的头像 + 对面那个空位 + 房号。房号一报，人就能进来；
-//   - 输房号：别人把房号报给我时，我从这里进他的房间；
+//   - 输房号：别人把房号报给我时，点右上角那个按钮进他的房间；
 //   - 在线名单：懒得报数字就点一个人邀请他，走推送把他叫过来。
 //
 // 准备状态与开局都在这一页完成：双方都点准备，状态翻成 playing，直接跳对局页。
 // 中间不再有单独的「房间页」——多一层跳转只会让人找不到自己的房号。
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
@@ -245,6 +246,7 @@ import {
   getOnlineUsers,
   joinRoom,
   leaveRoom,
+  reopenRoom,
   setReady,
   type LiveMatch,
   type OnlineUser,
@@ -267,6 +269,7 @@ const room = ref<PoolRoom | null>(null)
 const roomFailed = ref(false)
 const busyReady = ref(false)
 const leaving = ref(false)
+const reopening = ref(false)
 const copied = ref(false)
 
 // 轮询间隔分两档，按「对面有没有人」切换。
@@ -343,39 +346,7 @@ const readyLabel = computed(() => {
   return '准备'
 })
 
-// roomHint 是房间卡下面那句状态说明。
-const roomHint = computed(() => {
-  if (!room.value) {
-    return ''
-  }
-  const status = room.value.status
-  if (status === 'playing') {
-    return '双方都准备好了，正在进入球台…'
-  }
-  if (status === 'finished') {
-    return '这一局已经结束了。回大厅会给你一间新房。'
-  }
-  if (status === 'expired') {
-    return '房间因为太久没人来，已经解散了。'
-  }
-  if (otherEmpty.value) {
-    if (!isOwner.value) {
-      return '房主还没进来。'
-    }
-    return '对面还空着。把房号 ' + roomCode.value + ' 报给对方，或者从下面在线名单里点一个人邀请。'
-  }
-  if (myReady.value && otherReady.value) {
-    return '双方都准备好了。'
-  }
-  if (myReady.value) {
-    return '你已准备好，等对手点准备。'
-  }
-  if (otherReady.value) {
-    return '对手已经准备好了，等你了。'
-  }
-  return '双方各点一次准备就开始。'
-})
-
+// initialOf 取昵称首字，头像里显示的那个字。
 function initialOf(name?: string): string {
   if (!name) {
     return ''
@@ -496,6 +467,26 @@ async function onLeave() {
   }
 }
 
+// onReopen 换一间新房：旧的那间作废，房号会变。
+//
+// 对面可能早就关了页面（断网、直接关机），而房间只要还有人轮询就一直活着。
+// 没有这个出口，房主只能等两小时那条清扫规则。
+async function onReopen() {
+  if (reopening.value) {
+    return
+  }
+  reopening.value = true
+  try {
+    const next = await reopenRoom()
+    applyRoom(next)
+    ElMessage.success('换好了，新的房号是 ' + next.room_code)
+  } catch {
+    // 拦截器已提示（对局进行中 / 服务不可用）。
+  } finally {
+    reopening.value = false
+  }
+}
+
 // copyCode 复制房号。手机上要把这串数字发出去，手打六位很容易错。
 async function copyCode() {
   const code = roomCode.value
@@ -516,8 +507,23 @@ async function copyCode() {
 
 // ── 输房号进别人的房间 ────────────────────────────────────
 
+const joinOpen = ref(false)
 const joinCode = ref('')
 const joinBusy = ref(false)
+const joinInput = ref<HTMLInputElement | null>(null)
+
+// toggleJoin 展开 / 收起输入条。展开时清空上一次没输完的房号，
+// 并把焦点直接放进输入框——手机上少点一次。
+function toggleJoin() {
+  joinOpen.value = !joinOpen.value
+  if (!joinOpen.value) {
+    return
+  }
+  joinCode.value = ''
+  void nextTick(() => {
+    joinInput.value?.focus()
+  })
+}
 
 // onJoinInput 只留数字：房号是六位数字，粘进来一串带空格的东西时
 // 直接过滤比提交后报「房号是六位数字」省一次往返。
@@ -535,6 +541,7 @@ async function onJoin() {
   try {
     const next = await joinRoom(joinCode.value)
     joinCode.value = ''
+    joinOpen.value = false
     applyRoom(next)
     ElMessage.success('进房了，两边都点准备就开始')
   } catch {
@@ -562,27 +569,41 @@ const ONLINE_MAX_MISSES = 2
 
 let onlineTimer: ReturnType<typeof setInterval> | null = null
 let onlineMisses = 0
+// onlineSeq 与房间轮询同理：弱网下后发的响应可能先到，
+// 只认最新一次，免得旧名单盖掉新名单。
+let onlineSeq = 0
 
 // loadOnline 拉一次在线名单。
 //
 // 只在第一次（手里还没有名单）时显示骨架屏：每十秒把列表换成骨架会让人
 // 以为页面在闪。后续刷新失败也不清空名单——上一份总比空白有用。
 async function loadOnline() {
+  const seq = onlineSeq + 1
+  onlineSeq = seq
   if (online.value.length === 0) {
     onlineLoading.value = true
   }
   try {
-    online.value = await getOnlineUsers()
+    const list = await getOnlineUsers()
+    if (seq !== onlineSeq) {
+      return
+    }
+    online.value = list
     onlineFailed.value = false
     onlineMisses = 0
   } catch {
+    if (seq !== onlineSeq) {
+      return
+    }
     onlineMisses += 1
     onlineFailed.value = true
     if (onlineMisses >= ONLINE_MAX_MISSES) {
       stopOnlineTimer()
     }
   } finally {
-    onlineLoading.value = false
+    if (seq === onlineSeq) {
+      onlineLoading.value = false
+    }
   }
 }
 
@@ -841,49 +862,136 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .pl {
-  max-width: 720px;
+  max-width: 1000px;
   margin: 0 auto;
 }
 
+/* ── 页头 ── */
+
 .pl__head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
 .pl__title {
-  margin: 0 0 6px;
+  margin: 0;
   font-size: 22px;
   font-weight: 700;
   color: var(--fs-text-1);
 }
 
-.pl__sub {
-  margin: 0;
-  font-size: 13px;
-  color: var(--fs-text-2);
+.pl__tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-/* 战绩入口做成描边按钮：它和「邀请」是同一条业务线上的两个动作，
-   但一个是「看过去的」，不该抢走视线。 */
-.pl__records {
-  flex: none;
+/* 右上角两个入口做成同一种描边按钮：都是「去别处」的次要动作，
+   不该抢走房间卡上「准备」的注意力。 */
+.pl__tool {
   height: 32px;
   padding: 0 14px;
   font-size: 13px;
   line-height: 30px;
   color: var(--fs-text-2);
   text-decoration: none;
+  background: var(--fs-surface);
   border: 1px solid var(--fs-line);
   border-radius: var(--fs-radius-sm);
+  cursor: pointer;
+}
+
+/* ── 输房号 ── */
+
+.pl__join {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.pl__join-input {
+  flex: 1;
+  height: 40px;
+  padding: 0 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 16px;
+  letter-spacing: 3px;
+  color: var(--fs-text-1);
+  background: var(--fs-surface);
+  border: 1px solid var(--fs-line);
+  border-radius: var(--fs-radius-sm);
+}
+
+.pl__join-input:focus {
+  border-color: var(--fs-primary);
+  outline: none;
+}
+
+.pl__join-btn {
+  flex: none;
+  height: 40px;
+  padding: 0 20px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fs-primary);
+  background: var(--fs-primary-weak);
+  border: none;
+  border-radius: var(--fs-radius-sm);
+  cursor: pointer;
+}
+
+.pl__join-btn:disabled {
+  color: var(--fs-text-3);
+  background: var(--fs-surface-hover);
+  cursor: default;
+}
+
+/* ── 两栏骨架：房间在左，在线名单在右 ── */
+
+.pl__body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 264px;
+  gap: 16px;
+  align-items: start;
+}
+
+.pl__body.is-solo {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.pl__main {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* 名单跟着页面滚到顶就不再往上走，且自己单独滚动：
+   人多时页面高度由房间卡决定，不会被名单拉长。 */
+.pl__side {
+  position: sticky;
+  top: 16px;
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 32px);
+  padding: 4px 14px 6px;
+  background: var(--fs-surface);
+  border: 1px solid var(--fs-line);
+  border-radius: var(--fs-radius);
+}
+
+.pl__side-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* ── 我的房间 ── */
 
 .pl__room {
-  margin-bottom: 16px;
   padding: 16px;
   background: var(--fs-surface);
   border: 1px solid var(--fs-line);
@@ -1023,13 +1131,6 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 
-.pl__hint {
-  margin: 14px 0 0;
-  font-size: 13px;
-  line-height: 1.7;
-  color: var(--fs-text-2);
-}
-
 .pl__actions {
   display: flex;
   align-items: center;
@@ -1079,95 +1180,17 @@ onBeforeUnmount(() => {
   cursor: default;
 }
 
-/* ── 房号进房 ── */
-
-.pl__join {
-  display: flex;
-  gap: 10px;
-  padding-bottom: 6px;
-}
-
-.pl__join-input {
-  flex: 1;
-  height: 40px;
-  padding: 0 12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 16px;
-  letter-spacing: 3px;
-  color: var(--fs-text-1);
-  background: var(--fs-surface);
-  border: 1px solid var(--fs-line);
-  border-radius: var(--fs-radius-sm);
-}
-
-.pl__join-input:focus {
-  border-color: var(--fs-primary);
-  outline: none;
-}
-
-.pl__join-btn {
-  flex: none;
-  height: 40px;
-  padding: 0 20px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--fs-primary);
-  background: var(--fs-primary-weak);
-  border: none;
-  border-radius: var(--fs-radius-sm);
-  cursor: pointer;
-}
-
-.pl__join-btn:disabled {
-  color: var(--fs-text-3);
-  background: var(--fs-surface-hover);
-  cursor: default;
-}
-
-.pl__join-tip {
-  margin: 0 0 10px;
-  font-size: 12px;
-  line-height: 1.7;
-  color: var(--fs-text-3);
-}
-
-/* ── 通用面板 ── */
-
-/* 观战入口做成实心小按钮：同一块面板里「邀请」是主动作，
-   而「观战」是看一眼别人的对局，属于次要动作。 */
-.pl__watch {
-  flex: none;
-  height: 28px;
-  padding: 0 12px;
-  font-size: 12px;
-  line-height: 28px;
-  color: #fff;
-  text-decoration: none;
-  background: var(--fs-primary);
-  border-radius: var(--fs-radius-sm);
-}
-
-/* 名额满了：与按钮同尺寸，但不可点也不像按钮。 */
-.pl__watch.is-full {
-  color: var(--fs-text-3);
-  background: var(--fs-line-soft);
-}
+/* ── 等待邀请被接受 ── */
 
 .pl__waiting {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: 16px;
   padding: 14px 16px;
   background: var(--fs-primary-weak);
   border-radius: var(--fs-radius);
-}
-
-.pl__waiting-main {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
 }
 
 .pl__waiting-label {
@@ -1196,8 +1219,9 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
-.pl__panel {
-  margin-bottom: 16px;
+/* ── 对局面板与列表 ── */
+
+.pl__live {
   padding: 4px 16px 8px;
   background: var(--fs-surface);
   border: 1px solid var(--fs-line);
@@ -1252,32 +1276,33 @@ onBeforeUnmount(() => {
 .pl__row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 0;
+  gap: 10px;
+  padding: 10px 0;
 }
 
 /* 分隔线用相邻兄弟而不是 :not(:last-of-type)：
-   列表里全是 li，用伪类要额外算一次「最后一项」，相邻兄弟写法更直白，
-   以后中间插别的元素也不会错位。 */
+   列表里全是 li，相邻兄弟写法更直白，以后中间插别的元素也不会错位。 */
 .pl__row + .pl__row {
   border-top: 1px solid var(--fs-line);
 }
 
 .pl__who {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
-  flex: 1;
 }
 
 .pl__name {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--fs-text-1);
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fs-text-1);
 }
 
 .pl__handle {
@@ -1285,10 +1310,30 @@ onBeforeUnmount(() => {
   color: var(--fs-text-3);
 }
 
+/* 观战入口做成实心小按钮：同一块面板里「邀请」是主动作，
+   而「观战」是看一眼别人的对局，属于次要动作。 */
+.pl__watch {
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+  line-height: 28px;
+  color: #fff;
+  text-decoration: none;
+  background: var(--fs-primary);
+  border-radius: var(--fs-radius-sm);
+}
+
+/* 名额满了：与按钮同尺寸，但不可点也不像按钮。 */
+.pl__watch.is-full {
+  color: var(--fs-text-3);
+  background: var(--fs-line-soft);
+}
+
 .pl__invite {
   flex: none;
   height: 32px;
-  padding: 0 16px;
+  padding: 0 14px;
   font-size: 13px;
   font-weight: 600;
   color: var(--fs-primary);
@@ -1304,12 +1349,20 @@ onBeforeUnmount(() => {
   cursor: default;
 }
 
-@media (max-width: 560px) {
-  .pl__head {
-    flex-direction: column;
-    align-items: stretch;
+@media (max-width: 860px) {
+  /* 窄屏堆成一列：右边那栏接在房间卡下面，仍然自己滚动，
+     不然几十个在线的人会把页面拉到很长。 */
+  .pl__body {
+    grid-template-columns: minmax(0, 1fr);
   }
 
+  .pl__side {
+    position: static;
+    max-height: 320px;
+  }
+}
+
+@media (max-width: 560px) {
   /* 手机竖屏下房号与标题挤在同一行会换行成两截，
      干脆让它单独占一行：这串数字是这一页最需要被看清的东西。 */
   .pl__room-head {

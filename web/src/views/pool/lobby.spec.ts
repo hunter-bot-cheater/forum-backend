@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   online: vi.fn(),
   join: vi.fn(),
   leave: vi.fn(),
+  reopen: vi.fn(),
   ready: vi.fn(),
   invite: vi.fn(),
   replace: vi.fn(),
@@ -29,6 +30,7 @@ vi.mock('@/api/pool', () => ({
   getOnlineUsers: (...args: unknown[]) => mocks.online(...args),
   joinRoom: (...args: unknown[]) => mocks.join(...args),
   leaveRoom: (...args: unknown[]) => mocks.leave(...args),
+  reopenRoom: (...args: unknown[]) => mocks.reopen(...args),
   setReady: (...args: unknown[]) => mocks.ready(...args),
   listPendingInvites: vi.fn(() => Promise.resolve([])),
   createInvite: (...args: unknown[]) => mocks.invite(...args),
@@ -188,8 +190,6 @@ describe('大厅的房间', () => {
     // 对面空着：虚位卡把「还能坐一个人」说出来，而不是「对手掉线了」。
     expect(seats[1].classes()).toContain('is-empty')
     expect(seats[1].text()).toContain('空位')
-    // 空位时提示要把房号报出去，这一句里必须带上那串数字。
-    expect(wrapper.find('.pl__hint').text()).toContain('123456')
   })
 
   it('对面没人时准备按钮是禁用的，文案说明在等谁', async () => {
@@ -200,15 +200,15 @@ describe('大厅的房间', () => {
     expect(button.attributes('disabled')).toBeDefined()
   })
 
-  it('对方进来之后画出他的资料，双方准备后提示「都准备好了」', async () => {
+  it('对方进来之后画出他的资料，双方准备后两边都标成已准备', async () => {
     mocks.myRoom.mockResolvedValue(occupied({ ready: [true, true] }))
     const { wrapper } = await mountPage()
 
     const seats = wrapper.findAll('.pl__seat')
     expect(seats[1].classes()).not.toContain('is-empty')
     expect(seats[1].text()).toContain('小满')
+    expect(seats[0].classes()).toContain('is-ready')
     expect(seats[1].classes()).toContain('is-ready')
-    expect(wrapper.find('.pl__hint').text()).toContain('双方都准备好了')
   })
 
   it('座位号是 1 时自己仍然排在左边，标题说明这是对方的房间', async () => {
@@ -320,7 +320,7 @@ describe('大厅的房间', () => {
 })
 
 describe('输房号进房', () => {
-  it('不满六位时进不去，满六位就把房号发出去', async () => {
+  it('输入条平时收着，点「输入房号」才展开，满六位就把房号发出去', async () => {
     mocks.join.mockResolvedValue(
       occupied({
         seat: 1,
@@ -332,6 +332,10 @@ describe('输房号进房', () => {
     )
     const { wrapper } = await mountPage()
 
+    // 不常驻：页面最显眼的位置留给房间卡。
+    expect(wrapper.find('.pl__join').exists()).toBe(false)
+    await wrapper.findAll('.pl__tool')[0].trigger('click')
+
     const input = wrapper.find('.pl__join-input')
     await input.setValue('12345')
     expect(wrapper.find('.pl__join-btn').attributes('disabled')).toBeDefined()
@@ -341,18 +345,34 @@ describe('输房号进房', () => {
     await flushPromises()
 
     expect(mocks.join).toHaveBeenCalledWith('123456')
-    // 进房之后整份快照换掉：标题变成「你在对方的房间里」。
+    // 进房之后整份快照换掉：标题变成「对方的房间」，输入条收了回去。
     expect(wrapper.find('.pl__room-title').text()).toContain('对方的房间')
+    expect(wrapper.find('.pl__join').exists()).toBe(false)
   })
 
   it('输入里的非数字被过滤掉，长度也只留六位', async () => {
     const { wrapper } = await mountPage()
-    const input = wrapper.find('.pl__join-input')
+    await wrapper.findAll('.pl__tool')[0].trigger('click')
 
+    const input = wrapper.find('.pl__join-input')
     await input.setValue('12 34-56 78')
     await input.trigger('input')
 
     expect((input.element as HTMLInputElement).value).toBe('123456')
+  })
+})
+
+describe('换一间房', () => {
+  it('对面一直不进来时可以换一间，房号跟着更新', async () => {
+    mocks.reopen.mockResolvedValue(room({ room_code: '654321' }))
+    const { wrapper } = await mountPage()
+
+    expect(wrapper.find('.pl__code-value').text()).toBe('123456')
+    await wrapper.find('.pl__leave').trigger('click')
+    await flushPromises()
+
+    expect(mocks.reopen).toHaveBeenCalled()
+    expect(wrapper.find('.pl__code-value').text()).toBe('654321')
   })
 })
 
@@ -369,8 +389,6 @@ describe('在线名单', () => {
 
     const row = wrapper.find('.pl__row')
     expect(row.text()).toContain('陆陆')
-    // 没关注的人也照常出现在名单里，这正是这一轮要去掉的限制。
-    expect(row.text()).toContain('在线')
 
     await row.find('.pl__invite').trigger('click')
     await flushPromises()
@@ -380,10 +398,12 @@ describe('在线名单', () => {
     expect(wrapper.find('.pl__invite').text()).toBe('已发送')
   })
 
-  it('没人在线时告诉用户把房号发出去', async () => {
+  it('没人在线时只说这一句，不再把房号念一遍', async () => {
     const { wrapper } = await mountPage()
 
-    expect(wrapper.find('.pl__empty').text()).toContain('123456')
+    const empty = wrapper.find('.pl__empty')
+    expect(empty.text()).toBe('暂无其他人在线')
+    expect(empty.text()).not.toContain('123456')
   })
 
   it('名单拉失败时给重试入口，不当成「没人在线」', async () => {
@@ -445,7 +465,7 @@ describe('大厅的观战区块', () => {
     mocks.live.mockRejectedValueOnce(new Error('boom'))
     const { wrapper } = await mountPage()
 
-    const livePanel = wrapper.findAll('.pl__panel').at(-1)
+    const livePanel = wrapper.find('.pl__live')
     expect(livePanel?.find('.pl__retry').exists()).toBe(true)
 
     // 第二次让它慢一点回，好在「还在路上」的那一刻看面板状态。
@@ -460,12 +480,12 @@ describe('大厅的观战区块', () => {
     await flushPromises()
 
     // 请求还没回来：面板和重试按钮都还在。
-    expect(wrapper.findAll('.pl__panel').at(-1)?.find('.pl__retry').exists()).toBe(true)
+    expect(wrapper.find('.pl__live').find('.pl__retry').exists()).toBe(true)
 
     release([liveMatch()])
     await flushPromises()
 
-    expect(wrapper.findAll('.pl__panel').at(-1)?.find('.pl__retry').exists()).toBe(false)
+    expect(wrapper.find('.pl__live').find('.pl__retry').exists()).toBe(false)
     expect(wrapper.findAll('.pl__watch')).toHaveLength(1)
   })
 })

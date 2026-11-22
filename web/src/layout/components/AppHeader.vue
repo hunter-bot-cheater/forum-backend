@@ -265,6 +265,8 @@ async function logout() {
   padding: 6px 12px;
   border-radius: var(--fs-radius-sm);
   font-size: 15px;
+  /* 不许换行：390px 的手机上导航被挤窄时，中文链接会一字一行地竖起来。 */
+  white-space: nowrap;
   color: var(--fs-text-2);
   transition: color 0.15s, background-color 0.15s;
 }
@@ -397,6 +399,28 @@ async function logout() {
 
   .hdr__write-icon {
     margin-right: 0;
+  }
+}
+
+/* 更窄的手机（390px 及以下）：三个导航、写文章、两个图标、头像一共六块，
+   默认间距加标题就超过一屏。压紧内边距与间距，让它们落在同一行里。 */
+@media (max-width: 480px) {
+  .hdr__inner {
+    gap: 8px;
+    padding: 0 10px;
+  }
+
+  .hdr__nav {
+    gap: 0;
+  }
+
+  .hdr__link {
+    padding: 6px 8px;
+    font-size: 14px;
+  }
+
+  .hdr__actions {
+    gap: 2px;
   }
 }
 </style>
