@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"sort"
@@ -74,19 +75,39 @@ func (h *Handler) MyRoom(c *gin.Context) {
 	response.OK(c, toRoomResp(snapshot))
 }
 
-// myRoom 拿到我当前所在的等待房间，没有就开一个。
+// myRoom 拿到我当前所在的那一局，没有就开一间新房。
 //
-// 「我当前的房间」优先取库里已有的：页面每次刷新都调它，
+// 「我当前的」优先取库里已有的：页面每次刷新都调它，
 // 每次都新建的话房号会一直变，刚报给别人的那个立刻作废。
+//
+// 正在打的对局也算「我的房间」：大厅每两秒问一次，若这里只认 waiting，
+// 开局那一刻就会另开一间新房，房主永远进不了自己的对局。
 func (h *Handler) myRoom(ctx context.Context, userID uint) (*Match, Seat, error) {
-	row, err := h.store.WaitingMatchFor(ctx, userID)
-	if err == nil {
-		return h.attachRoom(ctx, row, userID)
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
+	row, err := h.store.CurrentMatchFor(ctx, userID)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, 0, err
 	}
+	if err == nil {
+		if row.Status != model.PoolStatusPlaying {
+			return h.attachRoom(ctx, row, userID)
+		}
+		// 已经在打：内存里那一局直接给他，快照里的 status 是 playing，
+		// 前端看到就会跳回球台。
+		if match, ok := h.manager.Get(row.ID); ok {
+			return match, seatOfRow(row, userID), nil
+		}
+		// 内存里没有这一局（进程重启过）：球位已经找不回来，给他一间新房，
+		// 总比让他卡在一句「对局不存在」上强。
+	}
 	return h.openRoom(ctx, userID)
+}
+
+// seatOfRow 按库里的那条记录算出某人坐哪边。房主恒为座位 0。
+func seatOfRow(row *model.PoolMatch, userID uint) Seat {
+	if row.P1ID != nil && *row.P1ID == userID {
+		return Seat1
+	}
+	return Seat0
 }
 
 // attachRoom 保证库里这条房间在内存里有对应的 actor，并算出我坐哪。
@@ -94,10 +115,7 @@ func (h *Handler) myRoom(ctx context.Context, userID uint) (*Match, Seat, error)
 // 进程重启过（或者这局刚被清扫掉）时库里还有行、内存里却没有 actor：
 // 这时按库里记的两个人把房间重建出来，否则刷新一下页面就成「房间不存在」。
 func (h *Handler) attachRoom(ctx context.Context, row *model.PoolMatch, userID uint) (*Match, Seat, error) {
-	seat := Seat0
-	if row.P1ID != nil && *row.P1ID == userID {
-		seat = Seat1
-	}
+	seat := seatOfRow(row, userID)
 
 	if match, ok := h.manager.Get(row.ID); ok {
 		return match, seat, nil
@@ -250,7 +268,84 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 		Data: roomJoinedResp{MatchID: row.ID, RoomCode: row.RoomCode, Player: toPlayerResp(brief)},
 	})
 
+	// 我自己原来那间房没用了：一个人同时只能在一间房里等。
+	h.retireOwnRooms(ctx, userID, row.ID)
+
 	h.writeRoom(c, match, Seat1)
+}
+
+// retireOwnRooms 把「我自己开的那几间房」标成过期，并摘掉内存里的 actor。
+//
+// 一个人同时只能在一间房里等：进了别人的房间之后，自己原来那间还留着的话，
+// 「我的房间」会在两行之间来回跳（按 id 取最新的一条），
+// 表现为「刚报给别人的房号突然变成了一个空房间的房号」。
+func (h *Handler) retireOwnRooms(ctx context.Context, userID, keepID uint) {
+	ids, err := h.store.ExpireOwnRooms(ctx, userID, keepID)
+	if err != nil {
+		// 收不掉只是多留一间空房，等清扫兜底；不影响他已经在别人的房间里。
+		slog.WarnContext(ctx, "expire own rooms", "user_id", userID, "error", err)
+		return
+	}
+	for _, id := range ids {
+		h.manager.Remove(id)
+	}
+}
+
+// LeaveRoom godoc
+// @Summary      退出别人的房间
+// @Description  只有坐在别人房间里的那一方能退；自己的房间不适用（关掉页面等它过期即可）。
+// @Tags         pool
+// @Produce      json
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=map[string]bool}
+// @Failure      400  {string}  string  "这是你自己的房间"
+// @Failure      401  {string}  string  "未登录"
+// @Failure      404  {string}  string  "你不在任何房间里"
+// @Security     Bearer
+// @Router       /pool/rooms/leave [post]
+// LeaveRoom 处理 POST /api/pool/rooms/leave。
+//
+// 有这个入口是因为邀请失败时会说「你已经在别人的房间里了，先退出来」：
+// 说了却没法退，那句话就成了死胡同。
+func (h *Handler) LeaveRoom(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := httputil.CurrentUserID(c)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "未登录")
+		return
+	}
+
+	row, err := h.store.GuestRoomFor(ctx, userID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			response.Error(c, http.StatusNotFound, "你没有在别人的房间里")
+			return
+		}
+		httputil.LogRequestError(c, "find guest room", err)
+		response.Error(c, http.StatusInternalServerError, "服务暂时不可用")
+		return
+	}
+
+	left, err := h.store.LeaveRoom(ctx, row.ID, userID)
+	if err != nil {
+		httputil.LogRequestError(c, "leave room", err)
+		response.Error(c, http.StatusInternalServerError, "退出失败，请重试")
+		return
+	}
+	if !left {
+		// 座位已经不是他的了（房主换了人，或者房间刚开打）。
+		response.Error(c, http.StatusNotFound, "你不在这个房间里了")
+		return
+	}
+
+	// 内存里把那个座位清空：房主那一屏两秒内就会看到空位。
+	// 这里不发推送——房间页本来就在轮询，为一次退房多一条协议不值得。
+	if match, ok := h.manager.Get(row.ID); ok {
+		if err := match.FillSeat(Seat1, PlayerBrief{}); err != nil {
+			slog.WarnContext(ctx, "clear room seat", "match_id", row.ID, "error", err)
+		}
+	}
+
+	response.OK(c, map[string]bool{"left": true})
 }
 
 // writeRoom 取一份房间快照写进响应。取不到（房间刚被关掉）时回 404。

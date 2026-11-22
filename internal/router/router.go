@@ -388,6 +388,7 @@ func New(deps Deps) (*gin.Engine, error) {
 			auth.POST("/pool/invites/:id/decline", poolRest.DeclineInvite)
 			auth.POST("/pool/rooms/my", poolRest.MyRoom)
 			auth.POST("/pool/rooms/join", poolRest.JoinRoom)
+			auth.POST("/pool/rooms/leave", poolRest.LeaveRoom)
 			auth.GET("/pool/online", poolRest.Online)
 			auth.GET("/pool/rooms/:id", poolRest.Room)
 			auth.POST("/pool/rooms/:id/ready", poolRest.Ready)

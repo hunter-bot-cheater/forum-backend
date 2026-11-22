@@ -505,6 +505,172 @@ func TestAcceptInviteRejectedWhenSeatTaken(t *testing.T) {
 	}
 }
 
+// 进了别人的房间要能退出来：退房之后座位空着，自己可以回自己的房间。
+//
+// 没有这个入口，「你已经在别人的房间里了，先退出来」就是一句死胡同。
+func TestLeaveRoomFreesGuestSeat(t *testing.T) {
+	db := testutil.NewDB(t)
+	engine := newEngine(t, db, newRoomManager(t), map[uint]string{7: "甲", 8: "乙"}, &fakeHub{})
+
+	room := openRoomFor(t, engine, 7)
+	if status, body := postJSON(t, engine, "/api/pool/rooms/join", 8,
+		joinRoomReq{RoomCode: room.RoomCode}); status != http.StatusOK {
+		t.Fatalf("进房失败 %d：%s", status, body)
+	}
+
+	status, body := postJSON(t, engine, "/api/pool/rooms/leave", 8, nil)
+	if status != http.StatusOK {
+		t.Fatalf("退房失败 %d：%s", status, body)
+	}
+
+	var row model.PoolMatch
+	if err := db.First(&row, room.MatchID).Error; err != nil {
+		t.Fatalf("读回房间失败：%v", err)
+	}
+	if row.P1ID != nil {
+		t.Errorf("退房后 p1_id = %v，期望空着", row.P1ID)
+	}
+
+	// 房主那边看到的是空位：座位 1 的资料被清掉了，准备标记也回到 false。
+	status, body = postJSON(t, engine, "/api/pool/rooms/my", 7, nil)
+	if status != http.StatusOK {
+		t.Fatalf("取房主房间失败 %d：%s", status, body)
+	}
+	var owner roomResp
+	decodeData(t, body, &owner)
+	if owner.Players[1].UserID != 0 {
+		t.Errorf("房主那边座位 1 还坐着人：%+v", owner.Players[1])
+	}
+	if owner.Ready != [2]bool{false, false} {
+		t.Errorf("准备状态 = %v，期望都没准备", owner.Ready)
+	}
+
+	// 退房的人回到自己的房间：新开一间，座位 0 是他自己。
+	mine := openRoomFor(t, engine, 8)
+	if mine.MatchID == room.MatchID || mine.Seat != Seat0 {
+		t.Errorf("退房后该有自己的房间，实际 %+v", mine)
+	}
+}
+
+// 房主没有「退房」这个动作：退房只认「我是客人」的那种房间。
+func TestLeaveRoomIgnoresOwnRoom(t *testing.T) {
+	db := testutil.NewDB(t)
+	engine := newEngine(t, db, newRoomManager(t), map[uint]string{7: "甲"}, &fakeHub{})
+
+	room := openRoomFor(t, engine, 7)
+
+	status, body := postJSON(t, engine, "/api/pool/rooms/leave", 7, nil)
+	if status != http.StatusNotFound {
+		t.Fatalf("房主退房应当 404（他没有在别人的房间里），实际 %d：%s", status, body)
+	}
+
+	// 房间还在，房号没变。
+	var row model.PoolMatch
+	if err := db.First(&row, room.MatchID).Error; err != nil {
+		t.Fatalf("读回房间失败：%v", err)
+	}
+	if row.Status != model.PoolStatusWaiting || row.RoomCode != room.RoomCode {
+		t.Errorf("房主的房间被动了：%+v", row)
+	}
+
+	// 不在任何房间里的人调它也一样是 404。
+	status, body = postJSON(t, engine, "/api/pool/rooms/leave", 9, nil)
+	if status != http.StatusNotFound {
+		t.Errorf("不在房里应当 404，实际 %d：%s", status, body)
+	}
+}
+
+// 进别人的房间之后，自己原来那间房要作废。
+//
+// 不作废的话一个人同时待在两间 waiting 房里，「我的房间」按 id 取最新一条，
+// 会在两间之间来回跳——刚报给别人的房号可能突然变成一个空房间的房号。
+func TestJoinRoomRetiresOwnRoom(t *testing.T) {
+	db := testutil.NewDB(t)
+	engine := newEngine(t, db, newRoomManager(t), map[uint]string{7: "甲", 8: "乙"}, &fakeHub{})
+
+	// 两个人都先有自己的房间（这就是「点进台球就有一间房」的常态）。
+	mine := openRoomFor(t, engine, 8)
+	theirs := openRoomFor(t, engine, 7)
+	if mine.MatchID == theirs.MatchID {
+		t.Fatalf("两个人拿到同一间房：%d", mine.MatchID)
+	}
+
+	if status, body := postJSON(t, engine, "/api/pool/rooms/join", 8,
+		joinRoomReq{RoomCode: theirs.RoomCode}); status != http.StatusOK {
+		t.Fatalf("进房失败 %d：%s", status, body)
+	}
+
+	// 自己那间在库里已经过期，内存里的 actor 也被摘掉了。
+	var row model.PoolMatch
+	if err := db.First(&row, mine.MatchID).Error; err != nil {
+		t.Fatalf("读回旧房间失败：%v", err)
+	}
+	if row.Status != model.PoolStatusExpired {
+		t.Errorf("旧房间 status = %q，期望 expired", row.Status)
+	}
+
+	// 现在「我的房间」唯一地指向对方那间，不会再跳回去。
+	after := openRoomFor(t, engine, 8)
+	if after.MatchID != theirs.MatchID || after.Seat != Seat1 {
+		t.Fatalf("我的房间 = %+v，期望还在对方的 %d（座位 1）", after, theirs.MatchID)
+	}
+}
+
+// 开局之后大厅不该另开一间新房，而是把正在打的那一局还回来。
+//
+// 大厅每两秒问一次「我的房间」。若这里只认 waiting，双方准备好、房间变成
+// playing 的那一刻，房主这边就会拿到一间新房——人留在大厅，对局空转。
+func TestMyRoomReturnsPlayingMatch(t *testing.T) {
+	db := testutil.NewDB(t)
+	// 对手设为在线：否则邀请会先被「对方不在线」挡掉，验不到「对局中不能约人」。
+	hub := &fakeHub{}
+	hub.setOnline(8)
+	engine := newEngine(t, db, newRoomManager(t), map[uint]string{7: "甲", 8: "乙"}, hub)
+
+	room := openRoomFor(t, engine, 7)
+	if status, body := postJSON(t, engine, "/api/pool/rooms/join", 8,
+		joinRoomReq{RoomCode: room.RoomCode}); status != http.StatusOK {
+		t.Fatalf("进房失败 %d：%s", status, body)
+	}
+
+	path := fmt.Sprintf("/api/pool/rooms/%d/ready", room.MatchID)
+	for _, userID := range []uint{7, 8} {
+		if status, body := postJSON(t, engine, path, userID, readyReq{Ready: true}); status != http.StatusOK {
+			t.Fatalf("准备失败 %d：%s", status, body)
+		}
+	}
+
+	status, body := postJSON(t, engine, "/api/pool/rooms/my", 7, nil)
+	if status != http.StatusOK {
+		t.Fatalf("取我的房间失败 %d：%s", status, body)
+	}
+	var mine roomResp
+	decodeData(t, body, &mine)
+	if mine.MatchID != room.MatchID {
+		t.Fatalf("开局后又开了新房：%d，期望还在 %d", mine.MatchID, room.MatchID)
+	}
+	// status 是 playing，前端据此跳对局页。
+	if mine.Status != model.PoolStatusPlaying {
+		t.Errorf("status = %q，期望 playing", mine.Status)
+	}
+
+	// 库里只有这一局，没有多出来的 waiting 行。
+	var count int64
+	if err := db.Model(&model.PoolMatch{}).
+		Where("status = ?", model.PoolStatusWaiting).Count(&count).Error; err != nil {
+		t.Fatalf("统计房间失败：%v", err)
+	}
+	if count != 0 {
+		t.Errorf("库里多出 %d 间 waiting 房间", count)
+	}
+
+	// 正在对局的人不能再约别人：那句「打完再约」比「先退出来」准确。
+	status, body = postJSON(t, engine, "/api/pool/invites", 7, inviteCreateReq{ToUserID: 8})
+	if status != http.StatusConflict {
+		t.Errorf("对局中发邀请应当 409，实际 %d：%s", status, body)
+	}
+}
+
 // 两个人都在自己的房间里点准备，双方齐了就把房间推进成对局。
 func TestBothReadyStartsMatch(t *testing.T) {
 	db := testutil.NewDB(t)

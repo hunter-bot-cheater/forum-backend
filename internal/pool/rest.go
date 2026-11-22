@@ -96,6 +96,11 @@ func (h *Handler) CreateInvite(c *gin.Context) {
 		response.Error(c, http.StatusInternalServerError, "开房失败，请重试")
 		return
 	}
+	// myRoom 也会把「正在打的那一局」还回来，那种情况下邀请没有意义。
+	if info, ok := match.Live(); !ok || info.Status != model.PoolStatusWaiting {
+		response.Error(c, http.StatusConflict, "你正在对局中，打完再约")
+		return
+	}
 	if seat != Seat0 {
 		response.Error(c, http.StatusConflict, "你已经在别人的房间里了，先退出来")
 		return
@@ -245,6 +250,9 @@ func (h *Handler) AcceptInvite(c *gin.Context) {
 		response.Error(c, http.StatusInternalServerError, "进房失败，请重试")
 		return
 	}
+
+	// 接受邀请的人原来那间房也要作废：一个人同时只能在一间房里等。
+	h.retireOwnRooms(ctx, userID, invite.MatchID)
 
 	// 通知邀请人：对方接受了，房间页会立刻把空位换成人。
 	h.hub.Push(invite.FromID, realtime.PushMessage{

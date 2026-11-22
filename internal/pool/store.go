@@ -44,10 +44,28 @@ func (s *Store) CreateMatch(ctx context.Context, p0 uint, p1 *uint, roomCode str
 	return match, nil
 }
 
-// WaitingMatchFor 找这个人当前所在的等待房间（房主或刚进来的那一方）。
+// CurrentMatchFor 找这个人当前所在的房间或对局：还没开打的房间优先，其次正在打的那一局。
 //
-// 一个用户同时只该有一个等待房间，但历史上可能有多个（邀请流程留下的），
+// 必须把 playing 也找出来，否则「开局之后大厅每两秒轮询一次」会在第一轮就发现
+// 自己那间 waiting 的房间不见了（它已经变成 playing），于是另开一间新房——
+// 房主被留在大厅里，而他的对局在后台空转。刷新页面后回大厅也是同一个坑。
+//
+// 一个用户理论上只有一条 waiting，但历史上可能有多条（邀请流程留下的），
 // 取最新的一条：旧的那些已经没人会去点了，等清扫把它们标掉。
+func (s *Store) CurrentMatchFor(ctx context.Context, userID uint) (*model.PoolMatch, error) {
+	var match model.PoolMatch
+	err := s.db.WithContext(ctx).
+		Where("status IN ? AND (p0_id = ? OR p1_id = ?)",
+			[]string{model.PoolStatusWaiting, model.PoolStatusPlaying}, userID, userID).
+		Order("id DESC").
+		First(&match).Error
+	if err != nil {
+		return nil, err
+	}
+	return &match, nil
+}
+
+// WaitingMatchFor 只找还没开打的房间。邀请与被邀请这两条链路用不到正在打的对局。
 func (s *Store) WaitingMatchFor(ctx context.Context, userID uint) (*model.PoolMatch, error) {
 	var match model.PoolMatch
 	err := s.db.WithContext(ctx).
@@ -84,6 +102,63 @@ func (s *Store) JoinRoom(ctx context.Context, matchID, userID uint) (bool, error
 		Where("id = ? AND status = ? AND p1_id IS NULL AND p0_id <> ?",
 			matchID, model.PoolStatusWaiting, userID).
 		Update("p1_id", userID)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
+}
+
+// GuestRoomFor 找这个人以「客人」身份待着的房间（座位 1 是他）。
+//
+// 退房只认这一种：自己的房间没有「退出」这个动作，而一个人可能同时
+// 既是自己房间的房主、又是别人房间的客人，按「最新一条」找会拿错。
+func (s *Store) GuestRoomFor(ctx context.Context, userID uint) (*model.PoolMatch, error) {
+	var match model.PoolMatch
+	err := s.db.WithContext(ctx).
+		Where("status = ? AND p1_id = ?", model.PoolStatusWaiting, userID).
+		Order("id DESC").
+		First(&match).Error
+	if err != nil {
+		return nil, err
+	}
+	return &match, nil
+}
+
+// ExpireOwnRooms 把这个人自己开的、还没开打的房间标成过期，keepID 那间留着。
+//
+// 一个人同时只能在一间房里等。进了别人的房间之后，自己原来那间就该作废：
+// 留着它，「我的房间」会在两行之间来回跳——严重的时候刚报给别人的房号
+// 会突然变成一个空房间的房号。
+func (s *Store) ExpireOwnRooms(ctx context.Context, userID, keepID uint) ([]uint, error) {
+	var ids []uint
+	err := s.db.WithContext(ctx).Model(&model.PoolMatch{}).
+		Where("status = ? AND p0_id = ? AND id <> ?", model.PoolStatusWaiting, userID, keepID).
+		Pluck("id", &ids).Error
+	if err != nil {
+		return nil, fmt.Errorf("load own rooms: %w", err)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	err = s.db.WithContext(ctx).Model(&model.PoolMatch{}).
+		Where("id IN ? AND status = ?", ids, model.PoolStatusWaiting).
+		Update("status", model.PoolStatusExpired).Error
+	if err != nil {
+		return nil, fmt.Errorf("expire own rooms: %w", err)
+	}
+	return ids, nil
+}
+
+// LeaveRoom 把 userID 从座位 1 上摘下来，房间回到「只有房主」的样子。
+//
+// 只认 p1_id = userID 的那一行：房主不能靠这个接口解散自己的房间，
+// 而「我以为我在这间房里」与实际不符时（记错了房号、房间已经开打），
+// 这里返回 false，调用方按 404 处理。
+func (s *Store) LeaveRoom(ctx context.Context, matchID, userID uint) (bool, error) {
+	result := s.db.WithContext(ctx).Model(&model.PoolMatch{}).
+		Where("id = ? AND status = ? AND p1_id = ?", matchID, model.PoolStatusWaiting, userID).
+		Update("p1_id", nil)
 	if result.Error != nil {
 		return false, result.Error
 	}
