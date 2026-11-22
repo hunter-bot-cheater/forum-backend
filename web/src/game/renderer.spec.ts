@@ -7,7 +7,7 @@ import {
   type AimLayer,
 } from './renderer'
 import { fitTable, metersToPx, worldToScreen } from './geometry'
-import { BALL_RADIUS, CUE_HEAD_STRING, RACK_EIGHTBALL, TABLE_WIDTH } from './table'
+import { BALL_RADIUS, CUE_HEAD_STRING, POCKETS, RACK_EIGHTBALL, TABLE_WIDTH } from './table'
 import type { BallState } from './types'
 
 // ballTexture 会创建 canvas 并取 2d 上下文，jsdom 没有实现这一层。
@@ -190,11 +190,39 @@ describe('drawScene：球', () => {
 })
 
 describe('drawScene：台面', () => {
-  it('六个袋口各画两层圆', () => {
+  it('六个袋口各画一个圆洞，中袋的剪口也是一段圆弧', () => {
     const ctx = createFakeCtx()
     drawScene(ctx, { width: 390, height: 844 }, { balls: [] }, 1)
-    // 6 个袋口 × 2 层 + 置球点 1 个 = 13。
-    expect(countOf(ctx, 'arc')).toBeGreaterThanOrEqual(13)
+    // 6 个圆洞 + 中袋那两条（半圆）剪口 + 置球点 1 个 = 9。
+    // 角袋的剪口是顺着斜边走的多边形，不是圆，所以这里不是 13。
+    expect(countOf(ctx, 'arc')).toBeGreaterThanOrEqual(9)
+  })
+
+  it('中袋的剪口是「张口梯形 + 半圆」，不是一整圈圆齿', () => {
+    const ctx = createFakeCtx()
+    drawScene(ctx, { width: 390, height: 844 }, { balls: [] }, 1)
+
+    // 库边那道 evenodd 裁剪（带 arcTo 的是护角，跳过）里，六个缺口一共是
+    // 4 个角袋三角形（各 3 条边）+ 2 个中袋（各 4 条边）。
+    const methods = ctx.calls.map((c) => c.method)
+    let clip = -1
+    for (let i = 0; i < methods.length; i += 1) {
+      if (methods[i] !== 'clip') {
+        continue
+      }
+      const begin = methods.slice(0, i).lastIndexOf('beginPath')
+      const seg = methods.slice(begin, i)
+      if (seg.indexOf('arc') >= 0 && seg.indexOf('arcTo') < 0) {
+        clip = i
+        break
+      }
+    }
+    expect(clip).toBeGreaterThan(-1)
+    const begin = methods.slice(0, clip).lastIndexOf('beginPath')
+    const seg = methods.slice(begin, clip)
+    // 只挖一整圈圆的话，中袋这块一条 lineTo 都没有，库边上就是一圈圆齿。
+    expect(seg.filter((m) => m === 'lineTo').length).toBe(20)
+    expect(seg.filter((m) => m === 'arc').length).toBe(2)
   })
 
   it('袋口整组裁在库边的圆角矩形里，木框角上不会多出黑圆', () => {
@@ -226,6 +254,63 @@ describe('drawScene：台面', () => {
       }
     }
     expect(holes).toBeGreaterThanOrEqual(6)
+  })
+
+  it('护角只裁掉台呢外沿那一块，不挖袋口缺口', () => {
+    const ctx = createFakeCtx()
+    drawScene(ctx, { width: 390, height: 844 }, { balls: [] }, 1)
+
+    // 护角那道裁剪是「木框圆角矩形 + 库边外沿矩形」的 even odd：圆角矩形是唯一带
+    // arcTo 的子路径，再加上 evenodd 这个条件，才能和袋口外面那层「只按木框圆角裁」
+    // 的裁剪区分开——后者同样有 4 段 arcTo，但没有 rect。
+    const methods = ctx.calls.map((c) => c.method)
+    let guard = -1
+    for (let i = 0; i < methods.length; i += 1) {
+      if (methods[i] !== 'clip') {
+        continue
+      }
+      const args = ctx.calls[i].args.map((a) => String(a))
+      if (args.indexOf('evenodd') < 0) {
+        continue
+      }
+      const begin = methods.slice(0, i).lastIndexOf('beginPath')
+      if (methods.slice(begin, i).indexOf('arcTo') >= 0) {
+        guard = i
+        break
+      }
+    }
+    expect(guard).toBeGreaterThan(-1)
+
+    const begin = methods.slice(0, guard).lastIndexOf('beginPath')
+    const inPath = methods.slice(begin, guard)
+    // 圆角矩形的 4 段 arcTo、4 条 lineTo、1 个起点、1 次闭合，外加库边外沿那一个 rect。
+    expect(inPath.filter((m) => m === 'arcTo').length).toBe(4)
+    expect(inPath.filter((m) => m === 'rect').length).toBe(1)
+    // 只有一个子路径起点：袋口缺口一旦也算进这条 evenodd 路径，袋角正中就会被挖掉，
+    // 那块正是护角最该亮的地方，看起来像袋角穿了个洞。
+    expect(inPath.filter((m) => m === 'moveTo').length).toBe(1)
+    expect(inPath.filter((m) => m === 'closePath').length).toBe(1)
+  })
+
+  it('六个洞都画在落袋判定的那个圆上', () => {
+    const ctx = createFakeCtx()
+    drawScene(ctx, { width: 390, height: 844 }, { balls: [] }, 1)
+    const t = fitTable({ width: 390, height: 844 }, TABLE_PADDING)
+
+    // 洞的圆心、半径必须与 POCKETS 一致：视觉上差一点，球就会「看着进洞却被弹出来」。
+    // 半径只允许比判定圆大一点点（重合剪口用的亚毫米级 padding）。
+    for (const p of POCKETS) {
+      const want = worldToScreen(t, p.x, p.y)
+      const minR = metersToPx(t, p.radius)
+      const found = ctx.calls.some((c) => {
+        if (c.method !== 'arc') {
+          return false
+        }
+        const [cx, cy, r] = c.args as number[]
+        return Math.abs(cx - want.x) < 0.6 && Math.abs(cy - want.y) < 0.6 && r >= minR && r <= minR + 2
+      })
+      expect(found, `袋口 ${p.x},${p.y} 没画在判定圆上`).toBe(true)
+    }
   })
 
   it('木框是圆角矩形，不是直角矩形', () => {

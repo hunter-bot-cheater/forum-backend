@@ -34,22 +34,34 @@ const SHADOW_SPREAD = 0.4
 const SHADOW_FADE = 4
 const BALL_GROWTH = 0.6
 
-// 整帧用到的颜色。取值照着参考视频取：外框是近黑的石墨灰而不是棕色木纹，
-// 台呢是偏亮的草绿并在中间有一块受光，库边压暗一个档，袋口是纯黑的洞。
+// 整帧用到的颜色。取值照着标准图（微信小游戏那张截图）取：外框是偏冷的
+// 中深灰、台呢是深草绿并在中间有一块受光、袋口是纯黑的洞。
+//
+// 台呢取 (12,116,72)：标准图台面中央是 (14,110,72)、中上段是 (5,127,78)，
+// 两张图放在一起看，台呢的红通道几乎为零、绿通道 110~130。早先提到 (24,122,78)
+// 是为了让球更跳，结果整张台子偏青、比标准图亮一档，并排一眼就能看出不是同一张。
 const COLORS = {
-  rail: '#33383f',
-  railEdge: '#0a0c10',
-  cloth: '#1f8a58',
-  clothLight: '#2aa267',
-  // 库边是深灰而不是深绿：参考录屏里那圈是橡皮（黑灰），绿色只属于台呢。
-  // 早先用深绿，袋口一切开就分不出「哪块是布、哪块是库边」。
-  cushion: '#232a2e',
-  pocket: '#04060a',
-  // 库边上的菱形瞄准点：视频里那排小白点，没有它外框像一块塑料板。
-  diamond: 'rgba(240, 244, 250, 0.92)',
+  rail: '#35383c',
+  cloth: '#0c7448',
+  clothLight: '#148050',
+  // 木框上的颗星：图里那排白色小三角，没有它外框像一块塑料板。
+  diamond: 'rgba(240, 244, 250, 0.8)',
   shadow: 'rgba(0, 0, 0, 0.26)',
   clothLine: 'rgba(255, 255, 255, 0.08)',
 }
+
+// 库边那圈斜坡的四档颜色。
+//
+// 标准图里库边的剖面是一条受光的斜坡：贴着台呢那一侧被灯照到，最亮也最绿；
+// 往木框方向一路压暗到近黑。四档是按像素取的值（贴布处 (25,140,95)、
+// 木框边 (22,43,36)）。
+//
+// 第一档不能取标准图里那条最亮的 (7,154,100)：那一条只有一两个像素宽，
+// 是布折上来时的一道反光，整片照搬会让库边比台呢亮出一大截，围成一圈荧光边。
+const CUSHION_FACE = '#128c5f'
+const CUSHION_LIT = '#17714f'
+const CUSHION_MID = '#1b4634'
+const CUSHION_DARK = '#1a2420'
 
 // 球按物理尺寸画，不做视觉放大。
 //
@@ -125,7 +137,7 @@ export function drawScene(
 // drawTable 只画不动的部分：木框、库边、台呢、六个袋口。
 //
 // 这一层每帧重画是白费力气：一帧里它一个像素都不会变，
-// 而它偏偏是最贵的那部分（台呢两层全屏渐变、六个袋口各自四层填充加裁剪）。
+// 而它偏偏是最贵的那部分（台呢两层全屏渐变、六个袋口各自多层填充加裁剪）。
 // 拖动瞄准时每帧三十毫秒里有二十多毫秒耗在这里，手感就是「拖杆发涩」。
 export function drawTable(ctx: CanvasRenderingContext2D, view: Viewport): void {
   const t = fitTable(view, TABLE_PADDING)
@@ -133,6 +145,9 @@ export function drawTable(ctx: CanvasRenderingContext2D, view: Viewport): void {
   drawCushion(ctx, t)
   drawCloth(ctx, t)
   drawPockets(ctx, t)
+  // 外框那条亮棱最后画：护角在四角会一直铺到台子外沿，棱要压在它上面，
+  // 才是「一圈金属包边绕着整张台子」的样子。顺序反过来，四个角就断了。
+  drawRailEdge(ctx, t)
 }
 
 // drawActors 画每帧会动的东西：两根杆与瞄准线、球、落袋动画、手中球虚影。
@@ -282,7 +297,7 @@ function railRect(t: ViewTransform): Rect {
   )
 }
 
-// drawRail 画外框与库边上的菱形瞄准点。
+// drawRail 画外框的底面与库边上的菱形瞄准点。最外那条亮棱见 drawRailEdge。
 function drawRail(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   const rect = railRect(t)
 
@@ -295,46 +310,80 @@ function drawRail(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   ctx.fill()
   ctx.restore()
 
-  // 内圈压一条深色线，外框才有厚度感，不至于像一块纯色板。
-  ctx.strokeStyle = COLORS.railEdge
-  ctx.lineWidth = 2
-  roundRectPath(ctx, rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2, RAIL_RADIUS - 1)
-  ctx.stroke()
-
   drawRailDiamonds(ctx, t)
 }
 
-// drawRailDiamonds 画库边上那排白色菱形标记。
+// drawRailEdge 画外框最外面那条亮棱：三遍描边叠出倒角面（宽而淡的一遍当过渡、
+// 中间一遍当倒角、最窄的一遍当受光的那条棱）。硬边会像贴了一条白胶带。
 //
-// 位置按真实台面的分点来：长库各 7 个（中袋那个位置空着），短库各 3 个。
-// 它们除了好看还有一个用处——瞄准时能拿它当角度参考。
-function drawRailDiamonds(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
-  const size = Math.max(2.4, metersToPx(t, MARGIN) * 0.16)
-  const inset = MARGIN / 2
+// 亮棱必须贴着最外沿：标准图里木框的受光只在外面那一两像素上，往里全是暗的。
+// 早先把它放进 6px 处，木框里就多出一圈浅灰的描边，像木框套了个内衬。
+//
+// 它必须在 drawPockets 之后画：四个角的护角会一直铺到台子外沿，
+// 棱压在护角上，一圈包边才不断。
+function drawRailEdge(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
+  const rect = railRect(t)
+  const edge = (inset: number, width: number, color: string) => {
+    ctx.strokeStyle = color
+    ctx.lineWidth = width
+    roundRectPath(
+      ctx,
+      rect.x + inset,
+      rect.y + inset,
+      rect.width - inset * 2,
+      rect.height - inset * 2,
+      Math.max(1, RAIL_RADIUS - inset),
+    )
+    ctx.stroke()
+  }
+  edge(3.6, 3.2, 'rgba(186, 192, 199, 0.06)')
+  edge(1.8, 1.6, 'rgba(200, 206, 213, 0.14)')
+  edge(1.1, 1.1, 'rgba(212, 218, 224, 0.30)')
+}
 
-  const spots: Array<{ x: number; y: number }> = []
+// drawRailDiamonds 画木框上那排白色颗星。
+//
+// 位置按真实台面的分点来：长库各 6 个（中袋那个位置空着），短库各 3 个。
+// 它们除了好看还有一个用处——瞄准时能拿它当角度参考。
+//
+// 三个细节照着标准图：
+//   · 落在木框宽度的中间，不是库边上——库边是一条受光的斜坡，压个白点会被吃掉；
+//   · 形状是朝台内的小三角，不是菱形；
+//   · 尺寸按木框厚度取，不用 MARGIN 算（那样会大到像贴了一张标签）。
+function drawRailDiamonds(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
+  const size = Math.max(2.2, metersToPx(t, RAIL_WIDTH) * 0.17)
+  const inset = CUSHION_WIDTH + RAIL_WIDTH / 2
+
+  // 每一项带上「朝台内」的单位方向，三角形的尖就朝这个方向。
+  const spots: Array<{ x: number; y: number; dx: number; dy: number }> = []
   for (let i = 1; i <= 7; i += 1) {
     if (i === 4) {
       continue
     }
     const y = (TABLE_LENGTH * i) / 8
-    spots.push({ x: -inset, y })
-    spots.push({ x: TABLE_WIDTH + inset, y })
+    spots.push({ x: -inset, y, dx: 1, dy: 0 })
+    spots.push({ x: TABLE_WIDTH + inset, y, dx: -1, dy: 0 })
   }
   for (let i = 1; i <= 3; i += 1) {
     const x = (TABLE_WIDTH * i) / 4
-    spots.push({ x, y: -inset })
-    spots.push({ x, y: TABLE_LENGTH + inset })
+    spots.push({ x, y: -inset, dx: 0, dy: 1 })
+    spots.push({ x, y: TABLE_LENGTH + inset, dx: 0, dy: -1 })
   }
 
   ctx.fillStyle = COLORS.diamond
   for (const spot of spots) {
     const center = worldToScreen(t, spot.x, spot.y)
+    // 世界坐标的 y 朝远端，屏幕的 y 朝下，方向要跟着翻一次符号。
+    const fx = spot.dx
+    const fy = -spot.dy
+    // 垂直于朝向的横向单位向量，用来撑开三角形的底边。
+    const px = -fy
+    const py = fx
+
     ctx.beginPath()
-    ctx.moveTo(center.x, center.y - size * 0.8)
-    ctx.lineTo(center.x + size * 0.75, center.y)
-    ctx.lineTo(center.x, center.y + size * 0.8)
-    ctx.lineTo(center.x - size * 0.75, center.y)
+    ctx.moveTo(center.x + fx * size, center.y + fy * size)
+    ctx.lineTo(center.x - fx * size * 0.55 + px * size * 0.62, center.y - fy * size * 0.55 + py * size * 0.62)
+    ctx.lineTo(center.x - fx * size * 0.55 - px * size * 0.62, center.y - fy * size * 0.55 - py * size * 0.62)
     ctx.closePath()
     ctx.fill()
   }
@@ -342,19 +391,55 @@ function drawRailDiamonds(ctx: CanvasRenderingContext2D, t: ViewTransform): void
 
 // drawCushion 画库边，范围是台呢外沿再加一圈 CUSHION_WIDTH。
 //
-// 用整块矩形而不是按段画折线：折线在袋口处的断点会露出台呢的尖角，
-// 看起来像库边被啃掉一块。整块深绿铺底、再用袋口圆去盖，
-// 得到的就是「库边连续、袋口是一个洞」这个真实结构。
+// 四条边各画一条渐变带，不是铺一整块纯色：标准图里库边是一圈受光的斜坡，
+// 贴台呢那一侧最亮、往木框方向压暗到近黑。纯色画出来像一根塑料条，
+// 而这条斜坡正是「台呢折上来包住橡胶」的那一折。
+//
+// 整组要裁在「库边外沿 + 六处袋口缺口」这条轮廓里。四条带在四个角上本来会
+// 互相盖住，角上留下一块谁也说不清是什么颜色的三角——而角上正是袋口斜边
+// 该待的位置。裁掉之后，斜坡在斜边处自然收口，斜边由 drawPockets 的
+// 金属护角与暗绿端面接手。
 function drawCushion(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
-  const rect = worldRect(
-    t,
-    -CUSHION_WIDTH,
-    -CUSHION_WIDTH,
-    TABLE_WIDTH + CUSHION_WIDTH,
-    TABLE_LENGTH + CUSHION_WIDTH,
-  )
-  ctx.fillStyle = COLORS.cushion
-  ctx.fillRect(rect.x, rect.y, rect.width, rect.height)
+  const w = CUSHION_WIDTH
+
+  // band 画一条库边带。rect 是世界坐标的矩形，(sx,sy)→(ex,ey) 是渐变轴，
+  // 从库边脸指向木框：起点是贴布那头（亮），终点是木框那头（暗）。
+  const band = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    sx: number,
+    sy: number,
+    ex: number,
+    ey: number,
+  ) => {
+    const rect = worldRect(t, x1, y1, x2, y2)
+    const from = worldToScreen(t, sx, sy)
+    const to = worldToScreen(t, ex, ey)
+    const ramp = ctx.createLinearGradient(from.x, from.y, to.x, to.y)
+    ramp.addColorStop(0, CUSHION_FACE)
+    // 受光那一档要占到一半：标准图里库边亮的那半圈有 25mm 宽，
+    // 只亮 30% 的话整圈库边看着比标准图细一半。
+    ramp.addColorStop(0.48, CUSHION_LIT)
+    ramp.addColorStop(0.74, CUSHION_MID)
+    ramp.addColorStop(1, CUSHION_DARK)
+    ctx.fillStyle = ramp
+    ctx.fillRect(rect.x, rect.y, rect.width, rect.height)
+  }
+
+  ctx.save()
+  ctx.beginPath()
+  addGreenOutline(ctx, t)
+  ctx.clip('evenodd')
+
+  // 上、下两条横跨整宽（含两侧的角），左右两条只画中间那截。
+  band(-w, -w, TABLE_WIDTH + w, 0, 0, 0, 0, -w)
+  band(-w, TABLE_LENGTH, TABLE_WIDTH + w, TABLE_LENGTH + w, 0, TABLE_LENGTH, 0, TABLE_LENGTH + w)
+  band(-w, 0, 0, TABLE_LENGTH, 0, 0, -w, 0)
+  band(TABLE_WIDTH, 0, TABLE_WIDTH + w, TABLE_LENGTH, TABLE_WIDTH, 0, TABLE_WIDTH + w, 0)
+
+  ctx.restore()
 }
 
 // drawCloth 画台呢。矩形范围是库边内侧，也就是世界坐标 0..宽、0..长。
@@ -380,8 +465,8 @@ function drawCloth(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
     Math.max(rect.width, rect.height) * 0.9,
   )
   light.addColorStop(0, COLORS.clothLight)
-  light.addColorStop(0.5, 'rgba(42, 162, 103, 0.55)')
-  light.addColorStop(1, 'rgba(42, 162, 103, 0)')
+  light.addColorStop(0.5, 'rgba(20, 138, 88, 0.38)')
+  light.addColorStop(1, 'rgba(20, 138, 88, 0)')
   ctx.fillStyle = light
   ctx.fillRect(rect.x, rect.y, rect.width, rect.height)
 
@@ -398,6 +483,58 @@ function drawCloth(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   vignette.addColorStop(1, 'rgba(0, 0, 0, 0.18)')
   ctx.fillStyle = vignette
   ctx.fillRect(rect.x, rect.y, rect.width, rect.height)
+
+  // 库边压在台呢上投下的一圈暗影。
+  //
+  // 标准图里贴着库边那一段明显更暗，而且是「先深一段、再慢慢回来」：
+  // 沿左库横向量，洞沿 (0,79,46) → 往里 15mm (1,74,45) → 40mm (8,89,59)
+  // → 80mm (8,102,66)，台面中央才到 (14,110,72)。少了这一圈，台呢会像
+  // 一张平铺的纸，库边像贴上去的一条。
+  //
+  // 一条渐变做不出「先平后降」的形，用两条叠：近的一窄条压得深，
+  // 远的一宽带慢慢淡出去，叠出来的剖面才和标准图对得上。
+  const shadeBand = (
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    sx: number,
+    sy: number,
+    ex: number,
+    ey: number,
+    alpha: number,
+  ) => {
+    const box = worldRect(t, x1, y1, x2, y2)
+    const from = worldToScreen(t, sx, sy)
+    const to = worldToScreen(t, ex, ey)
+    const fade = ctx.createLinearGradient(from.x, from.y, to.x, to.y)
+    fade.addColorStop(0, `rgba(0, 0, 0, ${alpha})`)
+    fade.addColorStop(1, 'rgba(0, 0, 0, 0)')
+    ctx.fillStyle = fade
+    ctx.fillRect(box.x, box.y, box.width, box.height)
+  }
+  // 近暗（0.012m）与远影（0.045m）各四条边，方向都是「库边脸 → 台面中心」。
+  const shadeRing = (d: number, alpha: number) => {
+    shadeBand(0, 0, TABLE_WIDTH, d, 0, 0, 0, d, alpha)
+    shadeBand(0, TABLE_LENGTH - d, TABLE_WIDTH, TABLE_LENGTH, 0, TABLE_LENGTH, 0, TABLE_LENGTH - d, alpha)
+    shadeBand(0, 0, d, TABLE_LENGTH, 0, 0, d, 0, alpha)
+    shadeBand(TABLE_WIDTH - d, 0, TABLE_WIDTH, TABLE_LENGTH, TABLE_WIDTH, 0, TABLE_WIDTH - d, 0, alpha)
+  }
+  shadeRing(0.012, 0.24)
+  shadeRing(0.045, 0.12)
+
+  // 袋口那一圈暗影：洞沿、斜边都是立起来的面，压在布上会投一圈很短的影。
+  //
+  // 描边有一半落在缺口里，被上面那道 evenodd 裁剪吃掉，布上只剩内侧一半。
+  // 所以线宽取 10mm，布上看到的是 5mm，和标准图里贴着缺口那道暗边差不多。
+  // 再宽就会在洞口周围糊出一圈黑，看着像布被烫过。
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.26)'
+  ctx.lineWidth = Math.max(3, metersToPx(t, 0.010))
+  for (let i = 0; i < POCKETS.length; i += 1) {
+    ctx.beginPath()
+    addNotch(ctx, t, i)
+    ctx.stroke()
+  }
 
   // 开球线与置球点：真实台面上这两条线一直在，缺了会显得台面是空的。
   // 开球线在母球那一侧（世界 y = 1/4 长），置球点在球堆那一侧（3/4 长）。
@@ -419,24 +556,35 @@ function drawCloth(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   ctx.restore()
 }
 
-// 袋兜底色的几档。真实袋口不是一个纯黑的洞：靠观察者这一侧的内壁是
-// 深棕色的皮革（参考素材里那圈暗红），越往里越黑，到最深处几乎没有光。
-const POCKET_VOID = '#12151a'
+// 袋口相关的颜色。
+//
+// 洞底不是纯黑：靠台外那一圈是皮革内壁（一点暗棕），越往里越黑，到中心几乎无光。
 const POCKET_DEEP = '#04060a'
 
-// 中袋缺口的半径相对洞口半径。1.15 让台呢在洞沿外再让出一圈：
-// 洞与布之间要有 2~3mm 暗缝，贴死会像贴在布上的圆片。
-const POCKET_NOTCH_SCALE = 1.15
+// 洞口画得比判定圆大 0.8mm。台呢按这个圆剪开，剪口正好压在洞沿上；
+// 否则中间会漏出一条袋喉色的细缝，远看像洞口套了个环。
+const HOLE_PAD = 0.0008
 
-// 护角（袋口的金属包角）配色。
+// 护角（袋口的金属包边）配色。标准图里那块金属从洞沿往外是一路压暗的：
+// 贴着洞沿的倒角面最亮 (148,147,145)，铸铝主面 (115,115,115)，
+// 背光到 (75,69,69)，最外那条接缝 (70,66,63)。
 //
-// 银灰铸铝：靠上的棱受光、朝下的面压暗。三个色阶都压在中灰附近——
-// 调到近白会像贴了一块塑料片，压到近黑或深棕又分不出是金属。
-// 上一版取 #ccd2d8，画出来的是一圈白塑料，这里整体压掉一档，
-// 亮面只留给受光的那条棱（见 drawCollar 里的内棱高光）。
-const PLATE_LIGHT = '#a4abb3'
-const PLATE_MID = '#7f868e'
-const PLATE_DARK = '#565c63'
+// 关键是「亮只亮在洞沿那一圈」：早先整块铺 #a5a29e，四个角变成四块银亮塑料，
+// 比台子本身还抢眼。现在主面压到 (113,111,107)，亮的那一档只占渐变前 20%。
+const PLATE_LIGHT = '#8b8783'
+const PLATE_MID = '#726e6a'
+
+// 斜边端面：贴着两条斜边铺的一条浅青绿压条，颜色由台呢绿压到墨绿黑。
+//
+// 标准图里从台呢往洞口是「布 → 斜边顶面（受光）→ 侧壁（墨绿黑）→ 皮革边」
+// 四段连续过渡，少了这一段，布就直接切在洞沿上，像贴了一张绿纸；给多了
+// 又会在袋口糊出一块黑三角，反倒比没有更假。
+const JAW_FACE_WIDTH = 0.013
+
+// 袋兜（洞口外面那圈皮革内壁）铺到 1.3 个半径。
+// 再往外是斜边折下去的绿面，不是皮革——整块缺口刷成棕的，袋角就成了棕色三角。
+const LINER_REACH = 1.3
+
 
 // outwardScreen 给出袋口朝台外的单位方向（屏幕坐标）。
 //
@@ -460,33 +608,167 @@ function outwardScreen(p: Pocket): { x: number; y: number } {
   return { x: dx / len, y: -dy / len }
 }
 
-// 袋口缺口的形状。台呢的裁剪、护角的裁剪、袋底的暗面全取自同一条路径，
-// 所以「画出来的斜边」永远只有一条，不会出现某个袋口对不上的情况。
+// Point 是世界坐标的一个点，只在袋口几何里用。
+interface Point {
+  x: number
+  y: number
+}
+
+// throatPolygon 是角袋挖掉的那块：鼻尖A → 颊板A外端 → 颊板B外端 → 鼻尖B。
 //
-//   角袋：两个鼻尖（落在两条库边脸上）加两段斜边。斜边与库边脸成 140°
-//         （朝洞口偏 40°），两段不平行、在洞口外侧交汇，交汇点被圆洞盖住
-//         ——看上去就是「两段斜边把洞口半围住」。
-//   中袋：以袋心为圆心、1.15r 为半径的一段圆缺口。中袋的洞有一半压在台呢上，
-//         台呢沿洞边收一圈，洞沿与台呢边才对得齐。
-function notchPath(ctx: CanvasRenderingContext2D, t: ViewTransform, i: number): void {
+// 这条折线同时是三样东西：台呢的剪口、库边的收口、护角要让开的区域。
+// 三处取自同一条路径，所以「画出来的斜边」永远只有一条，不会有某个袋口对不上。
+//
+// 落进台面里的那部分只有「两个鼻尖之间那条 45° 斜口」——台呢的内沿正是顺着
+// 两段颊板凹进来的；剩下的两条边落在库边上，那是库边橡胶的端面，斜边就是它。
+function throatPolygon(i: number): Point[] {
+  const m = POCKET_MOUTHS[i]
+  return [m.noseA, m.jawA, m.jawB, m.noseB]
+}
+
+// addPoly 把一串世界坐标的点接进当前路径（自己不 beginPath）。
+//
+// 台呢的剪口要和其他子路径凑成一条 evenodd 路径，所以这里不能开新路径；
+// 单独用的时候调用方先 beginPath 一下就行。
+function addPoly(ctx: CanvasRenderingContext2D, t: ViewTransform, pts: Point[]): void {
+  for (let k = 0; k < pts.length; k += 1) {
+    const p = worldToScreen(t, pts[k].x, pts[k].y)
+    if (k === 0) {
+      ctx.moveTo(p.x, p.y)
+    } else {
+      ctx.lineTo(p.x, p.y)
+    }
+  }
+  ctx.closePath()
+}
+
+// addNotch 往当前路径里加一条「这个袋口挖掉的那一块」。
+//
+//   角袋：整个袋喉四边形。落在库边里的一大半是斜槽的侧壁，落进台呢的那部分
+//         正好是「两个鼻尖之间那道 45° 斜口」——台呢的内沿顺着两段斜边凹进来。
+//   中袋：「张口梯形 + 洞口探进台呢的那半个圆」。梯形是库边被切掉的那一块
+//         （两段 14° 斜边），半个圆是洞压在台呢上的那一块。只挖圆的话，库边
+//         的断口是一圈圆齿，看起来像洞被冲压在库边上，而不是两条斜边收进去。
+function addNotch(ctx: CanvasRenderingContext2D, t: ViewTransform, i: number): void {
   const p = POCKETS[i]
   if (p.kind === 'side') {
-    const center = worldToScreen(t, p.x, p.y)
-    const radius = metersToPx(t, p.radius) * POCKET_NOTCH_SCALE
-    ctx.moveTo(center.x + radius, center.y)
-    ctx.arc(center.x, center.y, radius, 0, Math.PI * 2)
+    addSideNotch(ctx, t, i)
     return
   }
+  addPoly(ctx, t, throatPolygon(i))
+}
+
+// sideNotchGeometry 算出中袋缺口的几个关键点：张口梯形的四个角，
+// 以及洞口圆与库边脸的两个交点（缺口边界在两者之间的那段圆弧上）。
+//
+// 都是世界坐标；屏幕换算留给 addSideNotch，避免同一份点在两处各算一遍。
+function sideNotchGeometry(i: number): {
+  mouth: Array<{ x: number; y: number }>
+  capFrom: { x: number; y: number }
+  capTo: { x: number; y: number }
+  center: { x: number; y: number }
+  radius: number
+  inward: { x: number; y: number }
+} {
+  const p = POCKETS[i]
   const m = POCKET_MOUTHS[i]
-  const a = worldToScreen(t, m.noseA.x, m.noseA.y)
-  const b = worldToScreen(t, m.jawA.x, m.jawA.y)
-  const c = worldToScreen(t, m.jawB.x, m.jawB.y)
-  const d = worldToScreen(t, m.noseB.x, m.noseB.y)
-  ctx.moveTo(a.x, a.y)
-  ctx.lineTo(b.x, b.y)
-  ctx.lineTo(c.x, c.y)
-  ctx.lineTo(d.x, d.y)
+  const radius = p.radius + HOLE_PAD
+  // 水平库边（左右两袋）：库边脸是竖线，缺口往 x 方向探进台呢；
+  // 竖直库边（上下两袋）同理，只是换了轴。
+  const horizontal = p.x < 0 || p.x > TABLE_WIDTH
+  const face = horizontal ? (p.x < 0 ? 0 : TABLE_WIDTH) : p.y < 0 ? 0 : TABLE_LENGTH
+  // 袋心到库边脸的距离，就是圆探进台呢的那一段深度。
+  const offset = Math.abs((horizontal ? p.x : p.y) - face)
+  // 弦长的一半：圆与库边脸的两个交点，各在袋心上下 halfChord 处。
+  const halfChord = Math.sqrt(Math.max(0, radius * radius - offset * offset))
+  const inward = horizontal
+    ? { x: p.x < 0 ? 1 : -1, y: 0 }
+    : { x: 0, y: p.y < 0 ? 1 : -1 }
+
+  // 圆周上落在库边脸之外的那两个点，缺口就是在这两点之间绕半圈。
+  const capFrom = horizontal
+    ? { x: face, y: p.y - halfChord }
+    : { x: p.x - halfChord, y: face }
+  const capTo = horizontal
+    ? { x: face, y: p.y + halfChord }
+    : { x: p.x + halfChord, y: face }
+
+  return {
+    mouth: [m.noseA, m.jawA, m.jawB, m.noseB],
+    capFrom,
+    capTo,
+    center: { x: p.x, y: p.y },
+    radius,
+    inward,
+  }
+}
+
+// addSideNotch 把中袋缺口加成一条闭合路径：从一侧鼻尖沿斜边走完梯形，
+// 再沿洞口的圆弧绕回另一侧鼻尖。两个鼻尖、梯形的两个外角、库边脸与圆的
+// 两个交点首尾相接，所以整条边界是连续的，不会在库边脸上留下毛刺。
+function addSideNotch(ctx: CanvasRenderingContext2D, t: ViewTransform, i: number): void {
+  const g = sideNotchGeometry(i)
+  const mouth = g.mouth.map((q) => worldToScreen(t, q.x, q.y))
+  const from = worldToScreen(t, g.capFrom.x, g.capFrom.y)
+  const to = worldToScreen(t, g.capTo.x, g.capTo.y)
+  const center = worldToScreen(t, g.center.x, g.center.y)
+  const radius = metersToPx(t, g.radius)
+  const inward = { x: g.inward.x, y: -g.inward.y }
+
+  // 先沿梯形走一圈：鼻尖 → 斜边外端 → 另一侧斜边外端 → 另一侧鼻尖。
+  ctx.moveTo(mouth[0].x, mouth[0].y)
+  ctx.lineTo(mouth[1].x, mouth[1].y)
+  ctx.lineTo(mouth[2].x, mouth[2].y)
+  ctx.lineTo(mouth[3].x, mouth[3].y)
+  // 再从本侧鼻尖往库边脸里退到圆周上，绕洞口探进台呢的那半个圆，回到另一侧。
+  ctx.lineTo(from.x, from.y)
+  arcThrough(ctx, center, radius, from, to, inward)
   ctx.closePath()
+}
+
+// arcThrough 从 from 沿圆周画到 to，且必定经过朝 inward 方向的那一侧。
+//
+// canvas 的两个方向参数只差在「顺时针 / 逆时针」，而这里要保证的是
+// 「绕到台呢里那一半」——先把 from→to 的默认方向试一遍，中点方向不对就反向。
+function arcThrough(
+  ctx: CanvasRenderingContext2D,
+  center: { x: number; y: number },
+  radius: number,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  inward: { x: number; y: number },
+): void {
+  const a0 = Math.atan2(from.y - center.y, from.x - center.x)
+  const a1 = Math.atan2(to.y - center.y, to.x - center.x)
+  const mid = Math.atan2(inward.y, inward.x)
+
+  // 判断 mid 是否落在 a0 → a1（角度递增，即 counterclockwise=false 的那一侧）。
+  const tau = Math.PI * 2
+  const norm = (a: number) => ((a % tau) + tau) % tau
+  const s = norm(a0)
+  const e = norm(a1)
+  const m = norm(mid)
+  const forward = s <= e ? m >= s && m <= e : m >= s || m <= e
+  ctx.arc(center.x, center.y, radius, a0, a1, !forward)
+}
+
+// greenRectScreen 是「台呢 + 库边」那一整块的外沿矩形，也就是有布覆盖的范围。
+// 护角只许画在它外面，金属永远到不了台呢上。
+function greenRectScreen(t: ViewTransform): Rect {
+  const w = CUSHION_WIDTH
+  return worldRect(t, -w, -w, TABLE_WIDTH + w, TABLE_LENGTH + w)
+}
+
+// addGreenOutline 往当前路径里追加「库边外沿 + 六处袋口缺口」这条轮廓。
+//
+// 它是「铺过布的轮廓」：库边的斜坡条要裁在它里面，缺口的角要跟着它的形状走。
+// 自己不 beginPath，方便和别的子路径凑成一条 evenodd 路径。
+function addGreenOutline(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
+  const outer = greenRectScreen(t)
+  ctx.rect(outer.x, outer.y, outer.width, outer.height)
+  for (let i = 0; i < POCKETS.length; i += 1) {
+    addNotch(ctx, t, i)
+  }
 }
 
 // clothPath 铺台呢的轮廓：一个矩形，六处袋口各挖掉一块。
@@ -496,17 +778,19 @@ function clothPath(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   ctx.beginPath()
   ctx.rect(rect.x, rect.y, rect.width, rect.height)
   for (let i = 0; i < POCKETS.length; i += 1) {
-    notchPath(ctx, t, i)
+    addNotch(ctx, t, i)
   }
 }
 
-// drawPockets 画六个袋口。
+// drawPockets 画六个袋口。五层，顺序不能换：
+//   1) 护角 —— 银灰金属，铺满台呢之外（含袋角），最底下一层；
+//   2) 绿面 —— 库边的布折进缺口的那一小块，靠近台呢那侧被灯照到；
+//   3) 袋兜 —— 皮革内壁，只围着洞口铺一圈，压在绿面上；
+//   4) 端面 —— 贴着两条斜边的浅青绿压条，是斜边顶面那一条受光的棱；
+//   5) 圆洞 —— 圆心与半径直接取 POCKETS，与落袋判定是同一个圆。
 //
-// 三层，顺序不能换：
-//   1) 袋底 —— 缺口先整片铺暗。角袋的缺口随后被金属压边整个盖住；
-//              中袋的缺口留在外面，洞沿与压边之间那圈暗影就是它；
-//   2) 护角 —— 银灰金属压边，贴着台呢的缺口边压下去（见 drawCollar）；
-//   3) 圆洞 —— 圆心与半径直接取 POCKETS，与落袋判定是同一个圆。
+// 第 2 层不能省：缺口是一块 84mm 见方的三角，洞只占中间一圈，剩下的部分
+// 如果留成袋兜的暗棕，袋角就糊成一大片黑——标准图里那两块是绿的。
 function drawPockets(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   const rail = railRect(t)
 
@@ -514,212 +798,262 @@ function drawPockets(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   roundRectPath(ctx, rail.x, rail.y, rail.width, rail.height, RAIL_RADIUS)
   ctx.clip()
 
-  // 角袋的缺口是库边被切掉的那一块——它露出来的是库边的断面，所以铺库边的色，
-  // 看上去才是「库边顺着一路收进袋口」，而不是台呢上凭空多了一块黑。
-  // 中袋的缺口在台呢中间，铺袋底的近黑，正好成为洞沿外那一圈暗影。
   for (let i = 0; i < POCKETS.length; i += 1) {
-    ctx.fillStyle = POCKETS[i].kind === 'corner' ? COLORS.cushion : POCKET_VOID
-    ctx.beginPath()
-    notchPath(ctx, t, i)
-    ctx.fill()
+    drawGuard(ctx, t, i, rail)
   }
-
+  for (let i = 0; i < POCKETS.length; i += 1) {
+    drawJawBase(ctx, t, i)
+  }
+  for (let i = 0; i < POCKETS.length; i += 1) {
+    drawLiner(ctx, t, i)
+  }
+  for (let i = 0; i < POCKETS.length; i += 1) {
+    drawJawFace(ctx, t, i)
+  }
   for (let i = 0; i < POCKETS.length; i += 1) {
     const p = POCKETS[i]
-    const center = worldToScreen(t, p.x, p.y)
-    const radius = metersToPx(t, p.radius)
-    drawCollar(ctx, t, i, p, center, radius, rail)
-    drawBevels(ctx, t, i, center, radius)
-    drawHole(ctx, p, center, radius)
+    drawHole(ctx, p, worldToScreen(t, p.x, p.y), metersToPx(t, p.radius + HOLE_PAD))
   }
 
   ctx.restore()
 }
 
-// drawCollar 画护角：银灰金属压边。
+// drawJawBase 画缺口里那块绿面：库边的布一直包到袋口，在缺口处折下去。
 //
-// 形状按袋口分两种，这是参考图里两类袋口最明显的差别：
-//   角袋 —— 一块圆角方板，内角被缺口那两段斜边削掉，所以轮廓是「内收切角
-//           方形」，不是直角也不是纯圆角；缺口的整块也铺金属，压边因此
-//           一路顺到两个鼻尖，内侧轮廓就是那两段斜边；
-//   中袋 —— 一块圆板（半圆弧形），内侧停在缺口那圈圆上，洞口与压边之间
-//           留一圈暗影。
-//
-// 明暗走三档（左上亮、右下暗）+ 一层柔光 + 一道内棱高光：这四项加起来才有
-// 「厚实、有体积」的金属感，少一项就退化成一块灰色方块。
-function drawCollar(
-  ctx: CanvasRenderingContext2D,
-  t: ViewTransform,
-  i: number,
-  p: Pocket,
-  center: { x: number; y: number },
-  radius: number,
-  rail: Rect,
-): void {
-  const corner = p.kind === 'corner'
-  // 角袋的板必须盖住整个缺口：缺口（两个鼻尖之间那块）最远到袋心 102mm，
-  // 板取 1.58r ≈ 98mm 才追得上，剩下的几毫米正好当接缝阴影。
-  // 早先取 1.22~1.34r，缺口会从板的圆角外面探出来，看着像一块刀片。
-  // 中袋取 1.62r，是「半圆弧形」那一圈。
-  const half = radius * (corner ? 1.58 : 1.62)
-  const round = Math.max(2.5, half * (corner ? 0.22 : 0.5))
-  const cloth = worldRect(t, 0, 0, TABLE_WIDTH, TABLE_LENGTH)
-
-  const metal = ctx.createLinearGradient(
-    center.x - half,
-    center.y - half,
-    center.x + half,
-    center.y + half,
-  )
-  metal.addColorStop(0, PLATE_LIGHT)
-  metal.addColorStop(0.45, PLATE_MID)
-  metal.addColorStop(1, PLATE_DARK)
-
-  // 板 + 洞，一条路径用 evenodd 填，得到的就是「挖了洞的板」。
-  const plate = () => {
-    if (corner) {
-      roundRectPath(ctx, center.x - half, center.y - half, half * 2, half * 2, round)
-    } else {
-      ctx.moveTo(center.x + half, center.y)
-      ctx.arc(center.x, center.y, half, 0, Math.PI * 2)
-    }
-    ctx.moveTo(center.x + radius, center.y)
-    ctx.arc(center.x, center.y, radius, 0, Math.PI * 2, true)
-  }
-
-  ctx.save()
-  const far = Math.max(rail.width, rail.height) * 3
-  ctx.beginPath()
-  ctx.rect(center.x - far, center.y - far, far * 2, far * 2)
-  ctx.rect(cloth.x, cloth.y, cloth.width, cloth.height)
-  ctx.clip('evenodd')
-
-  ctx.beginPath()
-  plate()
-  ctx.fillStyle = metal
-  ctx.fill('evenodd')
-
-  // 外棱：一条深色接缝，让板从库边上「分」出来，不然像刷上去的一层漆。
-  ctx.strokeStyle = 'rgba(12, 15, 20, 0.6)'
-  ctx.lineWidth = 1
-  ctx.beginPath()
-  if (corner) {
-    roundRectPath(ctx, center.x - half, center.y - half, half * 2, half * 2, round)
-  } else {
-    ctx.moveTo(center.x + half, center.y)
-    ctx.arc(center.x, center.y, half, 0, Math.PI * 2)
-  }
-  ctx.stroke()
-
-  // 内棱高光：沿外沿往里收 1.5px 再描一圈淡白，就是倒角面受光的那条棱。
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.24)'
-  ctx.lineWidth = Math.max(1, radius * 0.05)
-  ctx.beginPath()
-  if (corner) {
-    roundRectPath(
-      ctx,
-      center.x - half + 1.5,
-      center.y - half + 1.5,
-      half * 2 - 3,
-      half * 2 - 3,
-      Math.max(2, round - 1.5),
-    )
-  } else {
-    ctx.moveTo(center.x + half - 1.5, center.y)
-    ctx.arc(center.x, center.y, half - 1.5, 0, Math.PI * 2)
-  }
-  ctx.stroke()
-
-  ctx.restore()
-
-  // 洞沿的接触阴影：金属压在洞口的边上，有一圈很短的暗影，
-  // 没有它，板与洞之间会像贴纸一样没有缝隙。
-  ctx.save()
-  ctx.beginPath()
-  ctx.arc(center.x, center.y, radius * 1.02, 0, Math.PI * 2)
-  ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)'
-  ctx.lineWidth = Math.max(1.5, radius * 0.14)
-  ctx.stroke()
-  ctx.restore()
-}
-
-// drawBevels 给缺口那条斜边打高光。
-//
-// 斜边是一面立起来的小倒角，顶棱受光：靠鼻尖那头亮，退进洞口那头暗下去。
-// 线画在金属这一侧（沿法向让半个线宽），所以看到的是「金属倒角的亮边」，
-// 而不是台呢边上的一条白线。中袋的缺口是一段圆弧，整圈描一道淡的。
-function drawBevels(
-  ctx: CanvasRenderingContext2D,
-  t: ViewTransform,
-  i: number,
-  center: { x: number; y: number },
-  radius: number,
-): void {
+// 只有角袋有——中袋的缺口就是一个洞，没有可填的面积。
+// 渐变从洞沿往外提亮：贴着洞那一圈是折进去的暗面，靠近台呢那一侧才是
+// 被灯照到的斜边顶面。
+function drawJawBase(ctx: CanvasRenderingContext2D, t: ViewTransform, i: number): void {
   const p = POCKETS[i]
-  ctx.save()
-  ctx.lineCap = 'round'
-  ctx.lineWidth = Math.max(1, radius * 0.055)
-
-  if (p.kind === 'side') {
-    ctx.beginPath()
-    ctx.arc(center.x, center.y, radius * POCKET_NOTCH_SCALE + 1, 0, Math.PI * 2)
-    ctx.strokeStyle = 'rgba(226, 232, 238, 0.28)'
-    ctx.stroke()
-    ctx.restore()
+  if (p.kind !== 'corner') {
     return
   }
+  const center = worldToScreen(t, p.x, p.y)
+  const radius = metersToPx(t, p.radius)
+  const green = greenRectScreen(t)
 
-  const m = POCKET_MOUTHS[i]
-  const pairs = [
-    [m.noseA, m.jawA],
-    [m.noseB, m.jawB],
-  ]
-  const off = ctx.lineWidth * 0.5
+  ctx.save()
+  // 只填缺口，而且只填台呢这一侧：缺口伸进库边的那两条角是斜槽的侧壁，
+  // 那里该露护角的金属，填绿会变成一块绿三角压在金属上。
+  ctx.beginPath()
+  addNotch(ctx, t, i)
+  ctx.clip()
+  ctx.beginPath()
+  ctx.rect(green.x, green.y, green.width, green.height)
+  ctx.clip()
 
-  for (const pair of pairs) {
-    const from = worldToScreen(t, pair[0].x, pair[0].y)
-    const to = worldToScreen(t, pair[1].x, pair[1].y)
-    let dx = to.x - from.x
-    let dy = to.y - from.y
-    const len = Math.hypot(dx, dy)
-    if (len < 0.5) {
-      continue
-    }
-    dx /= len
-    dy /= len
-
-    // 法向取「指向袋心」的那一侧：金属在洞口那边，亮边要落在金属上。
-    let nx = -dy
-    let ny = dx
-    const midX = (from.x + to.x) / 2
-    const midY = (from.y + to.y) / 2
-    if ((center.x - midX) * nx + (center.y - midY) * ny < 0) {
-      nx = -nx
-      ny = -ny
-    }
-
-    const bevel = ctx.createLinearGradient(from.x, from.y, to.x, to.y)
-    bevel.addColorStop(0, 'rgba(240, 245, 250, 0.72)')
-    bevel.addColorStop(0.55, 'rgba(186, 194, 204, 0.42)')
-    bevel.addColorStop(1, 'rgba(110, 118, 128, 0.14)')
-    ctx.strokeStyle = bevel
-    ctx.beginPath()
-    ctx.moveTo(from.x + nx * off, from.y + ny * off)
-    ctx.lineTo(to.x + nx * off, to.y + ny * off)
-    ctx.stroke()
-  }
+  const face = ctx.createRadialGradient(
+    center.x,
+    center.y,
+    radius * 0.92,
+    center.x,
+    center.y,
+    radius * 2.1,
+  )
+  face.addColorStop(0, '#0c2a1e')
+  face.addColorStop(0.5, '#155640')
+  face.addColorStop(1, CUSHION_FACE)
+  ctx.fillStyle = face
+  ctx.fillRect(green.x, green.y, green.width, green.height)
 
   ctx.restore()
 }
 
-// drawHole 画圆洞：圆心与半径就是落袋判定用的那个圆，不做任何二次换算。
+// drawLiner 画袋兜：洞口外面那一圈皮革内壁。
 //
-// 渐变中心偏到朝台面那一侧，远端就落在朝台外那半圈上，正好是皮革内壁
-// 露出来的位置——一个纯黑的圆看着像贴纸，有一点内壁的颜色才有深度。
+// 它只围到 1.3 个半径：把整个缺口都刷成暗棕的话，袋角会出现一大片黑，
+// 标准图里那两块是绿的（见 drawJawBase）。这一圈必须暗——填成金属的话，
+// 洞口就像镶了一圈银边，中袋两侧还会露出两道灰弧探进绿台面。
+function drawLiner(ctx: CanvasRenderingContext2D, t: ViewTransform, i: number): void {
+  const p = POCKETS[i]
+  const center = worldToScreen(t, p.x, p.y)
+  const radius = metersToPx(t, p.radius)
+  // 内壁只画到库边外沿：再往外是木框，那里该露出护角的金属。
+  const green = worldRect(
+    t,
+    -CUSHION_WIDTH,
+    -CUSHION_WIDTH,
+    TABLE_WIDTH + CUSHION_WIDTH,
+    TABLE_LENGTH + CUSHION_WIDTH,
+  )
+
+  ctx.save()
+  ctx.beginPath()
+  addNotch(ctx, t, i)
+  ctx.clip()
+  ctx.beginPath()
+  ctx.rect(green.x, green.y, green.width, green.height)
+  ctx.clip()
+  // 再按洞口套一个圆：内壁只是洞口外面那一圈，超出这个圆的部分留给绿面。
+  // 不套的话整块缺口都是棕的，袋角就成了一个棕色三角。
+  ctx.beginPath()
+  ctx.arc(center.x, center.y, radius * LINER_REACH, 0, Math.PI * 2)
+  ctx.clip()
+
+  // 贴着洞沿几乎无光，退到剪口那侧才露一点暗棕——皮革内壁的色，不是纯黑。
+  // 这两档要与 drawHole 最外两档接得上（洞沿是 #31201a），接不上会在洞口
+  // 镶出一圈比洞更黑的环。
+  const liner = ctx.createRadialGradient(
+    center.x,
+    center.y,
+    radius * 0.86,
+    center.x,
+    center.y,
+    radius * LINER_REACH,
+  )
+  liner.addColorStop(0, '#1e1411')
+  liner.addColorStop(0.6, '#2b1c17')
+  // 最后一档透明：内壁往绿面上淡出去，不留一圈圆的硬边——否则洞口像套了个
+  // 棕色甜甜圈。
+  liner.addColorStop(1, 'rgba(48, 34, 28, 0)')
+  ctx.fillStyle = liner
+  ctx.fillRect(green.x, green.y, green.width, green.height)
+
+  ctx.restore()
+}
+
+// drawGuard 画护角：袋口周围那块银灰金属板。
 //
-// 六个洞都画完整的圆，**不做任何裁剪**。中袋的袋心在库边脸外侧 32mm、半径
-// 62mm，所以有半个圆压在台呢上：那就是参考图的样子——洞沿与台呢边对齐。
-// 早先按台呢框把这一半切掉，结果是「袋口像被砍掉一块」。
+// 位置有两条硬约束，标准图里都能看出来：
+//   1) 不压台呢——按「台呢和库边之外」裁一刀，绿色台面上永远不会出现金属；
+//   2) 中袋没有护角板，只留洞口外缘一圈窄边，再大就会在台呢上出环
+//      （用户点名过「中袋内侧没有灰色圆弧探进绿色台面」）。
+//
+// 袋角那一块是让出来的：金属先铺满，袋兜（drawLiner）再在洞口周围压一圈黑。
+// 反过来的话，袋兜会把整个袋角刷黑，标准图里那块银灰就没了。
+//
+// 金属面用一条「从洞沿往外淡到透明」的径向渐变，而不是一块实色方块：
+// 标准图里那块金属没有直边，是绕着洞口一圈一圈暗进木框里的。用方块的话
+// 四个角会变成四块贴上去的银灰瓷砖，边界比台子本身还硬。
+function drawGuard(
+  ctx: CanvasRenderingContext2D,
+  t: ViewTransform,
+  i: number,
+  rail: Rect,
+): void {
+  const p = POCKETS[i]
+  const center = worldToScreen(t, p.x, p.y)
+  const radius = metersToPx(t, p.radius)
+
+  ctx.save()
+
+  // 木框矩形 + 库边外沿矩形，evenodd 取「台呢和库边之外」那一环。
+  // 这里只挖到库边外沿，不再把袋口缺口算进去：缺口的形状（三角形）一直铺到
+  // 木框里，算进去的话袋角正中会被挖掉一块，而那正是护角最该亮的地方。
+  ctx.beginPath()
+  addRoundRect(ctx, rail.x, rail.y, rail.width, rail.height, RAIL_RADIUS)
+  const green = greenRectScreen(t)
+  ctx.rect(green.x, green.y, green.width, green.height)
+  ctx.clip('evenodd')
+
+  // 中袋不再额外套一个圆。早先套过 1.1 个半径，结果金属在洞口左侧只剩
+  // 一弯细月牙，看着像洞沿镶了一圈白边；标准图里那块金属是被库边外沿
+  // 一刀切平的，边界是直线不是圆弧。
+  //
+  // 明暗排布照标准图：最亮的一档落在 1.3 个半径上（就是护角绕着洞口那一圈），
+  // 往外维持在中灰，最后淡进木框。早先把最亮档放在 0.92 个半径，正好被袋兜
+  // 盖住——画了半天金属，能看见的那一圈全是暗的，袋角灰得像块水泥。
+  //
+  // 中袋只需铺到 2.6 个半径：护角在它四周就是一小块独立的金属板，
+  // 铺得太小会变成洞口外面一团灰雾，看不出是块板子。
+  const reach = p.kind === 'corner' ? radius * 2.3 : radius * 2.6
+  const metal = ctx.createRadialGradient(center.x, center.y, radius * 0.92, center.x, center.y, reach)
+  metal.addColorStop(0, PLATE_MID)
+  metal.addColorStop(0.22, PLATE_LIGHT)
+  metal.addColorStop(0.7, PLATE_MID)
+  // 最后一档透明：金属淡进木框本色，不留一条硬边。
+  metal.addColorStop(1, 'rgba(98, 94, 90, 0)')
+  ctx.fillStyle = metal
+  ctx.fillRect(center.x - reach, center.y - reach, reach * 2, reach * 2)
+
+  ctx.restore()
+}
+
+// drawJawFace 画角袋的斜边端面：两段颊板各一条短坡，再加正面那一条。
+//
+// 三条坡都从台呢剪口往里 13mm 收暗，压在袋兜与绿面之上。这是「斜边有厚度」
+// 唯一的视觉线索：少了它，布就是一刀切在水平面上；有了它，放大看能看出库边
+// 是折下来、在袋口有个立着的端面——球撞斜边时弹的就是这条边。
+//
+// 中袋不画：它的两条颊板整段落在洞口圆里，画了也会被洞盖掉；中袋的端面在
+// 洞沿上，由台呢剪口那道暗边代表。
+function drawJawFace(ctx: CanvasRenderingContext2D, t: ViewTransform, i: number): void {
+  const p = POCKETS[i]
+  if (p.kind !== 'corner') {
+    return
+  }
+  const m = POCKET_MOUTHS[i]
+  const center = worldToScreen(t, p.x, p.y)
+  const width = metersToPx(t, JAW_FACE_WIDTH)
+
+  ctx.save()
+  // 只许铺在缺口里：缺口之外是台呢，压上去就是布上多一条绿边。
+  ctx.beginPath()
+  addNotch(ctx, t, i)
+  ctx.clip()
+
+  // 三条边的内法向都指向袋心，所以同一个参考点够用。
+  jawFace(ctx, t, m.jawA, m.noseA, center, width)
+  jawFace(ctx, t, m.noseB, m.jawB, center, width)
+  jawFace(ctx, t, m.noseA, m.noseB, center, width)
+
+  ctx.restore()
+}
+
+// jawFace 沿一条边往袋口里铺一条宽 width 的实色短坡。
+//
+// 渐变轴垂直于这条边、指向袋心：贴边是台呢那一档绿，往外压到墨绿黑。
+// 三档都是实色，不用半透明——它铺在银灰金属上，半透明会混成脏绿，
+// 看起来像金属生了锈。
+function jawFace(
+  ctx: CanvasRenderingContext2D,
+  t: ViewTransform,
+  from: Point,
+  to: Point,
+  center: { x: number; y: number },
+  width: number,
+): void {
+  const a = worldToScreen(t, from.x, from.y)
+  const b = worldToScreen(t, to.x, to.y)
+  let dx = b.x - a.x
+  let dy = b.y - a.y
+  const len = Math.hypot(dx, dy)
+  if (len < 0.5) {
+    return
+  }
+  dx /= len
+  dy /= len
+
+  // 内法向：指向袋心那一侧。两个候选里选和「起点 → 袋心」同向的那个。
+  let nx = -dy
+  let ny = dx
+  if ((center.x - a.x) * nx + (center.y - a.y) * ny < 0) {
+    nx = -nx
+    ny = -ny
+  }
+
+  ctx.beginPath()
+  ctx.moveTo(a.x, a.y)
+  ctx.lineTo(b.x, b.y)
+  ctx.lineTo(b.x + nx * width, b.y + ny * width)
+  ctx.lineTo(a.x + nx * width, a.y + ny * width)
+  ctx.closePath()
+
+  const ramp = ctx.createLinearGradient(a.x, a.y, a.x + nx * width, a.y + ny * width)
+  // 贴边那一档要亮：那是斜边顶面受光的一条棱，比缺口里那块折下去的绿面亮一档。
+  // 三档都是实色，不用半透明——半透明会跟底下的绿面混成一块，棱就没了。
+  ramp.addColorStop(0, '#1d8a5e')
+  ramp.addColorStop(0.5, '#12503a')
+  ramp.addColorStop(1, '#0a1c14')
+  ctx.fillStyle = ramp
+  ctx.fill()
+}
+
+// drawHole 画圆洞：圆心与半径就是落袋判定用的那个圆（只大 0.8mm，与台呢剪口重合）。
+//
+// 不画任何外圈光环。早先洞外压过一圈 1.42r 的暗影，中袋那半个圆压在台呢上时，
+// 那圈暗影就成了「绿色台面上套了一个灰环」——标准图里没有这个环，台呢是直接
+// 剪到洞沿的，洞沿只剩一圈皮革内壁的暗棕。
 function drawHole(
   ctx: CanvasRenderingContext2D,
   p: Pocket,
@@ -728,42 +1062,25 @@ function drawHole(
 ): void {
   const out = outwardScreen(p)
   const hole = ctx.createRadialGradient(
-    center.x - out.x * radius * 0.34,
-    center.y - out.y * radius * 0.34,
-    radius * 0.06,
+    center.x - out.x * radius * 0.32,
+    center.y - out.y * radius * 0.32,
+    radius * 0.05,
     center.x,
     center.y,
     radius,
   )
   hole.addColorStop(0, POCKET_DEEP)
-  hole.addColorStop(0.52, '#0a0c10')
-  hole.addColorStop(0.86, '#1b1210')
-  hole.addColorStop(1, '#33201a')
-
-  ctx.save()
-  // 洞沿外那圈阴影：中袋的圆有一半压在台呢上，黑圆与绿布之间必须有一段
-  // 很短的暗过渡，否则就是一条硬边——那正是「圆片贴在布上」的观感。
-  const halo = ctx.createRadialGradient(
-    center.x,
-    center.y,
-    radius * 0.92,
-    center.x,
-    center.y,
-    radius * 1.42,
-  )
-  halo.addColorStop(0, 'rgba(0, 0, 0, 0.46)')
-  halo.addColorStop(0.55, 'rgba(0, 0, 0, 0.18)')
-  halo.addColorStop(1, 'rgba(0, 0, 0, 0)')
-  ctx.beginPath()
-  ctx.arc(center.x, center.y, radius * 1.42, 0, Math.PI * 2)
-  ctx.fillStyle = halo
-  ctx.fill()
+  hole.addColorStop(0.38, '#07080c')
+  // 洞底不是一整块黑：标准图里只有靠里的一半是黑的，往外 0.6 个半径就开始
+  // 转暖，到洞沿已经是一圈暗棕的皮革。做成纯黑的话，洞像一块贴上去的圆片。
+  hole.addColorStop(0.66, '#100c0a')
+  hole.addColorStop(0.86, '#221410')
+  hole.addColorStop(1, '#31201a')
 
   ctx.beginPath()
   ctx.arc(center.x, center.y, radius, 0, Math.PI * 2)
   ctx.fillStyle = hole
   ctx.fill()
-  ctx.restore()
 }
 
 // drawGuides 画目标球与母球的去向引导线。
@@ -1533,8 +1850,23 @@ function roundRectPath(
   height: number,
   radius: number,
 ): void {
-  const r = Math.min(radius, width / 2, height / 2)
   ctx.beginPath()
+  addRoundRect(ctx, x, y, width, height, radius)
+}
+
+// addRoundRect 往当前路径里追加一个圆角矩形，自己不开新路径。
+//
+// 护角的裁剪要把「木框 + 库边轮廓」凑成一条 evenodd 路径，用 roundRectPath
+// 会把前面的子路径冲掉，所以这里单独留一个只追加的版本。
+function addRoundRect(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+): void {
+  const r = Math.min(radius, width / 2, height / 2)
   ctx.moveTo(x + r, y)
   ctx.lineTo(x + width - r, y)
   ctx.arcTo(x + width, y, x + width, y + r, r)
