@@ -163,6 +163,57 @@ func (h *Handler) openRoom(ctx context.Context, userID uint) (*Match, Seat, erro
 	return nil, 0, lastErr
 }
 
+// Reopen godoc
+// @Summary      换一间房
+// @Description  把当前这间还没开打的房作废，另开一间新的（房号会变）。
+// @Tags         pool
+// @Produce      json
+// @Success      200  {object}  httputil.SwaggerEnvelope{data=pool.roomResp}
+// @Failure      401  {string}  string  "未登录"
+// @Failure      409  {string}  string  "对局进行中，不能换房"
+// @Security     Bearer
+// @Router       /pool/rooms/reopen [post]
+// Reopen 处理 POST /api/pool/rooms/reopen。
+//
+// 为什么需要它：房间只要还有人在轮询就一直活着，而对面那位可能早就关掉了页面
+// （客户端崩了、断网了、直接关机）。这时房主面对的是一个永远不点准备的人，
+// 房号也废了——不给他一个「换一间」的出口，他只能等两小时那条清扫规则。
+//
+// 换了之后房号会变：前端提示里要带上新号，否则用户会把旧号继续报给朋友。
+func (h *Handler) Reopen(c *gin.Context) {
+	ctx := c.Request.Context()
+	userID, ok := httputil.CurrentUserID(c)
+	if !ok {
+		response.Error(c, http.StatusUnauthorized, "未登录")
+		return
+	}
+
+	// 正在打的那一局不是「房间」，没有换的概念。
+	// 库表里房间与对局共用一张，所以这里必须先看一眼状态。
+	if current, err := h.store.CurrentMatchFor(ctx, userID); err == nil {
+		if current.Status == model.PoolStatusPlaying {
+			response.Error(c, http.StatusConflict, "对局进行中，打完再换")
+			return
+		}
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		httputil.LogRequestError(c, "load current match", err)
+		response.Error(c, http.StatusInternalServerError, "服务暂时不可用")
+		return
+	}
+
+	// keepID 传 0：自己开的房全部作废（含当前这间），客人座位上占的也一并腾掉。
+	h.retireOwnRooms(ctx, userID, 0)
+	h.vacateGuestSeats(ctx, userID, 0)
+
+	match, seat, err := h.openRoom(ctx, userID)
+	if err != nil {
+		httputil.LogRequestError(c, "reopen room", err)
+		response.Error(c, http.StatusInternalServerError, "开房失败，请重试")
+		return
+	}
+	h.writeRoom(c, match, seat)
+}
+
 // JoinRoom godoc
 // @Summary      按房号进房
 // @Description  把房号输进来，坐到空着的那个座位上。

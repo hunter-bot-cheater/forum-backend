@@ -765,3 +765,78 @@ func TestBothReadyStartsMatch(t *testing.T) {
 		t.Errorf("库里 status = %q，期望 playing", row.Status)
 	}
 }
+
+// 对面一直不进来时，房主可以换一间：旧房作废，新房号立刻能用。
+//
+// 没有这个出口的话，房主面对的是一个永远不点准备的人，只能等两小时清扫。
+func TestReopenRetiresOldRoomAndIssuesNewCode(t *testing.T) {
+	db := testutil.NewDB(t)
+	engine := newEngine(t, db, newRoomManager(t), map[uint]string{7: "甲", 8: "乙"}, &fakeHub{})
+
+	old := openRoomFor(t, engine, 7)
+	if status, body := postJSON(t, engine, "/api/pool/rooms/join", 8, joinRoomReq{RoomCode: old.RoomCode}); status != http.StatusOK {
+		t.Fatalf("进房失败 %d：%s", status, body)
+	}
+
+	status, body := postJSON(t, engine, "/api/pool/rooms/reopen", 7, nil)
+	if status != http.StatusOK {
+		t.Fatalf("换房失败 %d：%s", status, body)
+	}
+	var fresh roomResp
+	decodeData(t, body, &fresh)
+	if fresh.MatchID == old.MatchID {
+		t.Fatalf("换房之后还是同一间：%d", fresh.MatchID)
+	}
+	if fresh.RoomCode == old.RoomCode {
+		t.Errorf("房号没变：%s", fresh.RoomCode)
+	}
+	// 新房只有自己，而且座位还是 0——换的是房，不是身份。
+	if fresh.Seat != Seat0 || fresh.Players[1].UserID != 0 {
+		t.Errorf("新房不对：seat=%d players=%+v", fresh.Seat, fresh.Players)
+	}
+
+	// 旧房必须标 expired：留着的话「我的房间」会在两行之间跳。
+	var oldRow model.PoolMatch
+	if err := db.First(&oldRow, old.MatchID).Error; err != nil {
+		t.Fatalf("读旧房失败：%v", err)
+	}
+	if oldRow.Status != model.PoolStatusExpired {
+		t.Errorf("旧房 status = %q，期望 expired", oldRow.Status)
+	}
+
+	// 同一时刻只能有一间 waiting，否则下一次开房会挑到另一间。
+	var count int64
+	if err := db.Model(&model.PoolMatch{}).
+		Where("p0_id = ? AND status = ?", 7, model.PoolStatusWaiting).
+		Count(&count).Error; err != nil {
+		t.Fatalf("统计房间失败：%v", err)
+	}
+	if count != 1 {
+		t.Errorf("库里有 %d 间 waiting 房间，期望 1 间", count)
+	}
+
+	// 旧房号作废：别人拿着它进不来。
+	if status, _ := postJSON(t, engine, "/api/pool/rooms/join", 8, joinRoomReq{RoomCode: old.RoomCode}); status != http.StatusNotFound {
+		t.Errorf("拿旧房号进房 = %d，期望 404", status)
+	}
+}
+
+// 正在打的那一局不是「房间」，没有换的概念：必须挡住，否则会凭空多出一间房。
+func TestReopenRejectedWhilePlaying(t *testing.T) {
+	db := testutil.NewDB(t)
+	match, p0, _ := seedMatch(t, db, model.PoolStatusPlaying)
+	engine := newEngine(t, db, newRoomManager(t), map[uint]string{p0.ID: "甲"}, &fakeHub{})
+
+	status, body := postJSON(t, engine, "/api/pool/rooms/reopen", p0.ID, nil)
+	if status != http.StatusConflict {
+		t.Fatalf("对局中换房 = %d（%s），期望 409", status, body)
+	}
+
+	var row model.PoolMatch
+	if err := db.First(&row, match.ID).Error; err != nil {
+		t.Fatalf("读对局失败：%v", err)
+	}
+	if row.Status != model.PoolStatusPlaying {
+		t.Errorf("status = %q，期望仍是 playing", row.Status)
+	}
+}
