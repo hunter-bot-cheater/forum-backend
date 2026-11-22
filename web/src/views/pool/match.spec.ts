@@ -212,7 +212,7 @@ beforeEach(() => {
 })
 
 describe('对局页的回合提示', () => {
-  it('进了球回合没换人：卡片与横幅都写「继续击打」', async () => {
+  it('进了球回合没换人：顶栏与横幅都写「继续击打」', async () => {
     const { wrapper, push, finishShot, shootOnce } = await mountPage()
     push({ type: 'state', ts: 0, data: snapshot() })
     await flushPromises()
@@ -227,8 +227,8 @@ describe('对局页的回合提示', () => {
 
     // 横幅说的是连击，不是「你的回合」——玩家要能分辨这两种情况。
     expect(wrapper.find('.tb').text()).toContain('继续击打')
-    // 卡片上还要一直挂着，横幅滑走之后也看得到。
-    expect(wrapper.find('.sc__cont').text()).toBe('继续击打')
+    // 顶栏中间那一格还要一直挂着，横幅滑走之后也看得到。
+    expect(wrapper.find('.pm__cont').text()).toBe('继续击打')
   })
 
   it('换人了就不挂连击标记，横幅说「对手回合」', async () => {
@@ -242,7 +242,7 @@ describe('对局页的回合提示', () => {
     push({ type: 'turn', ts: 0, data: { seat: 1, deadline_ms: 20000 } })
     await finishShot()
 
-    expect(wrapper.find('.sc__cont').exists()).toBe(false)
+    expect(wrapper.find('.pm__cont').exists()).toBe(false)
     expect(wrapper.find('.tb').text()).toContain('对手回合')
   })
 })
@@ -330,7 +330,7 @@ describe('对局页的再约一局', () => {
   // 两个人都点了：新局开起来，这一页自己换过去。
   // 对局页不套全局布局，邀请弹层里那个跳转在这里不存在。
   it('开局信号到达时直接换到新的一局', async () => {
-    const { wrapper, push } = await mountPage()
+    const { push } = await mountPage()
     push({ type: 'state', ts: 0, data: finished() })
     await flushPromises()
 

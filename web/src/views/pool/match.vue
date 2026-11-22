@@ -15,11 +15,17 @@
           :remaining="leftCard.remaining"
           :active="leftCard.active"
           :is-me="leftCard.seat === mySeat"
-          :continuing="leftCard.active && continuing"
         />
       </div>
 
-      <span class="pm__clock">{{ clockText }}</span>
+      <div class="pm__mid">
+        <span class="pm__clock">{{ clockText }}</span>
+        <!-- 连击提示挂在读秒下面，不放进座位卡。
+             放进卡片就得多一行：卡里两行已经 54px，再加一行「继续击打」，
+             顶栏从 66px 涨到 86px，下面的球台跟着重新等比缩放一次。
+             顶栏这块正好是玩家盯读秒的地方，放这里既显眼又不占额外高度。 -->
+        <span v-if="continuing" class="pm__cont">继续击打</span>
+      </div>
 
       <div class="pm__corner pm__corner--right">
         <SeatCard
@@ -29,7 +35,6 @@
           :remaining="rightCard.remaining"
           :active="rightCard.active"
           :is-me="rightCard.seat === mySeat"
-          :continuing="rightCard.active && continuing"
         />
       </div>
     </header>
@@ -1878,7 +1883,15 @@ onBeforeRouteLeave(() => {
 
 /* 顶栏三列：左边一张卡、中间读秒、右边另一张卡。
    用 grid 的 1fr auto 1fr 而不是 flex：读秒要钉在屏幕正中，
-   两侧内容宽度不一样时 flex 会让它偏，grid 的两条 1fr 把它夹在中间。 */
+   两侧内容宽度不一样时 flex 会让它偏，grid 的两条 1fr 把它夹在中间。
+
+   高度必须写死，不能只给 min-height。
+   卡内的内容是会变的：没定组时是一行「未定组」，定组之后换成最多 7 颗球点，
+   进球后球点少一颗、行数就可能少一行。用 min-height 时顶栏会跟着这些内容
+   长高或缩回，下面的 .pm__stage 是 flex: 1，一高一矮就把球台重新等比缩放一遍
+   ——玩家看到的就是「打完一杆球桌上下动了一下」。钉死 68px 之后，
+   卡内再怎么变都只在这 68px 里挪，球台一个像素都不会动。
+   68 是按「头像 42 + 上下内边距 12 + 名字行 21 + 球点行 14」再留一点余量取的。 */
 .pm__bar {
   display: grid;
   flex: none;
@@ -1887,7 +1900,7 @@ onBeforeRouteLeave(() => {
   gap: 8px;
   width: 100%;
   max-width: 820px;
-  min-height: 58px;
+  height: 68px;
   margin: 0 auto;
   padding: 6px 10px;
   color: #e8eaed;
@@ -2006,6 +2019,30 @@ onBeforeRouteLeave(() => {
   white-space: nowrap;
 }
 
+/* 中间一格：上面读秒，下面可能挂一枚「继续击打」。
+   竖排而不是横排：读秒本身占满这一格了，横着再塞一枚胶囊会把两边的卡挤窄。 */
+.pm__mid {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* 连击标记：黄底深字的小胶囊。
+   用底色而不是只有一行字，是因为它在余光里要能被看见——玩家正盯着球台，
+   不会去读顶栏。它不是三秒就滑走的横幅，而是一直挂到这一杆打完。 */
+.pm__cont {
+  padding: 0 7px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  color: #2a2100;
+  white-space: nowrap;
+  background: #f0c02f;
+  border-radius: 999px;
+}
+
 /* 剩余空间全给球台。min-height: 0 是 flex 子项能收缩的前提，
    少了它 canvas 会按内容高度撑开，把顶栏顶出屏幕。
    右内边距给力度条让位，球台右库边不会被滑块压住。 */
@@ -2055,10 +2092,15 @@ onBeforeRouteLeave(() => {
 
 /* 桌下那一排已进袋的球：按落袋先后从左往右排，新进来的有一个落下的动作。
    min-height 恰好是一颗球加下内边距：这一排从「空」变成「有一颗」时高度不变，
-   球台就不会在进球那一刻缩一下。 */
+   球台就不会在进球那一刻缩一下。
+
+   不能折行（nowrap + 允许缩小）：一局最多 15 颗球，26px 的球在手机上只能放 11 颗，
+   第 12 颗一进来就换到第二行，底栏长高 31px，球台整块往上跳。
+   现在超出时按比例缩小、始终保持一行，一行的高度不会因为颗数变化而变。 */
 .pm__potted {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  align-items: center;
   gap: 5px;
   min-height: 28px;
   justify-content: center;
@@ -2069,10 +2111,15 @@ onBeforeRouteLeave(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  /* 26px、11px：20px 时球号只有 9px，深色底上要凑近才看得清是几号。 */
+  /* 26px、11px：20px 时球号只有 9px，深色底上要凑近才看得清是几号。
+     缩到最小 15px 是因为一局 15 颗球要在手机一行里排完（见上）。
+     aspect-ratio 让球在缩小后仍是正圆，不会压成椭圆。 */
+  flex: 0 1 26px;
+  min-width: 15px;
   width: 26px;
-  height: 26px;
-  font-size: 11px;
+  aspect-ratio: 1 / 1;
+  height: auto;
+  font-size: clamp(8px, 1.7vw, 11px);
   font-weight: 700;
   font-variant-numeric: tabular-nums;
   color: #fff;

@@ -22,7 +22,9 @@
       </div>
 
       <!-- 球点用真实球色，花色球画成白底加一圈色环：
-           光看数字要在 1~15 里找，带颜色一眼就能分出全色与花色。 -->
+           光看数字要在 1~15 里找，带颜色一眼就能分出全色与花色。
+           手机上放不下 7 颗（见样式里的 520 断点），那里只留组别文字，
+           具体剩几颗看名字旁边那个数字。 -->
       <div v-if="!assigned" class="sc__group">{{ groupLabel(group) }}</div>
       <div v-else class="sc__dots">
         <span
@@ -36,11 +38,8 @@
              这时候 remaining 是空数组，不给提示会让人以为界面出错了。 -->
         <span v-if="remaining.length === 0" class="sc__finish">打黑八</span>
       </div>
-
-      <!-- 「继续击打」是进球之后的连击状态：回合没换人，但玩家容易以为是
-           对手在打（球台上杆子还在、读秒还归自己）。放在卡片里一直挂着，
-           直到这一杆出杆才消失，比一条三秒就滑走的横幅可靠。 -->
-      <div v-if="continuing" class="sc__cont">继续击打</div>
+      <!-- 窄屏替代球点的那一行：只写组别，高度与球点行一致。 -->
+      <div v-if="assigned" class="sc__mini">{{ groupLabel(group) }}</div>
     </div>
   </div>
 </template>
@@ -51,6 +50,9 @@
 //
 // 只做展示，不读 store 也不发请求：页面拿一份快照，两边各传一次。
 // 这样「谁该打」只有页面一个判断源，卡片不会自己算出第二套结论。
+//
+// 这张卡固定两行（名字一行、组别/球点一行），别加第三行：
+// 顶栏高度是钉死的，卡里多一行不会把顶栏撑高，只会溢出到球台上。
 import { computed } from 'vue'
 import { ballLookOf } from '@/game/balls'
 import { groupLabel, hasGroup } from '@/game/score'
@@ -67,9 +69,6 @@ const props = defineProps<{
   // active 表示当前轮到他打。
   active: boolean
   isMe: boolean
-  // continuing 表示这一手是「上一杆进球之后接着打」，不是换人。
-  // 观战页不传：观战者看到的是轮次，谁连打由画面自己说明。
-  continuing?: boolean
 }>()
 
 // assigned 表示这一侧已经定组。
@@ -108,6 +107,7 @@ function dotStyle(id: string): Record<string, string> {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  max-width: 100%;
   padding: 6px 10px 6px 8px;
   border-radius: 12px;
   transition: background-color 0.2s;
@@ -183,21 +183,27 @@ function dotStyle(id: string): Record<string, string> {
   color: #79808b;
 }
 
-/* 球点允许折行：一组最多 7 颗，窄屏上一行放不下。
-   挤成一行会溢出卡片、压到时钟上，折成两行反而更好认。 */
+/* 球点不折行：一组最多 7 颗，一行放不下时按比例缩小（flex-shrink + aspect-ratio），
+   始终保持一行、始终是正圆。
+   折行的后果不是难看，是顶栏被撑高、下面的球台重新等比缩放——
+   表现出来就是「打完一杆球桌上下动」。 */
 .sc__dots {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 3px;
+  min-width: 0;
 }
 
 .sc__dot {
   display: inline-flex;
+  flex: 0 1 16px;
   align-items: center;
   justify-content: center;
   width: 16px;
-  height: 16px;
+  min-width: 0;
+  aspect-ratio: 1 / 1;
+  height: auto;
   font-size: 9px;
   font-weight: 700;
   line-height: 1;
@@ -205,12 +211,23 @@ function dotStyle(id: string): Record<string, string> {
   border-radius: 50%;
 }
 
-/* 手机上每张卡只有约 130px 宽：球点小一档，才装得下一整组。 */
+/* 窄屏这一档换成组别文字，球点让位。
+   手机上一张卡只有约 130px，减去头像 42px 与内边距，留给球点的不到 60px：
+   7 颗挤成两列、竖着堆三行，卡片长到 100px 以上，顶栏和球台都要跟着动。
+   与其把球点缩成看不清的点，不如在组别文字里说清楚，剩余颗数看名字旁边那个数。 */
+.sc__mini {
+  display: none;
+  font-size: 11px;
+  color: #79808b;
+}
+
 @media (max-width: 520px) {
-  .sc__dot {
-    width: 14px;
-    height: 14px;
-    font-size: 8px;
+  .sc__dots {
+    display: none;
+  }
+
+  .sc__mini {
+    display: block;
   }
 }
 
@@ -218,17 +235,5 @@ function dotStyle(id: string): Record<string, string> {
   font-size: 11px;
   font-weight: 600;
   color: #f0c02f;
-}
-
-/* 连击标记：黄底深字的小胶囊。用底色而不是只有一行字，
-   是因为它在余光里要能被看见——玩家正盯着球台，不会去读卡片。 */
-.sc__cont {
-  align-self: flex-start;
-  padding: 1px 7px;
-  font-size: 11px;
-  font-weight: 600;
-  color: #2a2100;
-  background: #f0c02f;
-  border-radius: 999px;
 }
 </style>

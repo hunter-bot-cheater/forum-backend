@@ -197,18 +197,35 @@ describe('drawScene：台面', () => {
     expect(countOf(ctx, 'arc')).toBeGreaterThanOrEqual(13)
   })
 
-  it('袋口的第一道裁剪是木框圆角，木框角上不会多出黑圆', () => {
+  it('袋口整组裁在库边的圆角矩形里，木框角上不会多出黑圆', () => {
     const ctx = createFakeCtx()
     drawScene(ctx, { width: 390, height: 844 }, { balls: [] }, 1)
 
-    // 袋口内部还有两种裁剪（缺口只填库边那一圈、袋兜只填缺口里），
-    // 所以不能数次数。真正要守住的是「最外那道裁剪是木框的圆角矩形」：
-    // 第一次 clip 之前最近的那条路径必须是圆角（arcTo），不能是直角矩形。
+    // 台呢那道裁剪是按缺口挖洞的 evenodd 路径（没有圆角），袋口这道才是圆角矩形。
+    // 要守的是「圆洞画在一道圆角裁剪之内」：否则洞会盖到木框的四个圆角上，
+    // 看起来就是木框角上多出一个黑圆。
     const methods = ctx.calls.map((c) => c.method)
-    const firstClip = methods.indexOf('clip')
-    expect(firstClip).toBeGreaterThan(-1)
-    const lastBegin = methods.slice(0, firstClip).lastIndexOf('beginPath')
-    expect(methods.slice(lastBegin, firstClip)).toContain('arcTo')
+    let guard = -1
+    for (let i = 0; i < methods.length; i += 1) {
+      if (methods[i] !== 'clip') {
+        continue
+      }
+      const begin = methods.slice(0, i).lastIndexOf('beginPath')
+      if (methods.slice(begin, i).indexOf('arcTo') >= 0) {
+        guard = i
+        break
+      }
+    }
+    expect(guard).toBeGreaterThan(-1)
+
+    // 六个圆洞都得在这道裁剪之后画，每个洞至少一次 arc。
+    let holes = 0
+    for (let i = guard; i < methods.length; i += 1) {
+      if (methods[i] === 'arc') {
+        holes += 1
+      }
+    }
+    expect(holes).toBeGreaterThanOrEqual(6)
   })
 
   it('木框是圆角矩形，不是直角矩形', () => {

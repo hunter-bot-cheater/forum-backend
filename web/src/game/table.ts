@@ -34,18 +34,44 @@ export const BALL_RADIUS = 0.028575
 // 尺寸与后续的碰撞判定：中袋开口略大，且入口方向只有垂直于库边一种。
 export type PocketKind = 'corner' | 'side'
 
+// 袋口尺寸按参考图（天大台球）实测的比例定，单位都是球直径 D = 57.15mm：
+//
+//   洞口直径 2.17D（124mm），角袋开口 2.08D（119mm），中袋开口 2.25D（129mm）。
+//
+// 这三组数是像素量出来的，不是估的：参考图里球径 24px、洞 52px、角袋开口
+// 50px、中袋开口 54px。洞比角袋开口还大一点点，所以画出来是「一个整圆，
+// 开口从圆上横过去」，这也正是玩家要的观感——洞不能被库边切掉一块。
+export const POCKET_RADIUS = 0.062
+
+// 角袋与中袋在库边脸上的开口宽度（两个鼻尖之间的距离），见上面的比例。
+// 中袋比角袋宽是真实球桌的规律，也让中袋打起来明显更松。
+export const CORNER_MOUTH = 0.1189
+export const SIDE_MOUTH = 0.1286
+
+// 角袋斜边相对库边脸偏转的角度：140° 的袋口角，等价于斜边偏 40°。
+// 40° 落在「收拢夹角 30°–40°」的上沿，两条斜边只差 10°，观感上既收拢
+// 又不会把口子收成尖角。
+export const CORNER_JAW_BEND = 40
+
+// 中袋斜边相对库边法线的偏转角度：袋口角 104°，即斜边偏 14°。
+// 比角袋平缓得多——中袋是「门框式」的两小段切角，不是角袋那种斜槽。
+export const SIDE_JAW_BEND = 14
+
+// 中袋颊板往库边里退一个库边厚时，纵向收进去多少：CUSHION_WIDTH * tan14°。
+// 收口宽度 = SIDE_MOUTH - 2 * 这个值 ≈ 2.25D - 0.44D = 1.8D，
+// 比角袋的收口更宽——参考图里中袋是一段平缓的切角，不是斜槽。
+const SIDE_JAW_INWARD = CUSHION_WIDTH * Math.tan((SIDE_JAW_BEND * Math.PI) / 180)
+
 // Pocket 是一个袋口。
 //
 // 这里的坐标与半径就是**落袋判定用的圆，也就是画出来的那个洞**，两者必须是
 // 同一个圆：判定圆比显示圆大，会出现「看着还压在洞口边上，球却没了」；
 // 比显示圆小，球已经掉进洞里却继续滚。所以渲染直接用这份数据，不再自己挪圆心。
 //
-// 与 pooltool 的两处刻意差异：
-//   - 圆心沿朝外方向挪到库边厚度中线上。pooltool 的袋心在库边之外
-//     （中袋 x = -0.0685），那是它围栏网格的定义，照它画整个洞会落在木框上；
-//   - 半径比 pooltool 的袋心半径小 20%。pooltool 的 0.062 m 是「球心进到多深
-//     算落袋」的判据，直径 124mm 是球径的 2.17 倍，画出来是一口井，
-//     真实球桌的角袋开口在球径 1.7 倍上下。
+// 与 pooltool 的差异：圆心沿朝外方向挪到库边厚度附近（角袋 17.96mm、
+// 中袋 32mm）。pooltool 的中袋心在 x = -0.0685，照它画整个洞会落在木框上。
+// 中袋的 32mm 是参考图的实测值（洞心离开库边脸约 0.56D）：洞因此有半个
+// 圆压在台呢上，看起来才是「圆洞嵌在库边里」，而不是贴在木框上的一口井。
 export interface Pocket {
   id: string
   kind: PocketKind
@@ -57,34 +83,23 @@ export interface Pocket {
 // POCKETS 是六个袋口，顺序为左下、左中、左上、右下、右中、右上。
 // 名字沿用 pooltool 的 lb / lc / lt 记号（left bottom / center / top）。
 //
-// 圆心到台面内沿的距离一律是半个库边厚（25.4mm），这是「洞心落在库边厚度
-// 中线上」的直接结果，也是渲染算缺口时的基准。角袋的圆心因此落在对角线
-// 上、离两条库边各 17.96mm。
+// 角袋的圆心落在对角线、离两条库边各 17.96mm；中袋的圆心离开库边脸 32mm。
+// 两个值都不参与开口宽度计算（开口由 CORNER_MOUTH / SIDE_MOUTH 直接给出），
+// 只决定「洞有多深地探进台呢」。
 export const POCKETS: ReadonlyArray<Pocket> = [
-  { id: 'lb', kind: 'corner', x: -0.01796, y: -0.01796, radius: 0.0496 },
-  { id: 'lc', kind: 'side', x: -0.0254, y: 0.9906, radius: 0.0516 },
-  { id: 'lt', kind: 'corner', x: -0.01796, y: 1.99916, radius: 0.0496 },
-  { id: 'rb', kind: 'corner', x: 1.00856, y: -0.01796, radius: 0.0496 },
-  { id: 'rc', kind: 'side', x: 1.016, y: 0.9906, radius: 0.0516 },
-  { id: 'rt', kind: 'corner', x: 1.00856, y: 1.99916, radius: 0.0496 },
+  { id: 'lb', kind: 'corner', x: -0.01796, y: -0.01796, radius: POCKET_RADIUS },
+  { id: 'lc', kind: 'side', x: -0.032, y: 0.9906, radius: POCKET_RADIUS },
+  { id: 'lt', kind: 'corner', x: -0.01796, y: 1.99916, radius: POCKET_RADIUS },
+  { id: 'rb', kind: 'corner', x: 1.00856, y: -0.01796, radius: POCKET_RADIUS },
+  { id: 'rc', kind: 'side', x: 1.0226, y: 0.9906, radius: POCKET_RADIUS },
+  { id: 'rt', kind: 'corner', x: 1.00856, y: 1.99916, radius: POCKET_RADIUS },
 ]
-
-// 袋心到台面内沿的距离。渲染算缺口、物理算颊板起点都用它，
-// 不要各处自己写 0.0254：两者差几毫米，斜边就和洞错开了。
-export const POCKET_INSET = CUSHION_WIDTH / 2
-
-// 颊板鼻尖离开袋心沿库边的距离，以洞口半径为 1。
-//
-// 1.32 让袋口在库边脸上的开口（两侧各 1.32r，共约 136mm）明显宽于洞径
-// （约 103mm）：洞整个落在开口里，看上去是「台呢被啃掉一个 V，洞在 V 里」。
-// 再小一点洞会比开口还宽，洞沿会压到库边脸上，像贴在布上的圆片。
-export const POCKET_JAW_HALF = 1.32
 
 // 库边与颊板都是线段，格式 [x1, y1, x2, y2]，单位米。
 export type CushionSegment = readonly [number, number, number, number]
 
-// 一条袋口的张口：两个鼻尖、两条 45° 颊板的外端。
-// 渲染按它画 V 形暗面与斜边高光，物理按同样的点生成碰撞线段——
+// 一条袋口的张口：两个鼻尖、两条颊板的外端。
+// 渲染按它画袋兜暗面与斜边高光，物理按同样的点生成碰撞线段——
 // 画出来的斜边就是能撞到的斜边，否则会出现「看着擦着袋口弹了一下，
 // 另一台机器上却没有」。
 export interface PocketMouth {
@@ -92,57 +107,77 @@ export interface PocketMouth {
   // 鼻尖：颊板与库边脸的交点，也是直线库边的端点。
   noseA: { x: number; y: number }
   noseB: { x: number; y: number }
-  // 颊板外端：落在库边外沿上。两条颊板在这里收口，形成袋兜的底。
+  // 颊板外端。角袋落在库边外沿（斜槽的入口），中袋落在台呢里
+  // （梯形缺口的短底边）——两类袋口的张口方向不同，见 mouthOf。
   jawA: { x: number; y: number }
   jawB: { x: number; y: number }
 }
 
 // cornerMouth / sideMouth 分别算出角袋与中袋的张口几何。
 //
-// 角袋的两条颊板都朝袋角那条对角线走（左下角就是 -x-y 方向），
-// 中袋的两条颊板各自朝远离袋心的方向走；两者都从「库边脸上的鼻尖」
-// 斜 45° 退到库边外沿，斜边与库边脸的夹角正好 135°。
+// 两种袋口的斜边不是一种类型，这是参考图里最容易被忽略、但一眼能看出区别的一处：
+//
+//   角袋：两条颊板**互相平行**，都朝袋角那条对角线退出去，各自与库边脸成 135°
+//         （也就是斜边本身 45°）。对称轴就是过袋心的对角线。两条平行线夹出
+//         一条 45° 的斜槽，球沿着斜槽进洞。
+//   中袋：两条颊板**不平行**，从库边脸上最宽的两个鼻尖朝里收，形成一个梯形，
+//         长底边（开口）朝向台面内部、短底边贴着洞口。两条斜边各退一个库边
+//         厚、各收 50mm，正好是参考图量到的 2.25D → 0.5D。
 function mouthOf(p: Pocket): PocketMouth {
-  const half = p.radius * POCKET_JAW_HALF
   if (p.kind === 'side') {
     // 中袋落在一条库边的中段：整张开口在同一条库边脸上。
     // 两条颊板都朝袋心收（越往库边外沿越窄），所以纵向位移一律取反号：
     // 取同号会让颊板背对洞口斜出去，斜边根本碰不到洞，只剩一个大三角缺口。
+    const half = SIDE_MOUTH / 2
+    // 斜边朝洞口收 14°：越往库边外沿走，两条斜边的纵向间距越小。
+    const inward = SIDE_JAW_INWARD
     if (p.x < 0 || p.x > TABLE_WIDTH) {
       const faceX = p.x < 0 ? 0 : TABLE_WIDTH
-      const railX = p.x < 0 ? -CUSHION_WIDTH : TABLE_WIDTH + CUSHION_WIDTH
+      const outX = p.x < 0 ? -CUSHION_WIDTH : CUSHION_WIDTH
       return {
         id: p.id,
         noseA: { x: faceX, y: p.y + half },
         noseB: { x: faceX, y: p.y - half },
-        jawA: { x: railX, y: p.y + half - CUSHION_WIDTH },
-        jawB: { x: railX, y: p.y - half + CUSHION_WIDTH },
+        jawA: { x: faceX + outX, y: p.y + half - inward },
+        jawB: { x: faceX + outX, y: p.y - half + inward },
       }
     }
     const faceY = p.y < 0 ? 0 : TABLE_LENGTH
-    const railY = p.y < 0 ? -CUSHION_WIDTH : TABLE_LENGTH + CUSHION_WIDTH
+    const outY = p.y < 0 ? -CUSHION_WIDTH : CUSHION_WIDTH
     return {
       id: p.id,
       noseA: { x: p.x - half, y: faceY },
       noseB: { x: p.x + half, y: faceY },
-      jawA: { x: p.x - half + CUSHION_WIDTH, y: railY },
-      jawB: { x: p.x + half - CUSHION_WIDTH, y: railY },
+      jawA: { x: p.x - half + inward, y: faceY + outY },
+      jawB: { x: p.x + half - inward, y: faceY + outY },
     }
   }
 
-  // 角袋：横库上一条颊板、纵库上一条颊板，都朝袋角那条对角线退出去。
-  // 鼻尖从「袋心投影到库边脸的那个点」往台面内侧让 half：袋心本身在库边
-  // 外面十几毫米，直接按它算的话鼻尖会跑到台子外面去。
-  const sx = p.x < 0 ? -1 : 1
-  const sy = p.y < 0 ? -1 : 1
+  // 角袋：两个鼻尖都在库边脸上，各自离袋角 CORNER_MOUTH/√2。
+  // 这个距离是「开口宽度」倒推出来的：开口线在库边脸上截出多长，鼻尖就
+  // 偏移 L/√2 各就各位，量出来正好是 L。不要再写成「袋心 ± 多少倍半径」
+  // ——袋心在台外，那样算出来的鼻尖会跟着圆心漂移。
+  //
+  // 斜边方向：与库边脸成 140°，也就是朝洞口那边偏 40°（CORNER_JAW_BEND）。
+  // 两条斜边因此只差 10°、几乎平行，各自朝洞心收过去，在洞口外侧交汇，
+  // 交汇点被圆洞盖住——看起来就是「两段斜边把洞口半围住」。
+  // 取 45° 时两条斜边会重合，袋口变成一刀平切，没有「收拢」的意思；
+  // 取 30° 又太竖，两条斜边在台呢上拐得太急，像缺了一角。
+  const nose = CORNER_MOUTH / Math.SQRT2
+  const bend = (CORNER_JAW_BEND * Math.PI) / 180
+  const cosB = Math.cos(bend)
+  const sinB = Math.sin(bend)
+  const depth = CUSHION_WIDTH / sinB
+  const inX = p.x < 0 ? 1 : -1
+  const inY = p.y < 0 ? 1 : -1
   const faceX = p.x < 0 ? 0 : TABLE_WIDTH
   const faceY = p.y < 0 ? 0 : TABLE_LENGTH
   return {
     id: p.id,
-    noseA: { x: p.x - sx * half, y: faceY },
-    noseB: { x: faceX, y: p.y - sy * half },
-    jawA: { x: p.x - sx * half + sx * CUSHION_WIDTH, y: faceY + sy * CUSHION_WIDTH },
-    jawB: { x: faceX + sx * CUSHION_WIDTH, y: p.y - sy * half + sy * CUSHION_WIDTH },
+    noseA: { x: faceX + inX * nose, y: faceY },
+    noseB: { x: faceX, y: faceY + inY * nose },
+    jawA: { x: faceX + inX * (nose - depth * cosB), y: faceY - inY * CUSHION_WIDTH },
+    jawB: { x: faceX - inX * CUSHION_WIDTH, y: faceY + inY * (nose - depth * cosB) },
   }
 }
 
@@ -163,7 +198,8 @@ export const CUSHION_RUNS: ReadonlyArray<CushionSegment> = [
   [POCKET_MOUTHS[2].noseA.x, TABLE_LENGTH, POCKET_MOUTHS[5].noseA.x, TABLE_LENGTH],
 ]
 
-// CUSHION_JAWS 是十二条 45° 颊板，每条从鼻尖退到库边外沿。
+// CUSHION_JAWS 是十二条颊板：角袋的退到库边外沿（45° 斜槽的两壁），
+// 中袋的切进台呢（梯形缺口的两条斜边）。
 export const CUSHION_JAWS: ReadonlyArray<CushionSegment> = POCKET_MOUTHS.flatMap((m) => [
   [m.noseA.x, m.noseA.y, m.jawA.x, m.jawA.y] as CushionSegment,
   [m.noseB.x, m.noseB.y, m.jawB.x, m.jawB.y] as CushionSegment,
@@ -172,8 +208,9 @@ export const CUSHION_JAWS: ReadonlyArray<CushionSegment> = POCKET_MOUTHS.flatMap
 // CUSHION_BACKS 是六个袋兜的底：把两条颊板的外端连起来。
 //
 // 没有它，球从袋口斜着冲进去就会从两条颊板之间穿出去，落在木框上继续滚
-// ——看起来像球飞出了台子。这段挡板整个落在洞口圆里，正常进袋的球
-// 在碰到它之前就已经被判落袋，所以它只兜住「擦着袋口没进」的那一类。
+// ——看起来像球飞出了台子。这段挡板整个落在洞口圆里：正常进袋的球
+// 在碰到它之前就已经被判落袋（判定圆比它大一圈），所以它只兜住
+// 「擦着袋口没进、在袋喉里打转」的那一类。
 export const CUSHION_BACKS: ReadonlyArray<CushionSegment> = POCKET_MOUTHS.map((m) => [
   m.jawA.x,
   m.jawA.y,

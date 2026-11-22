@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
   BALL_RADIUS,
+  CORNER_JAW_BEND,
+  CORNER_MOUTH,
   CUSHION_WIDTH,
+  POCKET_MOUTHS,
   POCKETS,
   RACK_EIGHTBALL,
+  SIDE_JAW_BEND,
+  SIDE_MOUTH,
   TABLE_LENGTH,
   TABLE_WIDTH,
   remainingBallsOfGroup,
@@ -37,12 +42,13 @@ describe('袋口', () => {
     expect(POCKETS.filter((p) => p.kind === 'side')).toHaveLength(2)
   })
 
-  it('中袋开口比角袋略大', () => {
+  it('中袋开口比角袋宽，洞口两者一样大', () => {
     const corner = POCKETS.find((p) => p.id === 'lb')
     const side = POCKETS.find((p) => p.id === 'lc')
     expect(corner).toBeDefined()
     expect(side).toBeDefined()
-    expect(side!.radius).toBeGreaterThan(corner!.radius)
+    expect(SIDE_MOUTH).toBeGreaterThan(CORNER_MOUTH)
+    expect(side!.radius).toBeCloseTo(corner!.radius, 9)
   })
 
   it('中袋贴在左右库边的中点', () => {
@@ -55,6 +61,102 @@ describe('袋口', () => {
   it('袋口开口大于球直径，球才能落进去', () => {
     for (const p of POCKETS) {
       expect(p.radius * 2).toBeGreaterThan(BALL_RADIUS * 2)
+    }
+  })
+
+  it('尺寸按参考图的比例：洞 2.17 球径，角袋 2.08、中袋 2.25', () => {
+    const d = BALL_RADIUS * 2
+    expect((POCKETS[0].radius * 2) / d).toBeCloseTo(2.17, 1)
+    expect(CORNER_MOUTH / d).toBeCloseTo(2.08, 1)
+    expect(SIDE_MOUTH / d).toBeCloseTo(2.25, 1)
+  })
+})
+
+describe('袋口斜边', () => {
+  // 角袋与中袋的斜边不是一类东西，规则直接来自参考图的观察：
+  //   角袋：两条斜边各朝洞口偏 40°（袋口角 140°），因此只差 10°、几乎平行；
+  //   中袋：两条斜边各偏 14°（袋口角 104°），收口更平、更宽。
+  // 用几何断言锁住，免得以后调数值时又把两类调成一种。
+  function dirOf(a: { x: number; y: number }, b: { x: number; y: number }) {
+    return { dx: b.x - a.x, dy: b.y - a.y }
+  }
+
+  // 两条直线的夹角，只关心 0~90°。
+  function angleBetween(a: { dx: number; dy: number }, b: { dx: number; dy: number }) {
+    const cos =
+      (a.dx * b.dx + a.dy * b.dy) /
+      (Math.hypot(a.dx, a.dy) * Math.hypot(b.dx, b.dy))
+    return (Math.acos(Math.min(1, Math.max(-1, cos))) * 180) / Math.PI
+  }
+
+  it('角袋两条斜边各朝洞口偏 40 度，彼此只差 10 度', () => {
+    for (let i = 0; i < POCKETS.length; i += 1) {
+      const p = POCKETS[i]
+      if (p.kind !== 'corner') {
+        continue
+      }
+      const m = POCKET_MOUTHS[i]
+      const a = dirOf(m.noseA, m.jawA)
+      const b = dirOf(m.noseB, m.jawB)
+      // 颊板 A 长在下库里（库边脸沿 x），颊板 B 长在侧库里（库边脸沿 y），
+      // 所以「与库边脸成多少度」对 B 要拿 |dx| 比 |dy|。
+      expect((Math.atan2(Math.abs(a.dy), Math.abs(a.dx)) * 180) / Math.PI).toBeCloseTo(
+        CORNER_JAW_BEND,
+        6,
+      )
+      expect((Math.atan2(Math.abs(b.dx), Math.abs(b.dy)) * 180) / Math.PI).toBeCloseTo(
+        CORNER_JAW_BEND,
+        6,
+      )
+      expect(angleBetween(a, b)).toBeCloseTo(90 - CORNER_JAW_BEND * 2, 6)
+    }
+  })
+
+  it('角袋开口宽度就是两个鼻尖之间的距离', () => {
+    for (let i = 0; i < POCKETS.length; i += 1) {
+      if (POCKETS[i].kind !== 'corner') {
+        continue
+      }
+      const m = POCKET_MOUTHS[i]
+      expect(Math.hypot(m.noseB.x - m.noseA.x, m.noseB.y - m.noseA.y)).toBeCloseTo(
+        CORNER_MOUTH,
+        6,
+      )
+    }
+  })
+
+  it('中袋斜边偏 14 度，梯形长底边朝台面内部', () => {
+    for (let i = 0; i < POCKETS.length; i += 1) {
+      const p = POCKETS[i]
+      if (p.kind !== 'side') {
+        continue
+      }
+      const m = POCKET_MOUTHS[i]
+      const mouth = Math.hypot(m.noseB.x - m.noseA.x, m.noseB.y - m.noseA.y)
+      const back = Math.hypot(m.jawB.x - m.jawA.x, m.jawB.y - m.jawA.y)
+      const a = dirOf(m.noseA, m.jawA)
+      const b = dirOf(m.noseB, m.jawB)
+      expect(mouth).toBeCloseTo(SIDE_MOUTH, 6)
+      // 长底边朝台内 = 库边脸上的开口比库边外沿的收口宽。
+      expect(back).toBeLessThan(mouth)
+      expect(angleBetween(a, b)).toBeGreaterThan(0)
+      // 斜边离开库边法线的角度就是 SIDE_JAW_BEND。
+      expect((Math.atan2(Math.abs(b.dy), Math.abs(b.dx)) * 180) / Math.PI).toBeCloseTo(
+        SIDE_JAW_BEND,
+        6,
+      )
+      const faceX = p.x < 0 ? 0 : TABLE_WIDTH
+      expect(m.noseA.x).toBeCloseTo(faceX, 6)
+    }
+  })
+
+  it('洞是整圆，中袋有一半压在台呢上', () => {
+    for (const p of POCKETS) {
+      if (p.kind !== 'side') {
+        continue
+      }
+      const faceX = p.x < 0 ? 0 : TABLE_WIDTH
+      expect(Math.abs(p.x - faceX)).toBeLessThan(p.radius)
     }
   })
 })

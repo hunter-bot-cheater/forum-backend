@@ -477,13 +477,16 @@ onBeforeUnmount(() => {
 
 /* 与对局页同一套顶栏：左右各一张座位卡，中间是「观战」标记。
    grid 的 1fr auto 1fr 让标记钉在正中，两张卡宽度不一样也不会偏。 */
+/* 与对局页同理：高度钉死，不跟卡内内容走。
+   观战页的卡同样会在「未定组」与「最多 7 颗球点」之间切换，
+   用 min-height 的话顶栏会高一截矮一截，下面的球台跟着重新缩放。 */
 .wt__bar {
   display: grid;
   flex: none;
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
   gap: 8px;
-  min-height: 58px;
+  height: 68px;
   padding: 6px 10px;
 }
 
