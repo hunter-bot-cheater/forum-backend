@@ -75,7 +75,39 @@ function isAuthEndpoint(url: string | undefined): boolean {
 // 这就是「第一个去刷新，后续挂起」的实现，锁是 refreshing，队列是 waiters。
 
 let refreshing = false
-let waiters: Array<(token: string | null) => void> = []
+
+// RefreshOutcome 是一轮刷新的结果。
+//
+// fatal 分开记，因为「没换到票」有两种完全不同的原因：
+//   - refresh 票本身失效（服务端回 401）：只能重新登录；
+//   - 被限流、超时、服务端 5xx：登录态还是好的，下一次请求再换一次就行。
+// 原来两种都按失效处理，于是服务器一抖动、限流桶一满，正在打对局的人
+// 就被踢回登录页——看到的提示永远是「登录已过期」，实际根本没过期。
+interface RefreshOutcome {
+  token: string | null
+  fatal: boolean
+}
+
+let waiters: Array<(outcome: RefreshOutcome) => void> = []
+
+// RefreshFailed 带上「这次失败是不是致命的」，供 waitForToken 区分。
+class RefreshFailed extends Error {
+  fatal: boolean
+
+  constructor(message: string, fatal: boolean) {
+    super(message)
+    this.fatal = fatal
+  }
+}
+
+// isFatalStatus 判断刷新失败的状态码要不要当成「登录失效」。
+//
+// 401 是 refresh 票被服务端拒了（过期、已轮换、泄露撤销）；
+// 400 是票的格式不对，同样救不回来。其余（429 限流、5xx、网络错误）
+// 都是临时问题，重试有机会成功。
+function isFatalStatus(status: number | undefined): boolean {
+  return status === 401 || status === 400
+}
 
 // requestNewToken 用 refresh 换一对新 token，并就地更新本地存储。
 // 用裸 axios 而不是 service：走实例会再进一遍拦截器，
@@ -83,17 +115,25 @@ let waiters: Array<(token: string | null) => void> = []
 async function requestNewToken(): Promise<string> {
   const refresh = getRefreshToken()
   if (!refresh) {
-    throw new Error('没有可用的 refresh token')
+    // 本地没有 refresh，说明这个人是游客，不是「登录过期」。
+    throw new RefreshFailed('没有可用的 refresh token', true)
   }
 
-  const resp = await axios.post(
-    baseURL + '/auth/refresh',
-    { refresh_token: refresh },
-    { timeout: 10000, headers: { 'Content-Type': 'application/json' } },
-  )
+  const resp = await axios
+    .post(
+      baseURL + '/auth/refresh',
+      { refresh_token: refresh },
+      { timeout: 10000, headers: { 'Content-Type': 'application/json' } },
+    )
+    .catch((error: unknown) => {
+      const status = axios.isAxiosError(error) ? error.response?.status : undefined
+      throw new RefreshFailed('刷新请求失败', isFatalStatus(status))
+    })
+
   const body = resp.data
   if (!body || body.code !== 0 || !body.data) {
-    throw new Error('刷新响应格式不正确')
+    // 200 但 body 不对，属于服务端异常而不是票失效，不该因此登出。
+    throw new RefreshFailed('刷新响应格式不正确', false)
   }
   // 先存再返回：调用方拿到 token 后会立刻重放请求，
   // 而请求拦截器读的是 localStorage，存晚了会带着旧 access 再 401 一次。
@@ -105,17 +145,17 @@ async function requestNewToken(): Promise<string> {
 // flushWaiters 把队列一次清空并逐个唤醒。
 // 先取出来再清空：唤醒时如果某个回调同步触发了新的 401，
 // 它应该去排下一轮队，而不是往正在遍历的数组里追加。
-function flushWaiters(token: string | null): void {
+function flushWaiters(outcome: RefreshOutcome): void {
   const pending = waiters
   waiters = []
   for (const resolve of pending) {
-    resolve(token)
+    resolve(outcome)
   }
 }
 
-// waitForToken 返回一个「可用的新 access」，必要时触发刷新。
-// 已经有请求在刷新时，这里返回的 Promise 会一直挂着，直到那一轮刷新结束。
-function waitForToken(): Promise<string | null> {
+// waitForToken 返回一轮刷新的结果，必要时自己发起刷新。
+// 已经有请求在刷新时，这里返回的 Promise 会一直挂着，直到那一轮结束。
+function waitForToken(): Promise<RefreshOutcome> {
   if (refreshing) {
     return new Promise((resolve) => {
       waiters.push(resolve)
@@ -129,15 +169,17 @@ function waitForToken(): Promise<string | null> {
       // finally 是另一个微任务，如果在那里松锁，恰好在这个间隙收到 401 的请求
       // 会看到 refreshing 仍为 true 而排进队列，可队列刚被清空，它就永远挂着。
       refreshing = false
-      flushWaiters(token)
-      return token
+      const outcome: RefreshOutcome = { token, fatal: false }
+      flushWaiters(outcome)
+      return outcome
     })
-    .catch(() => {
-      // 刷新失败：把 null 发给所有等待者，让它们自己走登出分支。
+    .catch((error: unknown) => {
       // 这里不抛出，否则第一个请求的错误会盖掉排队请求各自的原始错误。
+      const fatal = error instanceof RefreshFailed ? error.fatal : false
       refreshing = false
-      flushWaiters(null)
-      return null
+      const outcome: RefreshOutcome = { token: null, fatal }
+      flushWaiters(outcome)
+      return outcome
     })
 }
 
@@ -208,15 +250,20 @@ service.interceptors.response.use(
         return Promise.reject(error)
       }
 
-      const token = await waitForToken()
-      if (token) {
+      const outcome = await waitForToken()
+      if (outcome.token) {
         // 重放原请求。不再手动改 Authorization：
         // 请求拦截器会读刚写进 localStorage 的新 access，只有一处来源。
         // 返回的是新的 Promise，页面拿到的是重放结果，感知不到中间换过票。
         return service(config)
       }
 
-      forceLogout('登录已过期，请重新登录')
+      // 只有票真的失效才登出。限流、超时这类临时失败保持登录态：
+      // 把原请求的错误交给页面（轮询接口是 quiet 的，不会弹提示），
+      // 下一次请求会再触发一轮刷新，服务端恢复后就自己好了。
+      if (outcome.fatal) {
+        forceLogout('登录已过期，请重新登录')
+      }
       return Promise.reject(error)
     }
 

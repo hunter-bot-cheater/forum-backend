@@ -300,6 +300,25 @@ func New(deps Deps) (*gin.Engine, error) {
 		return nil, err
 	}
 
+	// 刷新与登出单独一个桶，理由与 WS 那条类似，但后果更严重：
+	// 它们只查一次 Redis，代价极低，却**必须能过**。
+	//
+	// 挂全局桶里时，大厅每两秒轮询在线名单与房间、再加上通知与邀请，
+	// 突发容量（10 个、每秒补 2 个）经常是空的。access 恰好过期那一刻，
+	// 页面同时收到几个 401，第一个去刷新就撞上 429；前端把「没换到票」
+	// 当成登录失效，正在约战的人被直接踢回登录页，且毫无线索。
+	//
+	// 容量 30、每秒补 5 个：正常用户一小时也用不了几次，
+	// 只有多开标签页、或者整页连着刷新才可能连打。
+	refreshLimit, err := middleware.RateLimit(deps.Redis, middleware.RateLimitConfig{
+		Capacity:  30,
+		Rate:      5,
+		KeyPrefix: deps.RateLimit.KeyPrefix + "refresh:",
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	// 上传的图片由后端直接吐，本机开发够用。
 	// 生产是 Nginx 读同一个目录（见 deploy/prod/locations.conf），请求根本不会到这里，
 	// 但仍然注册：单机部署、或者 Nginx 漏配 /uploads 时，图还能显示出来。
@@ -330,6 +349,19 @@ func New(deps Deps) (*gin.Engine, error) {
 	wsGroup.GET("/notifications", wsHandler.Notifications)
 	wsGroup.GET("/stats", wsHandler.Stats)
 	wsGroup.GET("/game", poolHandler.Serve)
+
+	// 认证的两个无状态入口单独建组。
+	//
+	// 不挂 JWTAuth：refresh 进来时 access 通常已经过期，logout 也可能刚好过期，
+	// 卡住会让用户退不出去。两者的身份完全由 body 里的 refresh 证明。
+	// 也不再经过 api 组的全局 rateLimit，改用上面那个独立的宽松桶——
+	// 这一条是「约战打到一半被踢回登录页」的根因，注释见 refreshLimit。
+	authGroup := r.Group("/api/auth")
+	authGroup.Use(limitBody(1 << 20))
+	authGroup.Use(refreshLimit)
+	authGroup.POST("/refresh", userHandler.Refresh)
+	authGroup.POST("/logout", userHandler.Logout)
+
 	uploads.Use(middleware.JWTAuth(deps.JWT))
 	// 封禁限制的是「制造内容」，上传头像是个人资料的一部分，
 	// 但头像是公开可见的展示位，被封的人不该还能往上放图。
@@ -341,11 +373,8 @@ func New(deps Deps) (*gin.Engine, error) {
 	{
 		api.POST("/register", credentialLimit, userHandler.Register)
 		api.POST("/login", credentialLimit, userHandler.Login)
-		// 刷新与登出都不挂 JWTAuth：前者进来时 access 通常已经过期，
-		// 后者的 access 也可能刚好过期，卡住会让用户退不出去。
-		// 两者的身份完全由 body 里的 refresh 证明。
-		api.POST("/auth/refresh", userHandler.Refresh)
-		api.POST("/auth/logout", userHandler.Logout)
+		// /auth/refresh 与 /auth/logout 在上面单独建组注册了，
+		// 不能在这里再注册一次：gin 对同一路径重复注册会直接 panic。
 
 		// 读接口公开，不挂 JWTAuth。
 		// 文章详情挂 optionalAuth：公开可看，但登录用户要多算一个「我点过赞没」，
