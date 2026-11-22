@@ -36,17 +36,17 @@ async function press(wrapper: ReturnType<typeof mountSlider>, clientY: number) {
 }
 
 describe('PowerSlider', () => {
-  it('在轨道底部按下是 0 力度', async () => {
+  it('在轨道顶部按下是 0 力度', async () => {
     const wrapper = mountSlider(0.5)
-    await press(wrapper, 300)
+    await press(wrapper, 100)
     const emitted = wrapper.emitted('update:value')
     expect(emitted).toBeTruthy()
     expect(emitted![0][0]).toBeCloseTo(0, 6)
   })
 
-  it('在轨道顶部按下是满力', async () => {
+  it('拉到轨道底部是满力', async () => {
     const wrapper = mountSlider(0)
-    await press(wrapper, 100)
+    await press(wrapper, 300)
     const emitted = wrapper.emitted('update:value')
     expect(emitted![0][0]).toBeCloseTo(1, 6)
   })
@@ -57,23 +57,23 @@ describe('PowerSlider', () => {
     expect(wrapper.emitted('update:value')![0][0]).toBeCloseTo(0.5, 6)
   })
 
-  it('超出轨道上方不会超过 1', async () => {
+  it('超出轨道下方不会超过 1', async () => {
     const wrapper = mountSlider(0)
-    await press(wrapper, 20)
+    await press(wrapper, 380)
     expect(wrapper.emitted('update:value')![0][0]).toBe(1)
   })
 
   it('松手后出杆', async () => {
     const wrapper = mountSlider(0.6)
-    await press(wrapper, 200)
-    await wrapper.trigger('pointerup', { clientY: 200, pointerId: 1, pointerType: 'mouse' })
+    await press(wrapper, 220)
+    await wrapper.trigger('pointerup', { clientY: 220, pointerId: 1, pointerType: 'mouse' })
     expect(wrapper.emitted('shoot')).toHaveLength(1)
   })
 
   it('力度几乎为零时松手不算出杆', async () => {
     const wrapper = mountSlider(0.01)
-    await press(wrapper, 298)
-    await wrapper.trigger('pointerup', { clientY: 298, pointerId: 1, pointerType: 'mouse' })
+    await press(wrapper, 102)
+    await wrapper.trigger('pointerup', { clientY: 102, pointerId: 1, pointerType: 'mouse' })
     expect(wrapper.emitted('shoot')).toBeUndefined()
   })
 

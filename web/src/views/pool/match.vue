@@ -59,13 +59,10 @@
     </main>
 
     <footer class="pm__foot">
-      <!-- 手中球：那圈微调尺用不上（方向还没定），换成选位置与确认。
-           放在底栏还顺带把球台的底库让出来，不再压着库边画一条黄条。 -->
+      <!-- 手中球：那圈微调尺用不上（方向还没定），换成一行提示。
+           提示留在底栏而不是球台上，免得压住库边影响点击。 -->
       <div v-if="mustPlace" class="pm__place">
-        <span class="pm__place-tip">白球跟着指针走，选好位置再确认</span>
-        <button class="pm__place-ok" type="button" :disabled="placing" @click="confirmPlace">
-          放这里
-        </button>
+        <span class="pm__place-tip">点一下台面，白球就放在那里</span>
       </div>
       <FineTuneRail v-else :phi="phi" :disabled="!canAim" @nudge="onNudge" />
     </footer>
@@ -262,9 +259,9 @@ const mustPlace = computed(() => {
 
 // ghost 是手中球还没落位时跟着指针走的虚影位置（世界坐标）。
 //
-// 落位不再是「点一下就定」：手里有球的时候，指针指到哪虚影就跟到哪，
-// 觉得合适再点「放这里」。一次点错就得重新等犯规才能再挪，这在真人台球里
-// 是不能接受的——自由球本来就允许拿着球在台面上比划。
+// 虚影就是那颗球本身，不是「预览」：指针指到哪它跟到哪，点一下台面就落定。
+// 不用底栏按钮确认，是因为球会一直跟着指针——挪开鼠标去按按钮的路上，
+// 球已经跟着走了，永远按不出「先摆好后确认」。
 const ghost = ref<Point | null>(null)
 
 // 拿到手中球时把虚影摆在一个合理的位置：母球还在台上就摆它现在的位置
@@ -793,11 +790,11 @@ function onNudge(deltaDeg: number) {
 }
 
 // onTap 处理台面点按。两种用意，按当前状态分流：
-//   - 手里握着母球：把虚影挪到点到的位置（不落位，落位要点下面的按钮）；
+//   - 手里握着母球：点哪里就落在哪里；
 //   - 平时：锁定 / 解锁方向。锁上之后才能安心去拖力度条。
 function onTap(point: Point) {
   if (mustPlace.value) {
-    moveGhost(point)
+    placeCue(point)
     return
   }
   if (!canAim.value) {
@@ -809,17 +806,6 @@ function onTap(point: Point) {
     return
   }
   showNotice('可以重新瞄准了')
-}
-
-// confirmPlace 把虚影停下的位置交给服务端。
-//
-// 单独一步确认，是为了让手里这颗球可以反复挪：点一下台面就落定的话，
-// 手一抖就得等下一次犯规才能再摆。真人台球里这颗球本来就是自己拿着放的。
-function confirmPlace() {
-  if (!ghost.value) {
-    return
-  }
-  placeCue(ghost.value)
 }
 
 // placeCue 把母球放到点到的位置。
@@ -1223,40 +1209,18 @@ onBeforeRouteLeave(() => {
   transform: translateX(-50%) translateY(-6px);
 }
 
-/* 手中球提示贴在球台底部：手指正在台面上找落点，
-   提示放在离手指最近的地方最不容易被忽略。 */
+/* 手中球只有一句提示：落位靠点台面，底栏不放按钮——
+   球跟着指针走，挪去按按钮的路上球就跑了。 */
 .pm__place {
   display: flex;
-  flex-direction: row;
   align-items: center;
   justify-content: center;
-  gap: 12px;
+  height: 44px;
 }
 
 .pm__place-tip {
   font-size: 12px;
   color: rgba(255, 255, 255, 0.62);
-}
-
-.pm__place-ok {
-  padding: 7px 20px;
-  font-size: 13px;
-  font-weight: 600;
-  color: #0e1116;
-  cursor: pointer;
-  background: #f0c02f;
-  border: 0;
-  border-radius: 999px;
-  transition: filter 0.15s ease;
-}
-
-.pm__place-ok:hover:not(:disabled) {
-  filter: brightness(1.08);
-}
-
-.pm__place-ok:disabled {
-  cursor: default;
-  opacity: 0.55;
 }
 
 .pm__gone {
