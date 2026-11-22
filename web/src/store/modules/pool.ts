@@ -4,6 +4,7 @@ import {
   acceptInvite,
   createInvite,
   declineInvite,
+  getMyRoom,
   listPendingInvites,
   type AcceptInviteResp,
   type InviteResp,
@@ -236,7 +237,28 @@ export const usePoolStore = defineStore('pool', () => {
     // 不补拉的话那条邀请就只能等用户刷新页面才会出现。
     onReconnect(() => {
       void refresh()
+      void recoverAccepted()
     })
+  }
+
+  // recoverAccepted 补一条「对方已经接受了」的跳转信号。
+  //
+  // 这个信号平时走推送，而推送恰好落在断线窗口里就会永久丢失：
+  // 邀请方一直停在大厅等，对方却已经在房间里坐着了。重连之后查一次自己的
+  // 房间，状态已经是 playing 就说明对方进来了，直接补上这条信号。
+  async function recoverAccepted() {
+    if (!outgoing.value || acceptedRoom.value) {
+      return
+    }
+    try {
+      const room = await getMyRoom()
+      if (room && room.status === 'playing') {
+        acceptedRoom.value = { match_id: room.match_id, room_code: room.room_code }
+      }
+    } catch {
+      // 没有房间、房间被清扫掉了、网络又断了，都按「这一局不存在」处理：
+      // 下一次邀请会重新走一遍，这里不该弹任何提示。
+    }
   }
 
   // reset 在登出时清空，否则下一个人登录会看到上一个人的邀请。
