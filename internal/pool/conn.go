@@ -11,16 +11,27 @@ import (
 
 // 对局连接的四个时长与通知连接（internal/realtime）取值一致，理由也一致：
 // 写超时防止网络阻塞挂住写协程，pong 超时判断掉线，ping 周期要明显小于 pong 超时。
+//
+// 40 秒判掉线、25 秒发一次 ping：比官方示例紧一档。对局中一次误判的代价
+// 是「对手掉线了」弹到对面脸上，所以半开连接（手机切网、NAT 回收会话）
+// 要尽快被发现，不能拖到一分钟。
 const (
 	gameWriteWait  = 10 * time.Second
-	gamePongWait   = 60 * time.Second
-	gamePingPeriod = (gamePongWait * 9) / 10
+	gamePongWait   = 40 * time.Second
+	gamePingPeriod = (gamePongWait * 5) / 8
 	// 上行只有杆法参数与坐标，4 KiB 足够；上限存在的意义是挡住异常大包。
 	gameMaxMessage = 4 << 10
 	// 发件箱容量。一杆会连发 shot（60KB）、foul、turn 三条，
 	// 对手的客户端偶尔读慢一点，32 条足够撑过一次出杆。
 	gameSendBuffer = 32
 )
+
+// gameHeartbeatFrame 是跟控制帧一起发下去的应用层心跳。
+//
+// websocket 的 ping 是控制帧，浏览器自动回 pong，页面里的 JS 看不到，
+// 前端就没法自己判断连接死活。多推一条普通数据帧，前端拿它当时钟用
+// （见 web/src/game/protocol.ts 的看门狗）。前端认不出这个 type，直接忽略。
+var gameHeartbeatFrame = []byte(`{"type":"ping","data":{}}`)
 
 // wsConn 是对局用的一条 WebSocket 连接。
 //
@@ -105,6 +116,10 @@ func (c *wsConn) writeLoop() {
 		case <-ticker.C:
 			_ = c.conn.SetWriteDeadline(time.Now().Add(gameWriteWait))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+			// 紧跟一条应用层心跳，前端的看门狗靠它判断连接是否还活着。
+			if err := c.conn.WriteMessage(websocket.TextMessage, gameHeartbeatFrame); err != nil {
 				return
 			}
 		case <-c.closed:

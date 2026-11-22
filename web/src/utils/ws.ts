@@ -41,6 +41,68 @@ let manualClose = false
 // everConnected 让「首次连上」不触发补拉：首屏本来就在拉数据，补拉纯属重复请求。
 let everConnected = false
 
+// SILENCE_MS 是「多久一条帧都没收到就认定这条连接已经死了」。
+//
+// 服务端每 25 秒推一条应用层心跳（见 internal/realtime 的 heartbeatFrame），
+// 这里取它两倍多一点：丢一两条不误杀，但半开连接最多一分钟就会被发现。
+// 没有这个看门狗的后果很具体：手机切到 4G 之后旧连接还挂着，
+// 浏览器不会报错，要等内核 TCP 重传超时（几分钟）才走到 onclose。
+const SILENCE_MS = 60_000
+// WATCHDOG_MS 是检查间隔。比 SILENCE_MS 小一个量级，代价只是读一个数字。
+const WATCHDOG_MS = 10_000
+
+let watchdogTimer: ReturnType<typeof setInterval> | null = null
+let lastFrameAt = 0
+
+// startWatchdog 在连上之后开始盯着「还有没有帧进来」。
+function startWatchdog() {
+  stopWatchdog()
+  lastFrameAt = Date.now()
+  watchdogTimer = setInterval(() => {
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return
+    }
+    if (Date.now() - lastFrameAt < SILENCE_MS) {
+      return
+    }
+    // 自己关掉它，onclose 会接手重连。这条连接在浏览器看来还是 OPEN，
+    // 但我们知道它已经收不到东西了——不主动断就只能干等。
+    socket.close()
+  }, WATCHDOG_MS)
+}
+
+function stopWatchdog() {
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer)
+    watchdogTimer = null
+  }
+}
+
+// revive 在页面重新可见时抢救一次连接。
+//
+// 后台标签页的定时器会被浏览器节流到一分钟一次，看门狗因此形同虚设；
+// 用户切回来时先在这里判一次，比等他发现「消息一直没来」再刷新强。
+function revive() {
+  if (manualClose || !currentToken) {
+    return
+  }
+  if (!socket && !retryTimer) {
+    open()
+    return
+  }
+  if (socket && socket.readyState === WebSocket.OPEN && Date.now() - lastFrameAt > SILENCE_MS) {
+    socket.close()
+  }
+}
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      revive()
+    }
+  })
+}
+
 // wsURL 把 REST 的 baseURL 翻译成某个 WebSocket 端点的完整地址。
 //
 // 两个坑：
@@ -122,6 +184,7 @@ function open() {
   ws.onopen = () => {
     retryCount = 0
     wsState.connected = true
+    startWatchdog()
     if (everConnected) {
       // 重连成功：通知订阅方补拉断线期间可能漏掉的数据。
       for (const fn of reconnectHandlers) {
@@ -132,6 +195,8 @@ function open() {
   }
 
   ws.onmessage = (event) => {
+    // 任何一帧（包括服务端的心跳）都说明这条连接还活着。
+    lastFrameAt = Date.now()
     let frame: Frame
     try {
       frame = JSON.parse(event.data)
@@ -157,6 +222,7 @@ function open() {
   ws.onclose = () => {
     wsState.connected = false
     socket = null
+    stopWatchdog()
     if (manualClose) {
       return
     }
@@ -172,14 +238,17 @@ function open() {
 
 // scheduleRetry 安排下一次重连。
 //
-// 退避 1s → 2s → 4s → … 上限 30s，再叠 0~1s 随机抖动：
+// 退避 0.5s → 1s → 2s → … 上限 10s，再叠 0~0.5s 随机抖动：
 // 后端重启时所有客户端会在同一秒断开，不加抖动就会在同一秒一起回来。
+//
+// 起点比「1 秒起步」更低：一次 1006 断线多半是网络抖了半秒，
+// 让用户干等一秒才开始重连，对手那边已经看到「掉线了」了。
 function scheduleRetry() {
   if (manualClose || retryTimer) {
     return
   }
-  const base = Math.min(30000, 1000 * Math.pow(2, retryCount))
-  const delay = base + Math.floor(Math.random() * 1000)
+  const base = Math.min(10000, 500 * Math.pow(2, retryCount))
+  const delay = base + Math.floor(Math.random() * 500)
   retryCount += 1
   retryTimer = setTimeout(() => {
     retryTimer = null
@@ -192,6 +261,7 @@ export function disconnectWS() {
   manualClose = true
   currentToken = ''
   everConnected = false
+  stopWatchdog()
   if (retryTimer) {
     clearTimeout(retryTimer)
     retryTimer = null

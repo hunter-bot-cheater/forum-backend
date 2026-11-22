@@ -13,15 +13,27 @@ import (
 //   - writeWait：一次写的超时，防止网络阻塞把写 goroutine 永久挂住；
 //   - pongWait：对端必须在这个期限内回 pong，否则认为掉线；
 //   - pingPeriod 必须明显小于 pongWait，给网络抖动留出余量，
-//     否则正常连接也会被误判成掉线。这里取 pongWait 的 9/10；
+//     否则正常连接也会被误判成掉线。这里取 pongWait 的 5/8；
 //   - maxMessageSize：单条消息上限，防止超大包把内存撑爆。
+//
+// 两个值都比官方示例（60 / 54 秒）紧：手机切 WiFi/4G、运营商 NAT 回收会话
+// 之后，连接会变成「半开」——两边内核都还以为连着，数据却发不过去。
+// 60 秒才判掉线的话，对面已经盯着「对手掉线了」等了一分钟。
 const (
 	writeWait      = 10 * time.Second
-	pongWait       = 60 * time.Second
-	pingPeriod     = (pongWait * 9) / 10
+	pongWait       = 40 * time.Second
+	pingPeriod     = (pongWait * 5) / 8
 	maxMessageSize = 1024
 	sendBuffer     = 16 // 发件箱容量，决定能容忍多慢的客户端
 )
+
+// heartbeatFrame 是跟控制帧一起发下去的应用层心跳。
+//
+// websocket 的 ping 是控制帧，浏览器自动回 pong，页面里的 JS 根本看不到，
+// 于是前端没有任何办法判断「我这条连接是不是还活着」。多发一条普通数据帧，
+// 前端就能拿它当时钟：超过一定时间没收到任何帧，自己关连接重连，
+// 不用干等服务端 40 秒后才把连接判死。
+var heartbeatFrame = []byte(`{"type":"ping","data":{}}`)
 
 // Client 是一条 WebSocket 连接。
 //
@@ -105,6 +117,10 @@ func (c *Client) WriteLoop() {
 			_ = c.conn.SetWriteDeadline(time.Now().Add(writeWait))
 			// 控制帧由 gorilla 自己排队，和上面的数据帧不会交错。
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+			// 紧跟一条应用层心跳，给前端的看门狗用（见 heartbeatFrame）。
+			if err := c.conn.WriteMessage(websocket.TextMessage, heartbeatFrame); err != nil {
 				return
 			}
 		case <-c.closed:

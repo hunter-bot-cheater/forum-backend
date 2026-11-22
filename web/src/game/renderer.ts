@@ -374,9 +374,12 @@ function drawCloth(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   ctx.fill()
 }
 
-// 口沿比洞口大一圈：真实袋口是「皮口 + 洞」，皮口把库边切出一个比洞更宽的缺口。
-// 只画一个和洞一样大的圆，远看就是一个贴在台面上的黑点，分不清从哪边能进。
-const POCKET_MOUTH_SCALE = 1.5
+// 开口宽度按袋口半径取：内沿（台面那一侧）比洞口宽一圈，外沿再张开一倍多。
+// 内沿必须明显比洞口宽，这个收口才看得出来——只宽一点点的话，圆洞会把缺口
+// 整个盖住，画面上就只剩「库边上贴了个黑圆」，分不清从哪边能进（第一版就是
+// 这么错的）。外沿张到两倍多，库边端面才有斜度，一眼看出是「被切开的一段」。
+const POCKET_MOUTH_INNER = 1.18
+const POCKET_MOUTH_OUTER = 2.2
 
 // pocketOutward 给出袋口朝台外的单位方向（世界坐标）。
 //
@@ -400,22 +403,54 @@ function pocketOutward(p: Pocket): { x: number; y: number } {
   return { x: dx / len, y: dy / len }
 }
 
+// pocketInset 给出「袋心到台面内沿」的距离（米）。
+//
+// 六个袋口的圆心都落在台面之外（pooltool 的原始定义），所以这个距离同时
+// 就是开口平面的位置——库边正是从这条线上被切开的，不是从袋心开始。
+// 沿朝台内的射线逐条边界求交取最近的那个：角袋的射线是对角线，
+// 两条边界同时相交，取哪个都一样。
+function pocketInset(p: Pocket, out: { x: number; y: number }): number {
+  const dirX = -out.x
+  const dirY = -out.y
+  let best = Number.POSITIVE_INFINITY
+  if (dirX > 1e-6) {
+    best = Math.min(best, -p.x / dirX)
+  } else if (dirX < -1e-6) {
+    best = Math.min(best, (TABLE_WIDTH - p.x) / dirX)
+  }
+  if (dirY > 1e-6) {
+    best = Math.min(best, -p.y / dirY)
+  } else if (dirY < -1e-6) {
+    best = Math.min(best, (TABLE_LENGTH - p.y) / dirY)
+  }
+  return best
+}
+
 // drawPockets 画六个袋口。
 //
 // 真实球台的袋口不是一个贴在库边上的洞，而是**库边被切开一段**：
-// 切开处的台呢一直铺到袋口，两侧库边留出斜切的端面，端面后面才是袋口内壁。
-// 照着画有四层，顺序不能变：
+// 切口从台面内沿开始往台外张开，两侧留出斜切的端面，端面之间才是袋兜。
+// 照着画有三层，顺序不能变：
 //
-//   1) 缺口填台呢色 —— 这是「库边被切掉」这件事本身。缺一块它就只是个黑点。
-//   2) 袋口内壁    —— 缺口外沿往后的一段深色，让开口有厚度，不是一张纸。
-//   3) 圆洞        —— 真正的落球孔。
-//   4) 皮口与切口线 —— 洞口一圈浅色包边，加上两条斜切端头的高光。
+//   1) 缺口      —— 台呢色 + 压暗，只填在库边这一圈上。缺了这一层，
+//                   库边是连续的，球看起来「进不去」。
+//   2) 袋兜      —— 圆洞，裁在缺口里。库边端面压在袋兜边缘上，
+//                   所以圆不能溢出开口。
+//   3) 皮口      —— 洞口一圈浅色包边。
 //
-// 整帧裁剪到木框范围内：角袋的缺口会伸到木框上，
-// 不裁的话圆角处会多出几个黑三角，看起来像木头被啃了。
+// 整帧裁剪到木框范围内：缺口会伸到木框上，不裁的话圆角处会多出几个
+// 黑三角，看起来像木头被啃了。
 function drawPockets(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   const rail = railRect(t)
-  const cushionPx = metersToPx(t, CUSHION_WIDTH)
+  const clothRect = worldRect(t, 0, 0, TABLE_WIDTH, TABLE_LENGTH)
+  // 库边那一圈：外沿到台面内沿之间的环。缺口只填在这里面。
+  const cushionRect = worldRect(
+    t,
+    -CUSHION_WIDTH,
+    -CUSHION_WIDTH,
+    TABLE_WIDTH + CUSHION_WIDTH,
+    TABLE_LENGTH + CUSHION_WIDTH,
+  )
 
   ctx.save()
   roundRectPath(ctx, rail.x, rail.y, rail.width, rail.height, RAIL_RADIUS)
@@ -424,46 +459,59 @@ function drawPockets(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   for (const p of POCKETS) {
     const center = worldToScreen(t, p.x, p.y)
     const radius = metersToPx(t, p.radius)
-    const mouth = radius * POCKET_MOUTH_SCALE
     const out = pocketOutward(p)
-    // 屏幕 y 朝下，世界方向要翻转一次才对得上画面。
+    // 屏幕 y 朝下、世界 y 朝远端，方向要翻一次；切线就是它在屏幕里转 90°。
     const ox = out.x
     const oy = -out.y
-    // 沿袋口切线的方向：缺口的两条斜边就落在这条线的两侧。
     const tx = -oy
     const ty = ox
-    // 缺口沿台外方向一直开到木框内沿，库边才算真的断开了。
-    const reach = cushionPx * 1.3 + radius * 0.4
-    // 台面侧比外沿窄：缺口是「外宽内窄」的喇叭，球进来时才有收口的感觉。
-    const innerHalf = radius * 0.9
 
-    // 1) 缺口：填台呢色。库边在这里被切掉，露出下面的台面。
+    const inset = metersToPx(t, pocketInset(p, out))
+    const halfInner = radius * POCKET_MOUTH_INNER
+    const halfOuter = radius * POCKET_MOUTH_OUTER
+    // 缺口朝台外一路穿出库边。多走一些无所谓，下面只填库边那一圈。
+    const reach = inset + metersToPx(t, CUSHION_WIDTH * 1.5)
+
+    // 开口平面上的两个端点（落在台面内沿），和缺口外沿的两个端点。
+    const ax = center.x - ox * inset
+    const ay = center.y - oy * inset
+    const bx = center.x + ox * reach
+    const by = center.y + oy * reach
+
+    const traceGap = () => {
+      ctx.beginPath()
+      ctx.moveTo(ax + tx * halfInner, ay + ty * halfInner)
+      ctx.lineTo(ax - tx * halfInner, ay - ty * halfInner)
+      ctx.lineTo(bx - tx * halfOuter, by - ty * halfOuter)
+      ctx.lineTo(bx + tx * halfOuter, by + ty * halfOuter)
+      ctx.closePath()
+    }
+
+    // 1) 缺口：库边被切掉的那一块。
+    //
+    //    只填在库边这一圈上——evenodd 把台面那块挖掉，木框本来就在环外。
+    //    填进台面会多出一块色差（台呢有渐变），填到木框上像木头长了绿毛。
+    ctx.save()
     ctx.beginPath()
-    ctx.moveTo(center.x + tx * innerHalf, center.y + ty * innerHalf)
-    ctx.lineTo(center.x - tx * innerHalf, center.y - ty * innerHalf)
-    ctx.lineTo(center.x - tx * mouth + ox * reach, center.y - ty * mouth + oy * reach)
-    ctx.lineTo(center.x + tx * mouth + ox * reach, center.y + ty * mouth + oy * reach)
-    ctx.closePath()
+    ctx.rect(cushionRect.x, cushionRect.y, cushionRect.width, cushionRect.height)
+    ctx.rect(clothRect.x, clothRect.y, clothRect.width, clothRect.height)
+    ctx.clip('evenodd')
+    traceGap()
     ctx.fillStyle = COLORS.cloth
     ctx.fill()
-    // 台呢在库边缺口里比台面中间暗（三面挡光），压一层很淡的黑，
-    // 否则挖出来的那块会和台面中央一样亮，看起来像贴了一张绿纸。
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.2)'
+    // 切口三面挡光，比台面中央暗一档。压得太狠会变成一块脏斑，
+    // 太浅又分不出「这里少了一块库边」，一成就够。
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.12)'
     ctx.fill()
+    ctx.restore()
 
-    // 2) 袋口内壁：缺口末端往里收的一段深色，给开口做出「深度」。
-    //    少了这一层，缺口就是一块平地，球看起来是滚进地板缝里。
-    const wellStart = reach - cushionPx * 0.55
-    ctx.beginPath()
-    ctx.moveTo(center.x + tx * mouth * 0.86 + ox * wellStart, center.y + ty * mouth * 0.86 + oy * wellStart)
-    ctx.lineTo(center.x - tx * mouth * 0.86 + ox * wellStart, center.y - ty * mouth * 0.86 + oy * wellStart)
-    ctx.lineTo(center.x - tx * mouth * 1.02 + ox * reach, center.y - ty * mouth * 1.02 + oy * reach)
-    ctx.lineTo(center.x + tx * mouth * 1.02 + ox * reach, center.y + ty * mouth * 1.02 + oy * reach)
-    ctx.closePath()
-    ctx.fillStyle = '#0a0e14'
-    ctx.fill()
+    // 2) 袋兜与皮口都裁在缺口里：库边端面压在袋兜边上，
+    //    圆一旦溢出开口，看起来就又变回「库边上贴了个黑点」。
+    ctx.save()
+    traceGap()
+    ctx.clip()
 
-    // 3) 圆洞：中心偏外一点最暗，靠台面那一侧透出一点灰，才有「洞有深度」的感觉。
+    // 圆洞：中心偏外一点最暗，靠台面那一侧透出一点灰，才有洞的深度。
     const hole = ctx.createRadialGradient(
       center.x + ox * radius * 0.25,
       center.y + oy * radius * 0.25,
@@ -479,32 +527,27 @@ function drawPockets(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
     ctx.fillStyle = hole
     ctx.fill()
 
-    // 4) 皮口：一圈亮边压在洞口上，宽度按半径缩放。
+    // 皮口：洞口一圈亮边。被缺口裁掉两侧，正好在斜切端面处收口，
+    // 两条端面因此有了明确的分界。
     ctx.beginPath()
     ctx.arc(center.x, center.y, radius * 0.94, 0, Math.PI * 2)
-    ctx.strokeStyle = 'rgba(198, 205, 214, 0.4)'
+    ctx.strokeStyle = 'rgba(198, 205, 214, 0.42)'
     ctx.lineWidth = Math.max(1, radius * 0.1)
     ctx.stroke()
 
-    // 5) 两条斜切端头：浅灰细线，告诉眼睛「库边到这里为止」。
-    //    线从台面侧的内沿点画到缺口外沿点，正好落在斜切面上。
+    // 斜切端面：库边是斜着切断的，两条切口边各压一道浅色。
+    // 「从哪个方向能进」全靠这两条线表达，比缺口本身更直白——
+    // 缺口只是「少了一块」，线才画出「这一段是往下斜的」。
     ctx.beginPath()
-    ctx.moveTo(center.x + tx * innerHalf, center.y + ty * innerHalf)
-    ctx.lineTo(center.x + tx * mouth + ox * reach, center.y + ty * mouth + oy * reach)
-    ctx.moveTo(center.x - tx * innerHalf, center.y - ty * innerHalf)
-    ctx.lineTo(center.x - tx * mouth + ox * reach, center.y - ty * mouth + oy * reach)
-    ctx.strokeStyle = 'rgba(226, 232, 240, 0.42)'
-    ctx.lineWidth = Math.max(1, radius * 0.07)
+    ctx.moveTo(ax + tx * halfInner, ay + ty * halfInner)
+    ctx.lineTo(bx + tx * halfOuter, by + ty * halfOuter)
+    ctx.moveTo(ax - tx * halfInner, ay - ty * halfInner)
+    ctx.lineTo(bx - tx * halfOuter, by - ty * halfOuter)
+    ctx.strokeStyle = 'rgba(226, 232, 240, 0.5)'
+    ctx.lineWidth = Math.max(1, radius * 0.075)
     ctx.stroke()
 
-    // 6) 缺口外沿的一小段浅色包边：真实袋口外侧有一圈皮/金属，
-    //    它在深色内壁与木框之间画出一条亮分隔，袋口方向就更好认了。
-    ctx.beginPath()
-    ctx.moveTo(center.x - tx * mouth * 1.02 + ox * reach, center.y - ty * mouth * 1.02 + oy * reach)
-    ctx.lineTo(center.x + tx * mouth * 1.02 + ox * reach, center.y + ty * mouth * 1.02 + oy * reach)
-    ctx.strokeStyle = 'rgba(208, 214, 222, 0.3)'
-    ctx.lineWidth = Math.max(1, radius * 0.09)
-    ctx.stroke()
+    ctx.restore()
   }
 
   ctx.restore()
@@ -840,10 +883,15 @@ function textureImage(id: string, side: number): ImageData | null {
 
 // SpriteEntry 缓存一颗球某个朝向的位图。m 用引用比较：
 // 球没动时 rollMatrixOf 返回的就是同一个数组，直接复用不用重算。
+//
+// canvas 与 image 都是复用的：球滚动时每一帧都要重采样，如果每帧新建一张
+// canvas，16 颗球一秒就是近千个画布对象，GC 一抖主线程就卡一下，
+// 而 rAF 被卡住之后插值直接跳到后面几帧——看起来就是「球瞬移了」。
 interface SpriteEntry {
   side: number
   m: number[]
   canvas: HTMLCanvasElement
+  image: ImageData
 }
 
 const spriteCache = new Map<string, SpriteEntry>()
@@ -870,14 +918,24 @@ function ballSprite(ball: BallState, side: number, m: number[]): HTMLCanvasEleme
     return null
   }
 
-  const canvas = document.createElement('canvas')
-  canvas.width = side
-  canvas.height = side
+  // 尺寸没变就沿用上一帧的画布与像素缓冲。圆外的像素永远不会被写，
+  // 建的时候是全 0 就一直是全 0，不需要每帧清空。
+  let canvas = cached && cached.side === side ? cached.canvas : null
+  let image = cached && cached.side === side ? cached.image : null
+  if (!canvas || !image) {
+    canvas = document.createElement('canvas')
+    canvas.width = side
+    canvas.height = side
+    const fresh = context2d(canvas)
+    if (!fresh) {
+      return null
+    }
+    image = fresh.createImageData(side, side)
+  }
   const ctx = context2d(canvas)
   if (!ctx) {
     return null
   }
-  const image = ctx.createImageData(side, side)
   const out = image.data
   const src = source.data
   const half = side / 2
@@ -930,7 +988,7 @@ function ballSprite(ball: BallState, side: number, m: number[]): HTMLCanvasEleme
   }
 
   ctx.putImageData(image, 0, 0)
-  spriteCache.set(ball.id, { side, m, canvas })
+  spriteCache.set(ball.id, { side, m, canvas, image })
   return canvas
 }
 

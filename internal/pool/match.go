@@ -538,9 +538,11 @@ func (m *Match) handleShoot(cmd command) error {
 	if err := validateParams(cmd.params); err != nil {
 		return err
 	}
-	// 摆过一次就可以打：拿着手中球反复挪是允许的，
-	// 但一次都没摆过时母球可能还在袋里（z 为负），直接送进物理会算不出结果。
-	if m.state.BallInHand && !m.state.CuePlaced {
+	// 只有母球不在台上（刚摔袋）才必须先落位：那时它的坐标还在袋里，
+	// z 为负，直接送进物理会算不出结果。母球好端端摆在台上时，
+	// 「手中球」的意思是「可以挪」，不是「必须挪」——拦着不让打，
+	// 玩家看到台上明明有颗白球却被要求「先把母球放到台面上」，只会当成 bug。
+	if m.state.BallInHand && !m.state.CuePlaced && !m.state.cueOnTable() {
 		return ErrMustPlaceCue
 	}
 

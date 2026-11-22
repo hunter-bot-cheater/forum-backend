@@ -1063,17 +1063,37 @@ function applyResult(data: ResultData) {
   result.value = { won: data.winner === mySeat.value, reason: data.reason }
 }
 
+// peerOfflineTimer 让「对手掉线了」晚 4 秒再说。
+//
+// 一次 1006 断线多半是网络抖了半秒，对面往往两秒内就自己接回来了。
+// 立刻弹提示的后果是它闪一下又消失，比不提示更让人摸不着头脑；
+// 反过来压一下，真的掉线只是晚四秒知道，代价小得多。
+let peerOfflineTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearPeerOffline() {
+  if (peerOfflineTimer) {
+    clearTimeout(peerOfflineTimer)
+    peerOfflineTimer = null
+  }
+}
+
 // onPeer 处理对手进出。
 function onPeer(event: string) {
   if (event === 'left') {
+    clearPeerOffline()
     showNotice('对手离开了对局')
     return
   }
   if (event === 'offline') {
-    showNotice('对手掉线了，正在等他重连')
+    clearPeerOffline()
+    peerOfflineTimer = setTimeout(() => {
+      peerOfflineTimer = null
+      showNotice('对手掉线了，正在等他重连')
+    }, 4000)
     return
   }
   if (event === 'joined') {
+    clearPeerOffline()
     showNotice('对手已进入对局')
   }
 }
@@ -1502,6 +1522,8 @@ function cleanup() {
     clearTimeout(ballInHandTimer)
     ballInHandTimer = null
   }
+  // 「对手掉线了」那条延迟提示也要撤：组件没了还弹给谁看。
+  clearPeerOffline()
   // 出杆兜底计时与本地预测都要一起收：留着的话组件已经销毁，
   // 超时回调仍会去改 ref、预测的 rAF 仍会继续跑。
   clearShotTimeout()

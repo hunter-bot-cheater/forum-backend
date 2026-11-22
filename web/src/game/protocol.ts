@@ -135,20 +135,32 @@ export interface GameSocketOptions {
 // 重连上限。超过就放弃，等用户点「重新连接」。
 //
 // 取 8 次而不是三五次，是为了盖住「拔网半分钟」这种真实情况：
-// 退避序列是 1+2+4+8+8+8+8+8 ≈ 47 秒（另有 0~500ms 抖动），
-// 断网三十秒的人不用做任何事就能自己接回来。
+// 退避序列是 0.4+0.8+1.6+3.2+5+5+5+5 ≈ 26 秒（另有 0~400ms 抖动），
+// 断网二十秒的人不用做任何事就能自己接回来。
 const MAX_RETRY = 8
 
-// 退避基数，实际间隔是 base * 2^n，上限 8 秒，再叠 0~500ms 抖动。
-const RETRY_BASE = 1000
-const RETRY_CAP = 8000
+// 退避基数，实际间隔是 base * 2^n，上限 5 秒，再叠 0~400ms 抖动。
+//
+// 对局中途断一次，对手那边马上就显示「掉线了」，所以第一次重连要快：
+// 0.4 秒 reconnect 成功的话，对面连提示都来不及看清。
+const RETRY_BASE = 400
+const RETRY_CAP = 5000
 
 // 连接要稳定这么久才算「这次重连真的成功了」，才把重试预算清零。
 //
 // 不在 onopen 里立刻清零：服务端或前置代理接受升级后马上关（1006、1011，
-// 或者库自己的 3xxx 码）时，立刻清零会让退避永远停在 1 秒一档，
+// 或者库自己的 3xxx 码）时，立刻清零会让退避永远停在 400 毫秒一档，
 // 页面无限重连、永远走不到 gaveup，用户也就永远等不到「重新连接」。
 const STABLE_MS = 5000
+
+// SILENCE_MS 是「多久一条帧都没收到就认定这条连接已经死了」。
+//
+// 服务端每 25 秒推一条应用层心跳（见 internal/pool 的 writeLoop），
+// 这里取两倍多一点。没有它的话，手机切网的半开连接要等内核 TCP
+// 重传超时才会报错，那期间双方都以为还连着，对面已经盯着
+// 「对手掉线了」等了好几分钟。
+const SILENCE_MS = 60_000
+const WATCHDOG_MS = 5_000
 
 // GameSocket 管理一条对局连接。
 //
@@ -164,6 +176,9 @@ export class GameSocket {
   // manualClose 区分「我们自己关的」与「网络断了」：
   // 主动离开对局后不该再重连，否则会在服务端一直挂着一条幽灵连接。
   private manualClose = false
+  // lastFrameAt 是最后一次收到任何帧的时刻，看门狗靠它判断连接是否还活着。
+  private lastFrameAt = 0
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null
   private seq = 0
 
   constructor(opts: GameSocketOptions) {
@@ -186,6 +201,7 @@ export class GameSocket {
   close() {
     this.manualClose = true
     this.clearStableTimer()
+    this.stopWatchdog()
     if (this.retryTimer) {
       clearTimeout(this.retryTimer)
       this.retryTimer = null
@@ -247,6 +263,34 @@ export class GameSocket {
     }
   }
 
+  // startWatchdog 在连上之后开始盯着「还有没有帧进来」。
+  //
+  // 只靠浏览器的 onclose 是不够的：连接变成半开（手机切网、NAT 回收会话）
+  // 之后 socket.readyState 一直是 OPEN，onclose 要等内核 TCP 重传超时才来。
+  // 那几分钟里这一侧毫无察觉，对面已经看到「对手掉线了」。
+  private startWatchdog() {
+    this.stopWatchdog()
+    this.lastFrameAt = Date.now()
+    this.watchdogTimer = setInterval(() => {
+      if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
+        return
+      }
+      if (Date.now() - this.lastFrameAt < SILENCE_MS) {
+        return
+      }
+      // 自己关掉，onclose 会接手重连。这一条连接在浏览器看来还 OPEN，
+      // 但我们知道它已经收不到东西了。
+      this.socket.close()
+    }, WATCHDOG_MS)
+  }
+
+  private stopWatchdog() {
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer)
+      this.watchdogTimer = null
+    }
+  }
+
   // open 真正发起一次握手。
   private open() {
     const token = this.opts.token()
@@ -271,6 +315,7 @@ export class GameSocket {
 
     ws.onopen = () => {
       this.opts.onState('open')
+      this.startWatchdog()
       this.clearStableTimer()
       this.stableTimer = setTimeout(() => {
         this.retryCount = 0
@@ -279,6 +324,8 @@ export class GameSocket {
     }
 
     ws.onmessage = (event) => {
+      // 任何一帧（包括服务端的心跳）都说明这条连接还活着。
+      this.lastFrameAt = Date.now()
       const msg = decode(event.data)
       if (!msg) {
         return
@@ -295,6 +342,7 @@ export class GameSocket {
       }
       this.socket = null
       this.clearStableTimer()
+      this.stopWatchdog()
       // 业务关闭码：服务端已经明确说了「这条路走不通」，
       // 再退避重试只是让人对着一个必然失败的页面等四十七秒。
       if (event.code >= CLOSE_FATAL_BASE) {

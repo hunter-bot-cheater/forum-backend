@@ -242,6 +242,17 @@ func (s *MatchState) setBall(ball sim.ResultBall) {
 	}
 }
 
+// cueOnTable 报告母球此刻是否还在台面上。
+//
+// 摔袋之后母球的 OnTable 是 false，坐标还留着袋里的值（z 为负），
+// 拿它直接送去物理会抛 argmin of an empty sequence。所以「必须先落位」
+// 只在它为 false 时才成立；球本来就在台上时，「手中球」只是可以挪，
+// 不是必须挪——玩家直接出这一杆是合法的，服务端不能拦。
+func (s *MatchState) cueOnTable() bool {
+	cue, ok := s.ballByID(sim.CueBallID)
+	return ok && cue.OnTable
+}
+
 // onTable 返回击球前台面上的球号集合，给规则判定用。
 func (s *MatchState) onTable() map[string]bool {
 	set := make(map[string]bool, len(s.Balls))

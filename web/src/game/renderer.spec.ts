@@ -195,10 +195,18 @@ describe('drawScene：台面', () => {
     expect(countOf(ctx, 'arc')).toBeGreaterThanOrEqual(13)
   })
 
-  it('袋口绘制前先裁剪到木框，木框角上不会多出黑圆', () => {
+  it('袋口的第一道裁剪是木框圆角，木框角上不会多出黑圆', () => {
     const ctx = createFakeCtx()
     drawScene(ctx, { width: 390, height: 844 }, { balls: [] }, 1)
-    expect(countOf(ctx, 'clip')).toBe(1)
+
+    // 袋口内部还有两种裁剪（缺口只填库边那一圈、袋兜只填缺口里），
+    // 所以不能数次数。真正要守住的是「最外那道裁剪是木框的圆角矩形」：
+    // 第一次 clip 之前最近的那条路径必须是圆角（arcTo），不能是直角矩形。
+    const methods = ctx.calls.map((c) => c.method)
+    const firstClip = methods.indexOf('clip')
+    expect(firstClip).toBeGreaterThan(-1)
+    const lastBegin = methods.slice(0, firstClip).lastIndexOf('beginPath')
+    expect(methods.slice(lastBegin, firstClip)).toContain('arcTo')
   })
 
   it('木框是圆角矩形，不是直角矩形', () => {

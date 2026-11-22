@@ -362,10 +362,33 @@ func TestShootRequiresCuePlacement(t *testing.T) {
 	match, _, _ := newTestMatch(t, &fakeSim{shot: quietShot()})
 	match.state.BallInHand = true
 	match.state.Turn = Seat0
+	// 摔袋：球位留着，但已经不在台面上了。
+	cue, ok := match.state.ballByID(sim.CueBallID)
+	if !ok {
+		t.Fatal("初始状态里没有母球")
+	}
+	cue.OnTable = false
+	cue.Z = -0.05
+	match.state.setBall(cue)
 
 	err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0)
 	if !errors.Is(err, ErrMustPlaceCue) {
 		t.Fatalf("err = %v，期望 ErrMustPlaceCue", err)
+	}
+}
+
+// 手里有母球、但它本来就摆在台上（犯规没摔袋）时，直接出杆是合法的。
+//
+// 「手中球」是「可以挪」不是「必须挪」：这里一旦拦下来，玩家看到的是台上
+// 明明有颗白球却被告知「请先把母球放到台面上」，只能理解成程序坏了。
+func TestShootAllowsCueOnTableWithBallInHand(t *testing.T) {
+	match, _, _ := newTestMatch(t, &fakeSim{shot: quietShot()})
+	match.state.BallInHand = true
+	match.state.CuePlaced = false
+	match.state.Turn = Seat0
+
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0); err != nil {
+		t.Fatalf("母球在台上时不该要求先落位，实际 %v", err)
 	}
 }
 
