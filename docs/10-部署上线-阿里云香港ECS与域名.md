@@ -17,7 +17,7 @@
 | 选香港对不对 | 对。香港地域不需要 ICP 备案，买了当天就能绑域名 |
 | 2G 内存会不会不够 | 跑起来够（常驻约 1G），**构建镜像**那几分钟是峰值，必须加 2G swap |
 | 服务器构建太慢怎么办 | 本机交叉编译，服务器只打镜像，5 到 15 分钟变十几秒，见 13.5 |
-| 部署方式 | Docker Compose，四个容器：mysql、redis、api、web（nginx） |
+| 部署方式 | Docker Compose，五个容器：mysql、redis、api、web（nginx）、pool-sim（台球物理） |
 | 需要开哪些端口 | 只开 22、80、443。3306、6379、8080 一个都不要开 |
 | 证书怎么来 | Let's Encrypt + certbot，90 天自动续期，免费 |
 | 域名怎么指过来 | 阿里云「云解析 DNS」加两条 A 记录：`@` 和 `www` 都指向 ECS 公网 IP |
@@ -62,13 +62,16 @@
 | Redis 7 | 15 ~ 30 MB | 数据量很小，主要是登录态登记表 |
 | Go 后端（api） | 40 ~ 80 MB | 静态编译，没有 JVM 那种固定开销 |
 | Nginx（web） | 10 ~ 20 MB | 静态文件 + 反代 |
-| 合计 | **约 0.7 ~ 1.1 GB** | |
+| 台球物理服务（pool-sim） | 200 ~ 300 MB | Python + numba，满力开球那一杆会冲到上限 768 MB（见 12.15） |
+| 合计 | **约 0.9 ~ 1.4 GB** | 常态；开球瞬间再高两三百兆 |
 
-2G 里剩下 900MB 到 1.3GB，看起来还有余量。真正的风险不在「运行」，在**构建**：
+2G 里剩下 600MB 到 1.1GB，看起来还有余量。真正的风险不在「运行」，在**构建**：
 
 - `docker compose build` 会编译 Go（链接阶段单个进程能吃到 500MB 以上）；
 - 前端 `npm ci` + `vite build` 的 Node 进程峰值能到 1GB 以上；
 - 这两件事同时发生的话，2G 内存会被打穿，Linux 的 OOM Killer 会直接杀掉进程，报错长这样：`signal: killed` 或者 `exit code: 137`。
+
+台球那个 Python 容器还有一条自己的风险：numba 在第一次出杆时要现编译，满力开球那一刻的临时数组最占内存，所以它的上限设成 768M（512M 会在开球时被杀）。它是**按需**冲高的，不是常驻，但意味着这台机器在有人开球的那一秒余量会被吃掉不少——真到了内存紧张，先看 `docker stats --no-stream` 里它有没有常年贴着 768M，而不是先怀疑 Go。
 
 所以第 5 节会让你先加 2G swap。swap 不是「内存不够就靠它跑」，它的作用是**把短暂的构建峰值扛过去**，别让编译进程被系统杀掉。运行期项目基本不会用到 swap，用到就说明该升级配置了。
 
@@ -514,6 +517,14 @@ docker compose build
 
 如果中途报 `signal: killed` 或 `exit code: 137`，是内存不够，处理办法见第 15 节。
 
+这条命令会构建四个服务：`api` 与 `migrate`（用同一份 `Dockerfile`，实际只出一份镜像）、`web`，以及台球的物理服务 `pool-sim`。最后这个不在「本机编译」那套链路里（它是 Python 源码，构建上下文就是仓库里的 `pool-sim/`），所以无论走 8.2 还是 13.5，**服务器上都得单独构建一次**：
+
+```bash
+docker compose build pool-sim
+```
+
+装 numpy、numba、pooltool 都是现成的 manylinux wheel，不需要 gcc，2 核 2G 上大约两三分钟。之后只有 `pool-sim/` 目录有改动时才需要重建，日常发版碰不到它。它的运行与排错见 13.6。
+
 构建前先建好放用户头像的目录，并把属主改成容器里跑服务的那个用户：
 
 ```bash
@@ -561,7 +572,9 @@ docker compose up -d
 docker compose ps
 ```
 
-四个容器都应该是 `Up`，mysql 和 redis 后面跟 `(healthy)`。web 和 api 没有健康检查，显示 `Up` 就行。
+五个容器都应该是 `Up`，mysql、redis、pool-sim 后面跟 `(healthy)`。web 和 api 没有健康检查，显示 `Up` 就行。
+
+`pool-sim` 的 `start_period` 给了 40 秒：容器启动后要先跑一杆满台开球做 JIT 预热（约五秒），numba 编译期间 `/healthz` 还不通，这段时间显示 `health: starting` 是正常的。三十秒后还是 `unhealthy` 就去看 `docker compose logs pool-sim`。
 
 ```bash
 docker compose logs --tail=50 api
@@ -978,8 +991,14 @@ curl -I --resolve jiushixixi.xyz:80:<你的公网IP> http://jiushixixi.xyz
 | 时间正确 | 发一篇文章，看列表里的时间 | 与当前时间一致，不差 8 小时 |
 | 管理入口 | 用白名单账号登录，点右上角菜单 | 出现「管理后台」 |
 | 图片上传 | 上传一张小于 1MB 的头像 | 成功；大于 1MB 应报 413 |
+| 台球开房 | 浏览器打开 `/pool` | 显示「我的房间」、六位房号、对面是空位 |
+| 房号进房 | 用第二个账号在 `/pool` 的「有房号？直接进」里输那六位 | 第二个账号的标题变成「你在对方的房间里」，房号一致；第一个账号两秒内看到对面坐了人 |
+| 台球开局 | 两个账号各点「准备」 | 两边都跳到 `/pool/match/<id>`，座位 0 的一方显示「你」，另一方显示「对手回合」 |
+| 台球仿真 | 对局页瞄准出杆 | 球真的动；若显示「球桌暂时算不动」说明 `pool-sim` 没起来（见 13.6） |
+| 房间回收 | `docker compose exec -T mysql mysql -uroot -p"$MYSQL_ROOT_PASSWORD" forum -e "SELECT status, COUNT(*) FROM pool_matches GROUP BY status"` | 只有 `waiting` / `playing` / `finished` / `expired` 四种；`waiting` 不应持续增长 |
 
 第 8 项（端口未开）容易被忽略，但它验证的正是你安全组配对了没有。第 11 项如果失败，回到 7.2 检查 `ws.allowed_origins`。
+台球那几项失败时先看 `docker compose logs --tail=100 api | grep pool`：开会话、抢座位、仿真失败都会留痕。
 
 ---
 
@@ -1273,11 +1292,13 @@ source ~/.bashrc
 docker compose config | grep -A2 'context:'
 ```
 
-应该看到三处 `context`，两个是 `/opt/forum/.build/api`，一个是 `/opt/forum/.build/web`。如果还是 `/opt/forum`，说明第三份没被读到，检查 `COMPOSE_FILE` 的路径。
+应该看到四处 `context`：两处是 `/opt/forum/.build/api`（api 与 migrate）、一处是 `/opt/forum/.build/web`，还有一处是 `/opt/forum/pool-sim`。如果前三个还是 `/opt/forum`，说明第三份没被读到，检查 `COMPOSE_FILE` 的路径。
+
+`pool-sim` 这处**本来就该指向源码目录**，不是漏改：第三份叠加层只管 api、migrate、web 三个服务，因为只有它们能从「本机编译好的二进制、静态文件」里构建。Python 那套没有交叉编译这回事，镜像只能在服务器上装。
 
 #### 第五步：打镜像
 
-如果之前在服务器上试过源码构建（`docker compose build` 不带服务名，会把 `api`、`migrate`、`web` 三个服务一起编），先清掉那次留下的半截状态：
+如果之前在服务器上试过源码构建（`docker compose build` 不带服务名，会把 `api`、`migrate`、`web`、`pool-sim` 四个服务一起编），先清掉那次留下的半截状态：
 
 ```bash
 cd /opt/forum
@@ -1317,6 +1338,14 @@ docker compose build api web
 
 `api` 与 `migrate` 用的是同一个镜像，`build api` 之后 `migrate` 不用再单独构建。
 
+台球的物理服务不在这套产物里，服务器上单独构建一次（第一次两三分钟，之后只有 `pool-sim/` 改动才重建）：
+
+```bash
+docker compose build pool-sim
+```
+
+别漏这一步。后面第六步用的是 `up -d --no-build`，镜像不存在时它不会替你构建，而是去尝试 pull 一个根本不存在的 `forum_pool-sim`，报 `pull access denied`。
+
 #### 第六步：起服务
 
 首次部署按 8.3 的顺序：
@@ -1330,6 +1359,8 @@ docker compose up -d --no-build
 `--no-build` 是把意图写清楚：镜像已经构建好了，不要因为看到 build 定义又回去编译。镜像存在时它本来就不会编译，这个参数是防止哪天改乱了文件顺序又走回编译路径。
 
 `docker compose run --rm migrate` 用的就是刚构建的 `forum-api:<IMAGE_TAG>`，和 api 完全同一份代码。
+
+`up -d` 会顺带拉起 `pool-sim`，它的 `start_period` 是 40 秒，头半分钟显示 `health: starting` 属正常。`api` 只等它「启动」不等它「健康」：那时出杆会拿到一句「球桌暂时算不动」，重试一次就好，而把 api 一起拖着不启动会连文章都看不了。
 
 探活：
 
@@ -1383,6 +1414,23 @@ docker compose up -d --no-deps --force-recreate web
 
 改了表结构的话，在 `up -d api` 之前加一步 `docker compose run --rm migrate`。
 
+只改了台球的物理服务（`pool-sim/` 下的 Python 代码或 `requirements.txt`）：
+
+```bash
+# 本机：只提交，不用打包，也不用 scp
+git add pool-sim && git commit -m "fix(pool-sim): ..." && git push
+
+# 服务器：源码本来就在，直接拉下来重建
+cd /opt/forum
+git pull --ff-only
+docker compose build pool-sim
+docker compose up -d --no-deps pool-sim
+```
+
+这条路径**不经过 `.build`**，也就跟 `IMAGE_TAG` 无关：tag 只管 api 与 web 那两个镜像，`pool-sim` 的镜像名是 compose 默认生成的 `forum-pool-sim`，没有版本后缀。所以改了 `pool-sim` 之后 `docker images` 里不会多出一行，别以为没生效——看 `docker compose ps pool-sim` 的 `CREATED` 时间。
+
+`--no-deps` 不能省。`pool-sim` 是 api 的依赖，不加这个参数 compose 会认为「依赖变了」，把 api 一起重启，进行中的对局全断。它是无状态的（每次请求都从给定球位重算），换容器之后 api 的下一次出杆自然连到新的，对局不受影响。
+
 两个发版块里都是 `build api web`，即使只改了一端。原因是标签是全局的：只构建 api 的话，`IMAGE_TAG` 换了而 web 镜像还停在旧标签，下一次 `up -d` 会在服务器上临时补一次构建，回退时也会发现某个标签缺一个镜像。两端一起构建，`docker images` 里每个标签都是成对的，代价只是多十几秒 COPY。
 
 #### 回退到上一版
@@ -1412,12 +1460,15 @@ docker compose up -d --no-deps --force-recreate web
 
 #### 服务器上要不要留源码
 
-不需要。整条链路里服务器做的只有 `COPY`，`cmd/`、`internal/`、`pkg/`、`web/src/`、根 `Dockerfile`、`deploy/web.Dockerfile` 一次都不会被读到。运行时真正用得上的只有这几类：
+不需要，**只有一处例外：`pool-sim/`**。Go 与前端那两坨整条链路里服务器做的只有 `COPY`，`cmd/`、`internal/`、`pkg/`、`web/src/`、根 `Dockerfile`、`deploy/web.Dockerfile` 一次都不会被读到。但台球的物理服务是 Python，没有交叉编译这回事，它的构建上下文就是 `pool-sim/` 目录本身——删了它，`docker compose build pool-sim` 会报 `Cannot locate specified Dockerfile`，台球直接不能玩。
+
+运行时真正用得上的只有这几类：
 
 | 文件 | 用途 |
 |---|---|
 | `docker-compose.yml` + `deploy/prod/docker-compose.prod.yml` + `deploy/prod/docker-compose.artifact.yml` | 除了端口和变量，剩下的就是「用哪份产物建镜像」 |
 | `.build/` | 解包得到的二进制、`dist`，以及两处 `Dockerfile`（包里自带） |
+| `pool-sim/` | 唯一还要在服务器上编译的东西，`Dockerfile`、`app/`、`requirements.txt` 都不能少 |
 | `.env`、`config/config.yaml` | 密码、密钥、站点配置 |
 | `deploy/prod/nginx.conf`、`locations.conf`、`my.cnf` | 挂载进容器 |
 | `scripts/backup.sh`、`certbot/`、`uploads/` | 备份、证书、用户上传 |
@@ -1429,13 +1480,17 @@ docker compose up -d --no-deps --force-recreate web
 ```bash
 cd /opt/forum
 git sparse-checkout init --no-cone
-git sparse-checkout set '/docker-compose.yml' '/deploy/' '/scripts/' '/docs/' '/README.md' '/.env.example'
+git sparse-checkout set '/docker-compose.yml' '/deploy/' '/pool-sim/' '/scripts/' '/docs/' '/README.md' '/.env.example'
 ls
 ```
 
+`'/pool-sim/'` 这一条不能少，理由见上：它是唯一还要在服务器上编译的东西。少了它，`git pull` 拉下来的工作区里没有这个目录，`docker compose build pool-sim` 立刻失败。
+
 它只改工作区，`.git` 里的历史不动，`git pull` 照常。`.build/`、`certbot/`、`uploads/`、`.env`、`config/config.yaml` 都是未跟踪或被忽略的文件，不受影响。
 
-好处不只是省几十兆磁盘，更重要的是堵住了最危险的那条路：没有源码时，一旦 `COMPOSE_FILE` 丢了、`context` 退回 `.`，`docker compose build` 会**立刻**报 `Cannot locate specified Dockerfile`，而不是像现在这样安静地开始编译、把 2G 内存吃穿、连 ssh 都登不上。
+好处不只是省几十兆磁盘，更重要的是堵住了最危险的那条路：没有 Go 源码时，一旦 `COMPOSE_FILE` 丢了、`context` 退回 `.`，`docker compose build` 会**立刻**报 `Cannot locate specified Dockerfile`，而不是像现在这样安静地开始编译、把 2G 内存吃穿、连 ssh 都登不上。
+
+不过留着 `pool-sim/` 之后，这条护栏只剩一半：不带服务名的 `docker compose build` 仍然会真的开始装 Python 依赖。所以发版时永远写清服务名（`build api web` 或 `build pool-sim`），不要图省事留空。
 
 要恢复源码：`git sparse-checkout disable`。
 
@@ -1447,7 +1502,113 @@ ls
 - **镜像标签一直是 `local`**。`local` 是 `${IMAGE_TAG:-local}` 的兜底值，不是自动生成的。三种原因：`.env` 里没有 `IMAGE_TAG=` 这一行（用 `sed s///` 改不存在的行会静默失败）、改了 `.env` 却没有重新 `build`（标签是构建时定下的名字，不会追溯改名）、`.build/IMAGE_TAG` 没跟包一起上来（旧包或解错了位置）。查当前解析结果：`docker compose config | grep 'image:'`，两处 `forum-api:` + 一处 `forum-web:` 的那个值就是下次 `build` 会打的标签。
 - **服务器上不能临时走源码编译**。只要 `COMPOSE_FILE` 带着第三份文件，context 就指向 `.build`，没传产物会报 `no such file or directory`。真想临时走源码编译，把第三份从 `COMPOSE_FILE` 里去掉再 `docker compose build`。
 - **uploads 目录权限照旧**。8.2 那条 `chown -R 10001:10001 uploads` 与编译方式无关，仍然要做。
+- **`pool-sim` 不在这套产物里，也不跟 `IMAGE_TAG` 走**。它要单独 `build pool-sim`，源码也得留在服务器上。更要紧的是回退：改 `.env` 里的 `IMAGE_TAG` 能把 api 与 web 带回旧版，**带不回旧的物理服务**——它没有版本标签，永远是「最后一次构建出来的那个」。真改过 `pool-sim` 又想回退，只能 `git checkout <旧提交> -- pool-sim/ && docker compose build pool-sim && docker compose up -d --no-deps pool-sim`。
 - **本机 Go 版本不能低于 go.mod 要求**。`go.mod` 写的是 `go 1.26`，本机 1.27 可以，1.25 会直接报错。
+
+### 13.6 台球：物理服务与房间
+
+台球比别人多两样东西要照看：一个 Python 容器 `pool-sim`，和一堆「点进页面就存在、没人来就该消失」的房间。
+
+#### pool-sim 活着没有
+
+```bash
+docker compose ps pool-sim
+docker inspect --format '{{.State.Health.Status}}' "$(docker compose ps -q pool-sim)"
+```
+
+第二条要打印 `healthy`。`starting` 是还在做 JIT 预热（启动后先跑一杆满台开球，约五秒），持续超过 40 秒就是真的有问题，看日志：
+
+```bash
+docker compose logs --tail=100 pool-sim
+```
+
+`/healthz` 只要进程能应答就返回 200，它**不证明会算球**。真正出问题时的痕迹在 api 侧：
+
+```bash
+docker compose logs --tail=200 api | grep -i simulat
+```
+
+看到 `simulate shot` 且带 `error`，说明 api 连不上它或者它算挂了；用户那边看到的是「球桌暂时算不动，稍后再试」。
+
+它被 OOM 杀掉过一次的话，`dmesg` 里留得住证据：
+
+```bash
+dmesg | grep -i -E 'oom|killed process' | tail
+```
+
+compose 给它限了 768M。满力开球那一杆 numba 的临时数组最占内存，512M 会在那时被杀。真要调小，先开一局满力开球，同时 `docker stats pool-sim` 看峰值。
+
+#### 房间与对局的回收
+
+台球有两条回收线，管的是两件不同的事，缺一条就会留下垃圾。
+
+**内存里那条**：`Manager.Janitor` 每分钟扫一遍进程内的房间，收掉「已结束超过十分钟」的和「还没开局、并且十分钟没人跟它说过话」的。后一条是「我的房间」上线之后加的——点进 `/pool` 就开一间房，不收拾的话一个人一天能攒几十个 goroutine。日志是 Debug 级：
+
+```
+reap idle pool match  match_id=1234
+```
+
+默认 `config.yaml` 里 `log.level: info`，所以平时看不到。要盯这条，把它改成 `debug` 再 `docker compose restart api`，代价是日志量大好几倍，看完记得改回来。
+
+**数据库里那条**：`pool.ExpireRooms` 每分钟把 `status='waiting'` 且建了超过两小时的房间标成 `expired`，日志是 Info 级，条数为 0 时**不打**（避免每分钟一行噪音）：
+
+```
+expired stale pool rooms  count=3
+```
+
+两条都要的原因很直接：内存那条管 goroutine，但它随进程一起没；进程重启（发版、OOM、崩溃）之后，库里那些 `waiting` 的行没人认领了，只能靠定时扫把它们收掉。
+
+查当前状态：
+
+```bash
+docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" forum -e "SELECT status, COUNT(*) AS n FROM pool_matches GROUP BY status"'
+```
+
+注意这条命令里的变量是在**容器里**展开的（`sh -c '...'` 用单引号包住），宿主机上并没有 `MYSQL_ROOT_PASSWORD` 这个变量。
+
+只应该有 `waiting` / `playing` / `finished` / `expired` 四种。`waiting` 的行数应当跟「此刻真在大厅里等人的人数」差不多，一直涨说明清扫没跑起来。
+
+看有没有该被收掉却没被收的：
+
+```bash
+docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" forum -e "SELECT COUNT(*) FROM pool_matches WHERE status=\"waiting\" AND created_at < NOW() - INTERVAL 2 HOUR"'
+```
+
+这条应当恒为 0。不是 0 就 `docker compose logs api | grep 'expired stale'`，看协程是不是压根没起（启动日志里会有它的启停记录）。
+
+最近开过的几间房，出问题时报给开发看这个：
+
+```bash
+docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" forum -e "SELECT id, room_code, p0_id, p1_id, status, created_at FROM pool_matches ORDER BY id DESC LIMIT 20"'
+```
+
+`p1_id` 为 `NULL` 就是对面还空着。房号是六位数字，一共一百万种，撞了靠唯一索引兜住、建房时重试五次，不用管。
+
+#### 升级时唯一要留意的一列
+
+台球这一轮把 `pool_matches.p1_id` 从「必填」改成了「可为空」——房间建好时可以只有房主。走 `docker compose run --rm migrate` 时 GORM 会比对这一列的可空性并尝试改，但这是**改已有表的列**，比建新表更容易被版本差异影响，升降级前建议手动确认一次：
+
+```bash
+docker compose exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" forum -e "SHOW COLUMNS FROM pool_matches LIKE \"p1_id\""'
+```
+
+`Null` 那列要是 `NO`，手动改：
+
+```sql
+ALTER TABLE pool_matches MODIFY p1_id BIGINT UNSIGNED NULL;
+```
+
+检查无误再 `up -d --no-deps api`：新代码会给这一列写 `NULL`，列上还是 `NOT NULL` 的话，一开房就是 500（`Column 'p1_id' cannot be null`），而且只在**没被邀请、自己开房**这条路上出现，邀请那条因为直接带上了对方 id 反而是好的——排查时很容易被这个差异带偏。
+
+#### 用户报「打不了」时按这个顺序看
+
+| 用户看到 | 先查 | 多半是 |
+|---|---|---|
+| 「球桌暂时算不动」 | `docker compose ps pool-sim`、`logs pool-sim` | 容器在 `starting`（等十秒）或已经挂了 |
+| 输房号提示「房间不存在或已满」 | 上一条 SQL，看那间房的 `status` 与 `p1_id` | 房被两小时规则收掉了，或对面已经坐人 |
+| 进大厅立刻被踢回登录 | `logs api \| grep 401` | 登录态过期，与台球无关 |
+| 一直显示「你正在对局中」 | `SELECT * FROM pool_matches WHERE status='playing'` | 进程重启过，那局已经没了但库里还挂着；等它结算或手动改 `finished` |
+| 两边都点了准备却进不去 | `logs api \| grep 'mark pool match playing'` | 改状态那步失败，通常伴随数据库报错 |
 
 ---
 
@@ -1500,6 +1661,11 @@ ls
 | 挂载配置文件后容器起不来，日志说是个目录 | 宿主机上那个文件不存在，Docker 自动建了同名目录 | `rm -rf` 那个目录，先 `cp` 出文件再 `up -d` |
 | 上传头像 413 | 超过 Nginx 的 `client_max_body_size 1m` | 这是有意限制，换小图；要放宽就改 `locations.conf` 和后端的 `limitBody` |
 | 前端刷新 404 | SPA 回退规则丢了 | 检查 `location /` 的 `try_files`（9.5） |
+| 台球出杆提示「球桌暂时算不动」 | `pool-sim` 没起、还在预热，或者挂了 | `docker compose ps pool-sim`、`docker compose logs pool-sim`，见 13.6 |
+| `up -d` 报 `pull access denied ... pool-sim` | 只构建了 api 与 web，`--no-build` 找不到 `pool-sim` 镜像 | `docker compose build pool-sim` 再 `up -d --no-build` |
+| 开房报 500，日志 `Column 'p1_id' cannot be null` | 列还是 `NOT NULL`（改表没生效） | 按 13.6 那条 `ALTER TABLE ... MODIFY p1_id ... NULL` |
+| 大厅房号跳来跳去、对面进不来 | 库里同一人有多间 `waiting`，或房被两小时规则收掉 | 按 13.6 的 SQL 查 `waiting` 行；看 `expired stale pool rooms` 日志 |
+| 台球对局 WS 握手 426 | `/api/ws/game` 落进了普通 `location /api/`，少了 Upgrade 头 | 检查 `locations.conf` 里 `/api/ws/` 那段（12.15 第 3 条） |
 
 ---
 
@@ -1560,6 +1726,7 @@ chown 10001:10001 config/config.yaml && chmod 640 config/config.yaml   # 容器�
 export COMPOSE_FILE=/opt/forum/docker-compose.yml:/opt/forum/deploy/prod/docker-compose.prod.yml:/opt/forum/deploy/prod/docker-compose.artifact.yml
 docker compose config | head -40
 docker compose build api web
+docker compose build pool-sim                     # Python，服务器上单独构建一次，见 13.6
 docker compose up -d mysql redis
 docker compose run --rm migrate
 docker compose up -d --no-build
