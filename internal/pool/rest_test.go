@@ -90,6 +90,7 @@ func newEngine(t *testing.T, db *gorm.DB, manager *Manager, names map[uint]strin
 	engine.GET("/api/pool/invites/pending", handler.PendingInvites)
 	engine.POST("/api/pool/invites/:id/accept", handler.AcceptInvite)
 	engine.POST("/api/pool/invites/:id/decline", handler.DeclineInvite)
+	engine.POST("/api/pool/matches/:id/rematch", handler.Rematch)
 	return engine
 }
 
@@ -194,7 +195,7 @@ func TestLiveDoesNotWaitForBusyMatch(t *testing.T) {
 	shotDone := make(chan struct{})
 	go func() {
 		defer close(shotDone)
-		_ = busy.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 1)
+		_ = busy.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 1)
 	}()
 	<-blocker.entered
 

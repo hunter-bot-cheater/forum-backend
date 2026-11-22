@@ -144,6 +144,21 @@ watch(
   },
 )
 
+// 双方都点了「再约一局」：新局已经开起来，两边同时跳到球台上。
+//
+// 这里用 match 页而不是 /pool：新局是直接从 playing 开始的，中间没有房间页，
+// 跳到大厅只会看到一个和这一局无关的空房间。
+watch(
+  () => pool.rematchStarted,
+  (started) => {
+    if (!started) {
+      return
+    }
+    pool.rematchStarted = null
+    void router.replace('/pool/match/' + String(started.match_id))
+  },
+)
+
 // 一次性提示（对方拒绝等）。
 watch(
   () => pool.notice,

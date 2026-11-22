@@ -6,10 +6,14 @@ import {
   declineInvite,
   getMyRoom,
   listPendingInvites,
+  requestRematch,
   type AcceptInviteResp,
   type InviteResp,
   type PendingInvite,
+  type RematchResp,
+  type RematchStarted,
 } from '@/api/pool'
+import type { PlayerBrief } from '@/game/types'
 import { onLogout } from '@/utils/auth'
 import { onFrame, onReconnect } from '@/utils/ws'
 
@@ -32,6 +36,13 @@ import { onFrame, onReconnect } from '@/utils/ws'
 // 界面会显示「还剩 55 秒」而服务端那边已经过期。
 // 所以在入库时一次性换成本地绝对时刻，之后所有倒数都按它算。
 export type TrackedInvite<T> = T & { expires_at: number }
+
+// RematchWant 是「对方点了再约一局」那条推送。
+// 只带上一局的对局 id 与对方资料：那一屏据此判断「这条是不是说我们这一局」。
+export interface RematchWant {
+  match_id: number
+  from: PlayerBrief
+}
 
 // track 把一条邀请的剩余秒数换成本地截止时刻。
 function track<T extends { expires_in: number }>(item: T): TrackedInvite<T> {
@@ -69,6 +80,18 @@ export const usePoolStore = defineStore('pool', () => {
   const acceptedRoom = ref<AcceptInviteResp | null>(null)
   // notice 是一次性提示文案（对方拒绝、邀请过期等），读走即清。
   const notice = ref('')
+
+  // rematchFrom 是「对方在结算界面点了再约一局」的信号。
+  //
+  // 放在全局而不是对局页里：这条推送到达时用户可能正停在结算界面，
+  // 也可能已经回了大厅。结算界面据此把按钮换成「开局」，
+  // 大厅那边据此显示一条「某某想再打一局」的横条。
+  const rematchFrom = ref<RematchWant | null>(null)
+  // rematchWaiting 表示我已经点过了，正等对方也点。
+  const rematchWaiting = ref(false)
+  // rematchStarted 是「两个人都点了、新局已经开起来」的跳转信号。
+  // 与 acceptedRoom 同一条思路：store 只放信号，跳转交给布局里的组件。
+  const rematchStarted = ref<RematchStarted | null>(null)
 
   // roomTick 在「我这一侧的房间变了」时自增，大厅据此立刻重拉一次。
   //
@@ -145,6 +168,13 @@ export const usePoolStore = defineStore('pool', () => {
     // 本地这张「已邀请 xxx，等对方接受」的卡片要跟着收掉，
     // 否则大厅一直挂着一条永远不会被回应的邀请，还会占着快轮询。
     clearOutgoing()
+    // 接受之后我坐进的是「对方那间房」，房间本身没有任何推送发给我
+    // （服务端只通知房主「有人进来了」）。而弹层多半就在大厅上弹出来，
+    // router.replace('/pool') 是同一个路由、组件不会重新挂载，
+    // 不主动重拉的话这一屏会停在「我自己那间空房」上，
+    // 直到十秒后的慢档轮询才把人显示出来——这就是「接受邀请后要等一会儿
+    // 才进房间，而邀请人那边立刻就看到了」的真因。
+    roomTick.value += 1
     return resp
   }
 
@@ -190,6 +220,33 @@ export const usePoolStore = defineStore('pool', () => {
     pending.value = [track(data)].concat(pending.value)
   }
 
+  // requestRematch 告诉服务端我想再打一局，并把结果落进上面三个信号。
+  //
+  // 不吞异常：调用方（结算界面）要按失败把按钮解锁，
+  // 而失败文案由拦截器统一弹。
+  async function requestRematchAgain(matchId: number): Promise<RematchResp> {
+    const resp = await requestRematch(matchId)
+    if (resp.started) {
+      // 对方先点、我这一点把新局推起来：跳转信号立刻生效，与推送走同一条路。
+      rematchWaiting.value = false
+      rematchFrom.value = null
+      rematchStarted.value = resp.started
+    } else {
+      rematchWaiting.value = true
+    }
+    return resp
+  }
+
+  // clearRematch 清掉「再约」的三个信号。
+  //
+  // 离开对局页时必须调：不清的话下一局进结算界面会立刻显示上一局留下的
+  // 「对方想再打一局」，而那是在另一个对局里发生的。
+  function clearRematch() {
+    rematchFrom.value = null
+    rematchWaiting.value = false
+    rematchStarted.value = null
+  }
+
   // takeNotice 取走一次性提示，取完清空，避免同一句话弹两次。
   function takeNotice(): string {
     const text = notice.value
@@ -233,6 +290,18 @@ export const usePoolStore = defineStore('pool', () => {
       notice.value = '对方拒绝了这次邀请'
     })
 
+    // 对方点了再约一局：结算界面据此把按钮换成「开局」。
+    onFrame('pool_rematch', (data: RematchWant) => {
+      rematchFrom.value = data
+    })
+
+    // 两个人都点了、新局已经开起来：清掉等待状态，把跳转交给布局里的组件。
+    onFrame('pool_rematch_started', (data: RematchStarted) => {
+      rematchFrom.value = null
+      rematchWaiting.value = false
+      rematchStarted.value = data
+    })
+
     // 断线重连后补拉一次：断线期间的邀请推送是收不到的，
     // 不补拉的话那条邀请就只能等用户刷新页面才会出现。
     onReconnect(() => {
@@ -269,6 +338,7 @@ export const usePoolStore = defineStore('pool', () => {
     acceptedRoom.value = null
     notice.value = ''
     roomTick.value = 0
+    clearRematch()
   }
 
   onLogout(reset)
@@ -282,6 +352,9 @@ export const usePoolStore = defineStore('pool', () => {
     acceptedRoom,
     notice,
     roomTick,
+    rematchFrom,
+    rematchWaiting,
+    rematchStarted,
     refresh,
     invite,
     cancelOutgoing,
@@ -292,5 +365,7 @@ export const usePoolStore = defineStore('pool', () => {
     takeNotice,
     initWS,
     reset,
+    requestRematchAgain,
+    clearRematch,
   }
 })

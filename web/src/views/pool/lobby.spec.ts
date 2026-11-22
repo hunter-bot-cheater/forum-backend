@@ -437,6 +437,28 @@ describe('在线名单', () => {
     expect(empty.text()).not.toContain('123456')
   })
 
+  // 一个人待在大厅时名单本来就是空的：每十秒那一轮轮询不该把它换成骨架屏。
+  // 「右边的在线列表总在闪」就是这条路径：空列表 → 骨架屏 → 空列表，十秒一次。
+  it('名单是空的时候，轮询不会把「暂无其他人在线」换成骨架屏', async () => {
+    vi.useFakeTimers()
+    mocks.online.mockResolvedValueOnce([])
+    // 第二轮故意挂住：这样这一发在途期间正好是「以前会闪」的那个窗口。
+    mocks.online.mockImplementationOnce(() => new Promise<OnlineUser[]>(() => {}))
+
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const wrapper = mount(LobbyPage, { global: { plugins: [pinia], stubs } })
+    await vi.advanceTimersByTimeAsync(50)
+
+    expect(wrapper.find('.pl__empty').text()).toBe('暂无其他人在线')
+
+    await vi.advanceTimersByTimeAsync(10000)
+
+    expect(mocks.online).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('.el-skeleton').exists()).toBe(false)
+    expect(wrapper.find('.pl__empty').text()).toBe('暂无其他人在线')
+  })
+
   it('名单拉失败时给重试入口，不当成「没人在线」', async () => {
     mocks.online.mockRejectedValueOnce(new Error('boom'))
     const { wrapper } = await mountPage()

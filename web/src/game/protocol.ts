@@ -52,6 +52,17 @@ export interface ShotData {
   sim_ms: number
 }
 
+// ShotPayloadResult 是上行 shoot 里带的那一杆结果。
+//
+// 轨迹、事件、终局三样都由客户端算：服务端只做区间校验与规则判定，
+// 再把整份结果转发给对手（对手不重算，看到的画面与出杆方完全一致）。
+export interface ShotPayloadResult {
+  duration: number
+  events: ShotEvent[]
+  frames: ShotFrame[]
+  final: Array<{ id: string; x: number; y: number; z: number; on_table: boolean }>
+}
+
 export interface FoulData {
   code: string
   reason: string
@@ -214,13 +225,23 @@ export class GameSocket {
   }
 
   // shoot 出杆。返回这次请求的 seq，供页面把 error 帧对到具体哪一杆。
-  shoot(params: ShotParams): number {
+  //
+  // result 是本地算好的这一杆。服务端不再自己跑物理，直接采用它并按规则判定，
+  // 所以两边看到的是同一次计算的结果——不存在「预测完了再拼权威轨迹」那一段跳变。
+  // 不带 result 时服务端退回 pool-sim（老客户端），这条退路不参与新玩法。
+  shoot(params: ShotParams, result: ShotPayloadResult): number {
     return this.send('shoot', {
       phi: params.phi,
       power: params.power,
       theta: params.theta,
       a: params.a,
       b: params.b,
+      result: {
+        duration: result.duration,
+        events: result.events,
+        frames: result.frames,
+        final: result.final,
+      },
     })
   }
 

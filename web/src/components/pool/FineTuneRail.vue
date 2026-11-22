@@ -120,16 +120,17 @@ onBeforeUnmount(stopRepeat)
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  height: 36px;
+  gap: 12px;
+  height: 42px;
 }
 
 .ft__step {
   flex: none;
-  min-width: 58px;
-  height: 28px;
-  padding: 0 10px;
-  font-size: 12px;
+  min-width: 68px;
+  height: 34px;
+  padding: 0 12px;
+  /* 底栏这一行是出杆前一直在用的东西，12px 的按钮字在深色底上偏小。 */
+  font-size: 14px;
   font-variant-numeric: tabular-nums;
   color: rgba(255, 255, 255, 0.86);
   background: rgba(255, 255, 255, 0.09);
@@ -150,8 +151,8 @@ onBeforeUnmount(stopRepeat)
 
 /* 角度数字用等宽字，调的时候数字不会左右跳。 */
 .ft__angle {
-  min-width: 68px;
-  font-size: 13px;
+  min-width: 84px;
+  font-size: 17px;
   font-variant-numeric: tabular-nums;
   color: rgba(255, 255, 255, 0.9);
   text-align: center;

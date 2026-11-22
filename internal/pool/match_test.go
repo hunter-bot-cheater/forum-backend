@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -143,7 +144,7 @@ func TestShootBroadcastsShotAndPassesTurn(t *testing.T) {
 	fake := &fakeSim{shot: quietShot()}
 	match, conn0, conn1 := newTestMatch(t, fake)
 
-	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0); err != nil {
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 0); err != nil {
 		t.Fatalf("出杆失败：%v", err)
 	}
 
@@ -176,7 +177,7 @@ func TestShootBroadcastsSnapshotAfterShot(t *testing.T) {
 	fake := &fakeSim{shot: quietShot()}
 	match, conn0, _ := newTestMatch(t, fake)
 
-	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0); err != nil {
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 0); err != nil {
 		t.Fatalf("出杆失败：%v", err)
 	}
 
@@ -201,7 +202,7 @@ func TestShootSendsOnlyBallsOnTable(t *testing.T) {
 	fake := &fakeSim{shot: quietShot()}
 	match, _, _ := newTestMatch(t, fake)
 
-	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0); err != nil {
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 0); err != nil {
 		t.Fatalf("出杆失败：%v", err)
 	}
 
@@ -228,7 +229,7 @@ func TestShootSendsOnlyBallsOnTable(t *testing.T) {
 func TestShootRejectsOutOfTurn(t *testing.T) {
 	match, _, _ := newTestMatch(t, &fakeSim{shot: quietShot()})
 
-	err := match.Shoot(Seat1, sim.CueParams{Phi: 1.5, Power: 0.6}, 0)
+	err := match.Shoot(Seat1, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 0)
 	if !errors.Is(err, ErrNotYourTurn) {
 		t.Fatalf("err = %v，期望 ErrNotYourTurn", err)
 	}
@@ -247,7 +248,7 @@ func TestShootRejectsBadParams(t *testing.T) {
 		{Power: 0.5, Theta: 2},
 	}
 	for _, params := range cases {
-		if err := match.Shoot(Seat0, params, 0); !errors.Is(err, ErrBadParams) {
+		if err := match.Shoot(Seat0, params, nil, 0); !errors.Is(err, ErrBadParams) {
 			t.Errorf("参数 %+v 应当被拒，实际 err=%v", params, err)
 		}
 	}
@@ -265,7 +266,7 @@ func TestShootSurvivesSimFailure(t *testing.T) {
 	fake := &fakeSim{err: sim.ErrUnavailable}
 	match, conn0, _ := newTestMatch(t, fake)
 
-	err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0)
+	err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 0)
 	if !errors.Is(err, ErrSimFailed) {
 		t.Fatalf("err = %v，期望 ErrSimFailed", err)
 	}
@@ -277,6 +278,143 @@ func TestShootSurvivesSimFailure(t *testing.T) {
 	snapshot, _ := match.Snapshot(Seat0)
 	if snapshot.Turn != Seat0 || snapshot.ShotSeq != 0 {
 		t.Errorf("失败的一杆不该改状态：turn=%d seq=%d", snapshot.Turn, snapshot.ShotSeq)
+	}
+}
+
+// clientShotFrom 用一份快照里的球拼出「客户端算好的一杆」。
+//
+// final 与开始时的球一一对应、轨迹非空、时长在区间内，是 validateShotPayload
+// 的硬要求；这里按最正常的形状造，用例只改自己要破坏的那一项。
+func clientShotFrom(balls []sim.ResultBall, cueX, cueY float64) *sim.Shot {
+	final := make([]sim.ResultBall, 0, len(balls))
+	for _, ball := range balls {
+		if !ball.OnTable {
+			continue
+		}
+		x, y := ball.X, ball.Y
+		if ball.ID == sim.CueBallID {
+			x, y = cueX, cueY
+		}
+		final = append(final, sim.ResultBall{ID: ball.ID, X: x, Y: y, OnTable: true})
+	}
+	return &sim.Shot{
+		Duration: 1.4,
+		Events: []sim.Event{
+			{T: 0.1, Type: sim.EventBallBall, A: sim.CueBallID, B: "9"},
+			{T: 0.6, Type: sim.EventCushion, A: "9", B: ""},
+		},
+		Final:  final,
+		Frames: []sim.Frame{{T: 0, Balls: []byte(`[["cue",0.49,0.99,0]]`)}},
+	}
+}
+
+// 带了客户端结果的出杆必须直接采用它：不再调仿真，广播的就是它给的帧。
+//
+// 这是「本地即权威」的核心约定。仿真故意设成失败：一旦代码又走回现算那条路，
+// 这一杆会直接报 ErrSimFailed，用例立刻红。
+func TestShootAdoptsClientShot(t *testing.T) {
+	fake := &fakeSim{err: sim.ErrUnavailable}
+	match, conn0, _ := newTestMatch(t, fake)
+
+	snapshot, err := match.Snapshot(Seat0)
+	if err != nil {
+		t.Fatalf("取快照失败：%v", err)
+	}
+	payload := clientShotFrom(snapshot.Balls, 0.42, 0.6)
+
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, payload, 7); err != nil {
+		t.Fatalf("出杆失败：%v", err)
+	}
+	if _, ok := fake.lastRequest(); ok {
+		t.Error("带了客户端结果就不该再调仿真")
+	}
+
+	msg, ok := conn0.last(MsgShot)
+	if !ok {
+		t.Fatal("没有广播 shot")
+	}
+	data, ok := msg.Data.(ShotData)
+	if !ok {
+		t.Fatalf("shot 的数据类型不对：%T", msg.Data)
+	}
+	if len(data.Frames) != len(payload.Frames) || len(data.Events) != len(payload.Events) {
+		t.Errorf("广播的轨迹或事件数与客户端给的不一致：帧 %d/%d 事件 %d/%d",
+			len(data.Frames), len(payload.Frames), len(data.Events), len(payload.Events))
+	}
+	// 客户端算的杆不该报仿真耗时：这个数字一旦混进指标，物理服务快慢就彻底看不出来了。
+	if data.SimMS != 0 {
+		t.Errorf("SimMS = %d，期望 0", data.SimMS)
+	}
+
+	// 终局要真的落到状态上：下一杆的起点就是这份 final。
+	after, err := match.Snapshot(Seat0)
+	if err != nil {
+		t.Fatalf("取快照失败：%v", err)
+	}
+	found := false
+	for _, ball := range after.Balls {
+		if ball.ID != sim.CueBallID {
+			continue
+		}
+		found = true
+		if ball.X != 0.42 || ball.Y != 0.6 {
+			t.Errorf("母球终局 = (%.3f, %.3f)，期望 (0.42, 0.6)", ball.X, ball.Y)
+		}
+	}
+	if !found {
+		t.Error("快照里没有母球")
+	}
+}
+
+// 形状不对的客户端结果一律拒，而且不能改动状态。
+func TestShootRejectsBadClientShot(t *testing.T) {
+	match, conn0, _ := newTestMatch(t, &fakeSim{shot: quietShot()})
+
+	snapshot, err := match.Snapshot(Seat0)
+	if err != nil {
+		t.Fatalf("取快照失败：%v", err)
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*sim.Shot)
+	}{
+		{"没有轨迹", func(s *sim.Shot) { s.Frames = nil }},
+		{"轨迹帧数超上限", func(s *sim.Shot) {
+			s.Frames = make([]sim.Frame, maxShotFrames+1)
+		}},
+		{"时长超上限", func(s *sim.Shot) { s.Duration = maxShotSeconds + 1 }},
+		{"时长是负数", func(s *sim.Shot) { s.Duration = -0.5 }},
+		{"坐标是 NaN", func(s *sim.Shot) { s.Final[0].X = math.NaN() }},
+		{"坐标是 Inf", func(s *sim.Shot) { s.Final[0].Y = math.Inf(1) }},
+		{"坐标差了一个数量级", func(s *sim.Shot) { s.Final[0].X = 990.6 }},
+		{"少报一颗球", func(s *sim.Shot) { s.Final = s.Final[1:] }},
+		{"多报一颗不存在的球", func(s *sim.Shot) {
+			s.Final = append(s.Final, sim.ResultBall{ID: "99", X: 0.5, Y: 0.5, OnTable: true})
+		}},
+		{"同一颗球报两次", func(s *sim.Shot) {
+			s.Final[len(s.Final)-1] = s.Final[0]
+		}},
+	}
+
+	for _, item := range cases {
+		t.Run(item.name, func(t *testing.T) {
+			shot := clientShotFrom(snapshot.Balls, 0.42, 0.6)
+			item.mutate(shot)
+			err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, shot, 0)
+			if !errors.Is(err, ErrBadParams) {
+				t.Fatalf("err = %v，期望 ErrBadParams", err)
+			}
+		})
+	}
+
+	// 一杆都不该落地：被拒的请求既不能广播，也不能把序号推上去。
+	if _, ok := conn0.last(MsgShot); ok {
+		t.Error("被拒的一杆不该广播 shot")
+	}
+	after, _ := match.Snapshot(Seat0)
+	if after.ShotSeq != 0 || after.Turn != Seat0 {
+		t.Errorf("被拒的一杆改了状态：seq=%d turn=%d", after.ShotSeq, after.Turn)
 	}
 }
 
@@ -295,7 +433,7 @@ func TestShootBroadcastsFoul(t *testing.T) {
 	}}
 	match, conn0, _ := newTestMatch(t, fake)
 
-	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0); err != nil {
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 0); err != nil {
 		t.Fatalf("出杆失败：%v", err)
 	}
 
@@ -352,7 +490,7 @@ func TestPlaceCue(t *testing.T) {
 	}
 
 	// 摆过之后就能出杆了：闸门看的是 CuePlaced，不是 BallInHand。
-	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0); err != nil {
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 0); err != nil {
 		t.Fatalf("摆好之后出杆不该被拒：%v", err)
 	}
 }
@@ -371,7 +509,7 @@ func TestShootRequiresCuePlacement(t *testing.T) {
 	cue.Z = -0.05
 	match.state.setBall(cue)
 
-	err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0)
+	err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 0)
 	if !errors.Is(err, ErrMustPlaceCue) {
 		t.Fatalf("err = %v，期望 ErrMustPlaceCue", err)
 	}
@@ -387,7 +525,7 @@ func TestShootAllowsCueOnTableWithBallInHand(t *testing.T) {
 	match.state.CuePlaced = false
 	match.state.Turn = Seat0
 
-	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0); err != nil {
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 0); err != nil {
 		t.Fatalf("母球在台上时不该要求先落位，实际 %v", err)
 	}
 }
@@ -398,6 +536,70 @@ func TestPlaceCueRequiresBallInHand(t *testing.T) {
 
 	if err := match.PlaceCue(Seat0, 0.5, 0.5); !errors.Is(err, ErrNotBallInHand) {
 		t.Fatalf("err = %v，期望 ErrNotBallInHand", err)
+	}
+}
+
+// newWaitingMatch 造一间双方都已进房、还没点准备的对局。
+//
+// 走 SetReady 这条路才能真正经过 handleReady，也就是「开局发手中球」的那一处：
+// 直接用 newMatchState 造出来的对局跳过了开局，看不到开球规则。
+func newWaitingMatch(t *testing.T, fake *fakeSim) (*Match, *fakeConn, *fakeConn) {
+	t.Helper()
+
+	state := newRoomState(42, "654322", [2]PlayerBrief{{UserID: 1, Nickname: "甲"}, {UserID: 2, Nickname: "乙"}})
+	match := NewMatch(state, Options{Sim: fake, TurnTimeout: time.Minute})
+	t.Cleanup(match.Close)
+
+	conn0 := &fakeConn{}
+	conn1 := &fakeConn{}
+	if err := match.Join(Seat0, conn0); err != nil {
+		t.Fatalf("座位 0 进房失败：%v", err)
+	}
+	if err := match.Join(Seat1, conn1); err != nil {
+		t.Fatalf("座位 1 进房失败：%v", err)
+	}
+	for _, seat := range []Seat{Seat0, Seat1} {
+		if err := match.SetReady(seat, true); err != nil {
+			t.Fatalf("座位 %d 准备失败：%v", seat, err)
+		}
+	}
+	return match, conn0, conn1
+}
+
+// 开球给开球方手中球，但只准摆在开球线之后。
+//
+// 摆球表里那颗母球坐标只是一个默认点：钉死它，玩家会觉得「白球不听话」。
+// 线外（更靠近球堆那侧）必须拒掉，否则「开球线」只是画着好看。
+func TestBreakAllowsPlacingBehindHeadString(t *testing.T) {
+	match, _, _ := newWaitingMatch(t, &fakeSim{shot: quietShot()})
+
+	snapshot, err := match.Snapshot(Seat0)
+	if err != nil {
+		t.Fatalf("取快照失败：%v", err)
+	}
+	if !snapshot.BallInHand || snapshot.PlaceZone != PlaceBehindHead {
+		t.Fatalf("开球应当是开球线后的手中球：%+v", snapshot)
+	}
+
+	// 线外：贴着球堆那一侧，越界。
+	if err := match.PlaceCue(Seat0, 0.5, cueHeadString+0.05); !errors.Is(err, ErrBadParams) {
+		t.Errorf("开球线外落位应当被拒，实际 %v", err)
+	}
+	// 线内：靠近开球端那一侧，怎么摆都行。
+	if err := match.PlaceCue(Seat0, 0.3, cueHeadString-0.2); err != nil {
+		t.Fatalf("开球线后落位不该被拒：%v", err)
+	}
+
+	// 开球打出去之后限制就该收回：之后的自由球都是整张台面。
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 0); err != nil {
+		t.Fatalf("出杆失败：%v", err)
+	}
+	after, err := match.Snapshot(Seat1)
+	if err != nil {
+		t.Fatalf("取快照失败：%v", err)
+	}
+	if after.PlaceZone != PlaceAnywhere {
+		t.Errorf("开球后的可摆区域 = %q，期望 %q", after.PlaceZone, PlaceAnywhere)
 	}
 }
 
@@ -443,7 +645,7 @@ func TestRejoinAfterDisconnect(t *testing.T) {
 	}
 
 	// 接着出杆：轮次没被断线弄丢。
-	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 1); err != nil {
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 1); err != nil {
 		t.Fatalf("重连后出杆失败：%v", err)
 	}
 }
@@ -461,7 +663,7 @@ func TestDisconnectOfOldConnKeepsNewOne(t *testing.T) {
 		t.Fatalf("断线通知失败：%v", err)
 	}
 
-	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 1); err != nil {
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 1); err != nil {
 		t.Fatalf("重连后出杆失败：%v", err)
 	}
 	// 新连接必须收到这一杆：被旧回调误清的话这里什么也收不到。
@@ -586,7 +788,7 @@ func TestConcurrentShootsOnlyOneWins(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0)
+			err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 0)
 			if err == nil {
 				mu.Lock()
 				success++
@@ -621,7 +823,7 @@ func TestCloseStopsTheActor(t *testing.T) {
 	if !conn0.closed {
 		t.Error("关闭时应当断开所有连接")
 	}
-	if err := match.Shoot(Seat0, sim.CueParams{Power: 0.5}, 0); !errors.Is(err, ErrMatchClosed) {
+	if err := match.Shoot(Seat0, sim.CueParams{Power: 0.5}, nil, 0); !errors.Is(err, ErrMatchClosed) {
 		t.Errorf("err = %v，期望 ErrMatchClosed", err)
 	}
 }

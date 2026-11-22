@@ -34,6 +34,20 @@ export function ballsOfGroup(group: BallGroup): ReadonlyArray<string> {
   return []
 }
 
+// groupOfBall 返回一颗球属于哪一组。母球与 8 号不属于任何组。
+//
+// 与后端 state.go 的 ballGroup 同一份规则，只在这里写一次：
+// 判「这颗球是不是我的」时，两边各写一份必然有一处维护漏掉。
+export function groupOfBall(id: string): BallGroup {
+  if (SOLIDS.includes(id)) {
+    return 'solids'
+  }
+  if (STRIPES.includes(id)) {
+    return 'stripes'
+  }
+  return GROUP_NONE
+}
+
 // onTableIds 收集当前还在台面上的球号。
 export function onTableIds(snapshot: MatchSnapshot): Set<string> {
   const ids = new Set<string>()
@@ -73,4 +87,31 @@ export function groupLabel(group: BallGroup): string {
     return '花色'
   }
   return '未定组'
+}
+
+// aimForbidden 判断瞄准线上最先碰到的那颗球「该不该由我打」。
+//
+// 只回答「这一杆会先碰到对手的球」这一种情况，用来在台面上打一个禁止符号：
+//   - 还没定组（开球那几杆）：谁都能碰，不算违规；
+//   - 8 号：自己组的球清完之前碰到它也是犯规，清完之后才是唯一目标；
+//   - 其余：组别与我的不同就算违规。
+// 先碰到库边（targetId 为 null）不算——那是空杆，另外判。
+//
+// 这里不拦出杆：规则判定在服务端，客户端只负责在打之前提醒一次。
+export function aimForbidden(
+  snapshot: MatchSnapshot,
+  seat: Seat,
+  targetId: string | null,
+): boolean {
+  if (!targetId) {
+    return false
+  }
+  const group = snapshot.group[seat]
+  if (!hasGroup(group)) {
+    return false
+  }
+  if (targetId === '8') {
+    return remainingOf(snapshot, seat).length > 0
+  }
+  return groupOfBall(targetId) !== group
 }

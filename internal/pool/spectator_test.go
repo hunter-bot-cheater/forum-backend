@@ -52,7 +52,7 @@ func TestWatchReceivesShotBroadcast(t *testing.T) {
 		t.Fatalf("观战进房失败：%v", err)
 	}
 
-	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0); err != nil {
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 0); err != nil {
 		t.Fatalf("出杆失败：%v", err)
 	}
 
@@ -138,7 +138,7 @@ func TestSpectatorDisconnectFreesSlot(t *testing.T) {
 		t.Fatalf("腾出名额后仍然进不来：%v", err)
 	}
 	// 已经断开的那条连接不该再收到广播。
-	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0); err != nil {
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 0); err != nil {
 		t.Fatalf("出杆失败：%v", err)
 	}
 	if _, ok := watcher.last(MsgShot); ok {
@@ -156,7 +156,7 @@ func TestSpectatorCannotShoot(t *testing.T) {
 		t.Fatalf("观战进房失败：%v", err)
 	}
 
-	if err := match.Shoot(SeatSpectator, sim.CueParams{Phi: 1.5, Power: 0.6}, 0); !errors.Is(err, ErrNotYourTurn) {
+	if err := match.Shoot(SeatSpectator, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, 0); !errors.Is(err, ErrNotYourTurn) {
 		t.Fatalf("观战者出杆应当被拒成 ErrNotYourTurn，实际 %v", err)
 	}
 

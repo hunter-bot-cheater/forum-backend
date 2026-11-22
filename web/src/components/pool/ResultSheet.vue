@@ -6,9 +6,16 @@
       <p class="rs__kicker">{{ won ? '这局你赢了' : '这局输了' }}</p>
       <p class="rs__reason">{{ reasonText }}</p>
 
+      <!-- 再约的三个状态共用一个位置：等待对方、对方已经点了、什么都没发生。
+           同一件事（要不要再来一局）不该在卡片上出现两种说法。 -->
+      <p v-if="waiting" class="rs__note">已经告诉对方了，等他也点一下</p>
+      <p v-else-if="peerName" class="rs__note is-peer">{{ peerName }} 想再打一局</p>
+
       <div class="rs__actions">
         <button class="rs__btn rs__btn--ghost" type="button" @click="emit('lobby')">回大厅</button>
-        <button class="rs__btn rs__btn--primary" type="button" @click="emit('again')">再约一局</button>
+        <button class="rs__btn rs__btn--primary" type="button" :disabled="waiting" @click="emit('again')">
+          {{ waiting ? '等对方回应…' : peerName ? '开局' : '再约一局' }}
+        </button>
       </div>
     </div>
   </div>
@@ -29,6 +36,11 @@ const props = defineProps<{
   // reason 是服务端的 reason 码：eight_legal / eight_early / eight_with_foul /
   // timeout / leave。
   reason: string
+  // waiting 表示我已经点了「再约」，正等对方也点。这时候按钮只剩读秒作用，
+  // 再点一次会打一个重复请求。
+  waiting?: boolean
+  // peerName 是「对方先点了再约」时对方的昵称，空串表示对方还没点。
+  peerName?: string
 }>()
 
 const emit = defineEmits<{
@@ -71,10 +83,23 @@ const reasonText = computed(() => reasonLabel(props.reason, props.won))
 }
 
 .rs__reason {
-  margin: 0 0 28px;
+  margin: 0 0 22px;
   font-size: 14px;
   line-height: 1.5;
   color: #8a919c;
+}
+
+/* 再约的状态行。两种状态颜色不同：等对方是中性，对方已经点了是暖色——
+   它其实是一个需要我表态的邀请，不该和一句普通说明长得一样。 */
+.rs__note {
+  margin: 0 0 18px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #8a919c;
+}
+
+.rs__note.is-peer {
+  color: #f0b866;
 }
 
 .rs__actions {
@@ -100,6 +125,12 @@ const reasonText = computed(() => reasonLabel(props.reason, props.won))
 .rs__btn--primary {
   color: #fff;
   background: #4c7ef3;
+}
+
+.rs__btn--primary:disabled {
+  color: rgba(255, 255, 255, 0.72);
+  background: rgba(76, 126, 243, 0.45);
+  cursor: default;
 }
 
 @keyframes rs-in {

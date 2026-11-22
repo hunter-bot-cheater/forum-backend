@@ -20,7 +20,7 @@
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { screenToWorld, fitTable, type Point, type Viewport } from '@/game/geometry'
 import type { AimLayer } from '@/game/renderer'
-import { drawActors, drawTable, TABLE_PADDING } from '@/game/renderer'
+import { drawActors, drawTable, sinkingActive, TABLE_PADDING } from '@/game/renderer'
 import type { BallState, PoolDrag } from '@/game/types'
 
 const props = defineProps<{
@@ -30,6 +30,9 @@ const props = defineProps<{
   peerAim?: AimLayer | null
   // ghost 是手中球还没落位时跟着指针走的虚影位置（世界坐标）。
   ghost?: { x: number; y: number } | null
+  // headString 为 true 时画开球线。开球摆母球时由对局页打开：它标出母球
+  // 能摆到哪，也解释了为什么往球堆那边摆会被夹住。
+  headString?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -154,9 +157,22 @@ function paint(): void {
   drawActors(
     ctx,
     size,
-    { balls: props.balls, aim: props.aim, peerAim: props.peerAim, ghost: props.ghost },
+    {
+      balls: props.balls,
+      aim: props.aim,
+      peerAim: props.peerAim,
+      ghost: props.ghost,
+      headString: props.headString,
+    },
     dpr,
   )
+
+  // 落袋动画是唯一「自己会走」的那一段：它靠时间推进，不靠外部输入。
+  // 这里不给下一帧，画面就停在「球刚被判落袋」的那一帧上，
+  // 表现为母球一直挂在袋口不消失。动画本身只有 340 毫秒，播完即停。
+  if (sinkingActive()) {
+    schedule()
+  }
 }
 
 // schedule 把多次重画请求压到下一帧，避免同一帧里画好几遍。
@@ -172,7 +188,9 @@ function schedule(): void {
 
 // 球位是数组里的对象，浅比较会在原地修改坐标时漏掉变化，所以用 deep。
 // 16 颗球的 deep 遍历成本远低于一次重绘，不值得为它写更细的脏检查。
-watch(() => [props.balls, props.aim, props.peerAim, props.ghost], schedule, { deep: true })
+watch(() => [props.balls, props.aim, props.peerAim, props.ghost, props.headString], schedule, {
+  deep: true,
+})
 
 // onPointerDown 记录起点并捕获指针。
 // 捕获之后手指移出画布甚至移出窗口，move 与 up 仍然会回到这个元素，

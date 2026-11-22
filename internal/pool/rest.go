@@ -48,6 +48,12 @@ type Handler struct {
 	// roomLocks 是开房用的一组分片锁，见 lockRoom。
 	roomLocks [roomLockStripes]sync.Mutex
 
+	// rematches 是「再约一局」的声明登记表。
+	rematches *Rematches
+
+	// rematchMu 串行化「双方都点了 → 建新局」这一段，理由见 Rematch。
+	rematchMu sync.Mutex
+
 	// acceptMu 串行化「接受邀请」。
 	//
 	// 两个人互相邀请时，两个 accept 会并发跑：A 进 B 的房、B 进 A 的房，
@@ -59,7 +65,14 @@ type Handler struct {
 
 // NewHandler 由 router 在装配期调用。
 func NewHandler(manager *Manager, invites *Invites, store *Store, users UserBriefs, hub Realtime) *Handler {
-	return &Handler{manager: manager, invites: invites, store: store, users: users, hub: hub}
+	return &Handler{
+		manager:   manager,
+		invites:   invites,
+		store:     store,
+		users:     users,
+		hub:       hub,
+		rematches: NewRematches(),
+	}
 }
 
 // CreateInvite godoc

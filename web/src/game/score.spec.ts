@@ -17,6 +17,7 @@ function snapshot(balls: BallState[], group: [string, string]): MatchSnapshot {
     group,
     ready: [true, true],
     ball_in_hand: false,
+    place_zone: 'anywhere',
     shot_seq: 1,
     players: [
       { user_id: 1, nickname: '甲', avatar: '' },

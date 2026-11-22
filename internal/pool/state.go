@@ -55,6 +55,20 @@ func (g BallGroup) Other() BallGroup {
 	return GroupNone
 }
 
+// PlaceZone 是本回合母球可以摆放的区域。
+//
+// 用字符串而不是一个「是不是开球」的 bool：以后要加别的限制区域（比如只能
+// 摆在置球点附近），加一个常量就够了，快照字段与前端判断的形状都不用动。
+type PlaceZone string
+
+const (
+	// PlaceAnywhere 整张台面都能摆。犯规判罚的自由球就是这一种。
+	PlaceAnywhere PlaceZone = "anywhere"
+	// PlaceBehindHead 只能摆在开球线之后。开球专用：真实球桌开球时母球
+	// 可以在开球线（台长的四分之一）后随意挪，但不能越过线去打。
+	PlaceBehindHead PlaceZone = "behind_head"
+)
+
 // ballNumber 把球号字符串转成数字：母球返回 0，非法球号返回 -1。
 //
 // 球号在整条链路里都是字符串（pooltool 的 id、JSON 的键、前端贴图的索引），
@@ -147,11 +161,14 @@ type Snapshot struct {
 	Group      [2]BallGroup     `json:"group"`
 	Ready      [2]bool          `json:"ready"`
 	BallInHand bool             `json:"ball_in_hand"`
-	CuePlaced  bool             `json:"cue_placed"`
-	ShotSeq    int              `json:"shot_seq"`
-	Players    [2]PlayerBrief   `json:"players"`
-	Winner     *Seat            `json:"winner"`
-	WinReason  string           `json:"win_reason"`
+	// PlaceZone 是手中球的可摆区域，前端据此决定虚影的活动范围。
+	// 没有手中球时它是 PlaceAnywhere，前端只在 ball_in_hand 为真时看它。
+	PlaceZone PlaceZone      `json:"place_zone"`
+	CuePlaced bool           `json:"cue_placed"`
+	ShotSeq   int            `json:"shot_seq"`
+	Players   [2]PlayerBrief `json:"players"`
+	Winner    *Seat          `json:"winner"`
+	WinReason string         `json:"win_reason"`
 }
 
 // MatchState 是一局对局的全部状态。字段只在 actor 协程里改。
@@ -163,8 +180,11 @@ type MatchState struct {
 
 	Turn      Seat
 	BreakDone bool
-	Groups    [2]BallGroup
-	Balls     []sim.ResultBall
+	// Breaker 是这一局谁开的球。与 Turn 分开记：Turn 每杆都在变，
+	// 而「谁开的球」要留到结算之后，下一次「再约」靠它轮换开球方。
+	Breaker Seat
+	Groups  [2]BallGroup
+	Balls   []sim.ResultBall
 
 	Ready [2]bool
 	// BallInHand 表示本回合可以自由摆放母球，直到出杆之前都有效。
@@ -172,6 +192,9 @@ type MatchState struct {
 	// 落位一次不清它：玩家摆下去之后往往要再挪两次才满意，
 	// 收回权限就只能靠出杆前的那一次落位碰运气。
 	BallInHand bool
+	// PlaceZone 是手中球可以摆的区域。它跟 BallInHand 分开记：
+	// 「能不能挪」与「能挪到哪」是两件事，开球时前者为真、后者受限于开球线。
+	PlaceZone PlaceZone
 	// CuePlaced 表示这次手中球已经摆过至少一次。
 	// 出杆的闸门看的是它，而不是 BallInHand——母球在袋里时直接开算，
 	// pooltool 会抛 argmin of an empty sequence。
@@ -199,13 +222,15 @@ func newMatchState(matchID uint, roomCode string, players [2]PlayerBrief) MatchS
 	}
 
 	return MatchState{
-		MatchID:  matchID,
-		RoomCode: roomCode,
-		Status:   model.PoolStatusPlaying,
-		Players:  players,
-		Turn:     Seat0,
-		Balls:    balls,
-		Ready:    [2]bool{true, true},
+		MatchID:   matchID,
+		RoomCode:  roomCode,
+		Status:    model.PoolStatusPlaying,
+		Players:   players,
+		Turn:      Seat0,
+		Breaker:   Seat0,
+		Balls:     balls,
+		Ready:     [2]bool{true, true},
+		PlaceZone: PlaceAnywhere,
 	}
 }
 
@@ -298,6 +323,7 @@ func (s *MatchState) snapshot(viewer Seat, now time.Time) Snapshot {
 		Group:      s.Groups,
 		Ready:      s.Ready,
 		BallInHand: s.BallInHand,
+		PlaceZone:  s.PlaceZone,
 		CuePlaced:  s.CuePlaced,
 		ShotSeq:    s.ShotSeq,
 		Players:    s.Players,

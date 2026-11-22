@@ -88,6 +88,14 @@ export function ballTexture(ballId: string, size: number): HTMLCanvasElement {
   return canvas
 }
 
+// 花色球的色带占球面多大：贴图坐标就是球面法线的 (x, y)，所以 |y| 小于
+// 这个值的那一圈正好是一条绕球面 y 轴的带子，画出来是「白—彩—白」三段。
+//
+// 0.58 对应上下各约两成白、中间四成彩，与货架上的花色球同一个比例。
+// 再窄一点（0.5 以下）彩条只剩窄窄一条，手机上会看成「白球上蹭了点颜色」；
+// 再宽又回到「整颗都是彩」——那就又和全色球分不出来了。
+const STRIPE_HALF = 0.58
+
 // paintBall 把一颗球的反照率画进正方形画布：底色、花色带、号码。
 //
 // 视角是**从极点看**，不是常见的侧视图：画布中心就是球的一个极点，
@@ -95,28 +103,27 @@ export function ballTexture(ballId: string, size: number): HTMLCanvasElement {
 // 这个约定是渲染侧做球面反投影的前提——那边拿屏幕圆上的 (nx, ny) 直接取
 // 贴图的同名位置，只有极投影能保证「球转过多少、图案就跟着挪多少」。
 //
-// 所以色带不能画成一条横向长条（那是侧视图的画法）：要画成一圈环带，
-// 内沿是色带的纬度边界，外沿一直铺到画布之外，连正方形的四个角也填上色。
-// 四角必须填：球面赤道附近会采到那里，留白就在球上显出一圈黑边
-// （透明像素的 RGB 是 0，双线性一加权整圈都暗下去）。
+// 也正因为贴图坐标就是法线，一条横贯画布的带子落在球面上是**真的**一圈
+// 条纹（两平行平面夹出来的那一段），不是侧视图硬贴上去的。
+// 色带以外的部分必须铺满白：球面赤道附近会采到画布四角，留空就在球上
+// 显出一圈黑边（透明像素的 RGB 是 0，双线性一加权整圈都暗下去）。
 //
 // 明暗与高光不在这里画（见文件头注释），调用方在球旋转之后补上去。
 function paintBall(ctx: CanvasRenderingContext2D, side: number, look: BallLook): void {
   const c = side / 2
   const r = side / 2 - Math.max(1, side * 0.01)
 
-  // 底色一律先铺白：条纹球的两个极帽是白的，实心球随后整张盖掉。
+  // 底色一律先铺白：条纹球色带两侧是白的，实心球随后整张盖掉。
   ctx.fillStyle = '#fbfaf6'
   ctx.fillRect(0, 0, side, side)
 
   if (look.striped) {
-    // 赤道色带：从离极点 38°（sin = 0.62）到赤道的那一圈。
-    // 外圆取 1.6r 是为了盖住四角（角到中心约 1.41r），否则四角还是白的。
-    ctx.beginPath()
-    ctx.arc(c, c, r * 1.6, 0, Math.PI * 2)
-    ctx.arc(c, c, r * 0.62, 0, Math.PI * 2, true)
+    // 色带整幅横贯画布（四角也一起涂上），带子的上下边界就是球面上
+    // 条纹的两条纬线。按 1.6r 之外的老画法（同心环带）球滚起来只剩
+    // 中心一个白点，和全色球几乎分不出来，玩家得盯着号码才认得出花色。
+    const band = c * STRIPE_HALF
     ctx.fillStyle = look.color
-    ctx.fill()
+    ctx.fillRect(0, c - band, side, band * 2)
   } else {
     ctx.fillStyle = look.color
     ctx.fillRect(0, 0, side, side)

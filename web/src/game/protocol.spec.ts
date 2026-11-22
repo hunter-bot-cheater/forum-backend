@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { decode, GameSocket, type DownMessage } from '@/game/protocol'
+import { decode, GameSocket, type DownMessage, type ShotPayloadResult } from '@/game/protocol'
 
 // 对局连接的用例全部跑在假 WebSocket 上。
 //
@@ -71,6 +71,19 @@ class FakeWS {
 // last 取最近一条发出的帧并解成对象，方便断言字段。
 function last(ws: FakeWS): { type: string; seq: number; data: Record<string, unknown> } {
   return JSON.parse(ws.sent[ws.sent.length - 1])
+}
+
+// shotResult 造一份「本地算好的这一杆」，供出杆帧的用例使用。
+//
+// 形状与协议里的 ShotPayloadResult 一致。内容不重要：这里验的是信封拼得对不对，
+// 物理是不是准由 predict 自己的用例管。
+function shotResult(): ShotPayloadResult {
+  return {
+    duration: 1.2,
+    events: [{ t: 0, type: 'stick_ball', a: 'cue', b: 'cue' }],
+    frames: [{ t: 0, balls: [['cue', 0.5, 0.5, 0]] }],
+    final: [{ id: 'cue', x: 0.6, y: 0.9, z: 0, on_table: true }],
+  }
 }
 
 // newSocket 建一个带记录回调的连接。
@@ -147,7 +160,7 @@ describe('GameSocket', () => {
     const { socket } = newSocket()
     socket.connect()
 
-    const seq = socket.shoot({ phi: 0, power: 0.5, theta: 0, a: 0, b: 0 })
+    const seq = socket.shoot({ phi: 0, power: 0.5, theta: 0, a: 0, b: 0 }, shotResult())
 
     expect(seq).toBe(0)
     expect(FakeWS.instances[0].sent).toHaveLength(0)
@@ -159,8 +172,8 @@ describe('GameSocket', () => {
     const ws = FakeWS.instances[0]
     ws.open()
 
-    const first = socket.shoot({ phi: Math.PI / 2, power: 0.8, theta: 0.02, a: 0.1, b: -0.2 })
-    const second = socket.shoot({ phi: 0, power: 0.1, theta: 0, a: 0, b: 0 })
+    const first = socket.shoot({ phi: Math.PI / 2, power: 0.8, theta: 0.02, a: 0.1, b: -0.2 }, shotResult())
+    const second = socket.shoot({ phi: 0, power: 0.1, theta: 0, a: 0, b: 0 }, shotResult())
 
     expect(first).toBe(1)
     expect(second).toBe(2)
@@ -173,6 +186,10 @@ describe('GameSocket', () => {
     expect(frame.data.theta).toBe(0.02)
     expect(frame.data.a).toBe(0.1)
     expect(frame.data.b).toBe(-0.2)
+    // 整杆结果必须跟着一起上行：服务端不再自己跑物理，少了这一份它就是空的。
+    expect(frame.data.result.duration).toBe(1.2)
+    expect(frame.data.result.events).toHaveLength(1)
+    expect(frame.data.result.final).toHaveLength(1)
   })
 
   it('落位母球发的是 place_cue 帧', () => {
@@ -430,6 +447,6 @@ describe('GameSocket', () => {
     // 旧那个回调现在才被调用。
     lateClose?.({ code: 1006 })
 
-    expect(socket.shoot({ phi: 0, power: 0.5, theta: 0, a: 0, b: 0 })).toBe(1)
+    expect(socket.shoot({ phi: 0, power: 0.5, theta: 0, a: 0, b: 0 }, shotResult())).toBe(1)
   })
 })

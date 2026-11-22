@@ -226,6 +226,34 @@ export function getReplay(matchId: number | string) {
   })
 }
 
+// RematchStarted 是双方都点了「再约一局」之后新开出来的那一局。
+// breaker 是这一局的开球方：结算界面可以据此说一句「这局你先开球」，
+// 前端不必自己推算「上一局谁开的、这局轮到谁」。
+export interface RematchStarted {
+  match_id: number
+  room_code: string
+  breaker: Seat
+}
+
+// RematchResp 是「再约一局」的返回。
+// started 与 waiting 互斥：前者表示已经开局，后者表示只记下了我这一票。
+export interface RematchResp {
+  started?: RematchStarted
+  waiting: boolean
+}
+
+// requestRematch 告诉服务端「我想再打一局」。
+//
+// 不再走「回大厅 → 发邀请 → 等对方接受 → 双方准备」那一串：
+// 两个人都已经表态要再打，多出来的三步只是让人多点三次按钮。
+// 对方也点过的那一刻，服务端直接把新局开起来，两边同时跳过去。
+export function requestRematch(matchId: number | string) {
+  return request<RematchResp>({
+    url: '/pool/matches/' + String(matchId) + '/rematch',
+    method: 'post',
+  })
+}
+
 // LiveMatch 是观战列表里的一条。
 //
 // 只有「要不要点进去看」需要的信息：谁在打、打到第几杆、还有没有位置。

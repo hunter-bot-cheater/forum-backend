@@ -426,6 +426,8 @@ func New(deps Deps) (*gin.Engine, error) {
 			// 对局结束后五分钟内存就回收了，战绩页必须还能翻到那一局。
 			auth.GET("/pool/records", poolRest.Records)
 			auth.GET("/pool/matches/:id/replay", poolRest.Replay)
+			// 再约一局：两人都点过就直接开一局新的，跳过房间与准备。
+			auth.POST("/pool/matches/:id/rematch", poolRest.Rematch)
 			// 观战列表读的是内存里的 actor（正在打的对局），与上面的读库两条路。
 			auth.GET("/pool/live", poolRest.Live)
 

@@ -7,8 +7,16 @@ import { mount } from '@vue/test-utils'
 // 前者走离屏缓存，后者每帧重画，两者调用次数本身就是这项优化的判据。
 const drawTable = vi.hoisted(() => vi.fn())
 const drawActors = vi.hoisted(() => vi.fn())
+// sinkingActive 决定要不要自己续一帧：落袋动画是唯一不靠外部输入推进的动画。
+// 用例里默认「没有球在落袋」，所以返回 false 就够了。
+const sinkingActive = vi.hoisted(() => vi.fn(() => false))
 // TABLE_PADDING 是真实常量，指针换算要用它；只有绘制函数被替掉。
-vi.mock('@/game/renderer', () => ({ drawTable, drawActors, TABLE_PADDING: 12 }))
+vi.mock('@/game/renderer', () => ({
+  drawTable,
+  drawActors,
+  sinkingActive,
+  TABLE_PADDING: 12,
+}))
 
 import PoolTable from './PoolTable.vue'
 import type { BallState } from '@/game/types'
@@ -113,6 +121,23 @@ describe('PoolTable', () => {
     // 台呢、库边、六个袋口一帧一个像素都不变，却在拖动时每帧重画——
     // 那正是「动杆子发涩」的来源。球位变化只该重画动态层。
     expect(drawTable).toHaveBeenCalledTimes(1)
+  })
+
+  it('还有球在落袋时会自己续帧，播完就停', async () => {
+    // 落袋动画只随时间推进，没有球位变化可等。不给它续帧的话，
+    // 画面会停在「球刚被判落袋」的那一帧上——那颗球一直挂在袋口不消失。
+    sinkingActive.mockReturnValue(true)
+    const wrapper = mount(PoolTable, { props: { balls: balls() } })
+    await new Promise((r) => setTimeout(r, 80))
+    expect(drawActors.mock.calls.length).toBeGreaterThan(2)
+
+    // 动画播完（sinkingActive 变假）之后必须停下来，否则就是永远的 rAF 空转。
+    sinkingActive.mockReturnValue(false)
+    await new Promise((r) => setTimeout(r, 40))
+    const settled = drawActors.mock.calls.length
+    await new Promise((r) => setTimeout(r, 60))
+    expect(drawActors.mock.calls.length).toBe(settled)
+    wrapper.unmount()
   })
 
   it('容器尺寸不变时复用静态台面，变了才重画', async () => {

@@ -1,12 +1,16 @@
 <template>
   <div class="sc" :class="{ 'is-active': active, 'is-me': isMe, 'is-empty': !player.nickname }">
-    <el-avatar
-      :size="38"
-      :src="player.avatar || undefined"
-      :style="{ backgroundColor: avatarColor(player.nickname) }"
-    >
-      {{ initial }}
-    </el-avatar>
+    <!-- 轮到他时给头像套一圈金环。整张卡只是底色亮一档，眼睛不会往那儿落；
+         一圈亮边能让「现在是谁在打」在余光里就定下来。 -->
+    <span class="sc__avatar" :class="{ 'is-active': active }">
+      <el-avatar
+        :size="38"
+        :src="player.avatar || undefined"
+        :style="{ backgroundColor: avatarColor(player.nickname) }"
+      >
+        {{ initial }}
+      </el-avatar>
+    </span>
 
     <div class="sc__body">
       <div class="sc__line">
@@ -117,6 +121,26 @@ function dotStyle(id: string): Record<string, string> {
 
 .sc.is-empty {
   opacity: 0.55;
+}
+
+/* 头像外面那圈金环。
+   用「底色 + 内边距」而不是 border：border 会让元素尺寸变化，
+   轮到谁时整张卡会跟着抖一下。padding 是固定的，换的只是底色与光晕。 */
+.sc__avatar {
+  display: inline-flex;
+  flex: none;
+  padding: 2px;
+  border-radius: 50%;
+  transition:
+    background 0.25s,
+    box-shadow 0.25s;
+}
+
+.sc__avatar.is-active {
+  background: linear-gradient(135deg, #ffe08a, #f0a92f);
+  box-shadow:
+    0 0 0 1px rgba(255, 214, 120, 0.45),
+    0 0 14px rgba(240, 169, 47, 0.5);
 }
 
 .sc__body {

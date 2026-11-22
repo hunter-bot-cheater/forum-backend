@@ -7,7 +7,7 @@ import {
   type AimLayer,
 } from './renderer'
 import { fitTable, metersToPx, worldToScreen } from './geometry'
-import { BALL_RADIUS, RACK_EIGHTBALL } from './table'
+import { BALL_RADIUS, CUE_HEAD_STRING, RACK_EIGHTBALL, TABLE_WIDTH } from './table'
 import type { BallState } from './types'
 
 // ballTexture 会创建 canvas 并取 2d 上下文，jsdom 没有实现这一层。
@@ -112,15 +112,17 @@ describe('drawScene：球', () => {
     }
   })
 
-  it('球按物理直径的 1.2 倍画：小屏上也看得出是球，不是一颗彩点', () => {
+  it('球按物理直径画：球心距等于两个半径时，画面上的球正好相切', () => {
     const ctx = createFakeCtx()
     drawScene(ctx, { width: 390, height: 844 }, { balls: rackState() }, 1)
     const draw = ctx.calls.find((c) => c.method === 'drawImage')!
     const t = fitTable({ width: 390, height: 844 }, TABLE_PADDING)
-    const physical = metersToPx(t, BALL_RADIUS) * 2
-    // drawImage(texture, x, y, 宽, 高)：宽高要是物理直径放大后的值。
-    expect(Number(draw.args[3])).toBeCloseTo(physical * BALL_DRAW_SCALE, 3)
-    expect(BALL_DRAW_SCALE).toBeGreaterThan(1)
+    // 摆球是紧密相切的，球心屏距就是两个半径的像素长度。
+    // 画出来的直径一旦超过它，相邻两颗球就会互相压住——玩家看到的
+    // 是「球穿在一起」，只能怀疑碰撞体积算错了。
+    const gap = metersToPx(t, BALL_RADIUS * 2)
+    expect(Number(draw.args[3])).toBeCloseTo(gap, 6)
+    expect(BALL_DRAW_SCALE).toBe(1)
   })
 
   it('球的绘制发生在影子之后：影子都在第一颗球之前', () => {
@@ -215,6 +217,26 @@ describe('drawScene：台面', () => {
     // 圆角由 4 段 arcTo 组成；两条边用 rect 的话这里是 0。
     expect(countOf(ctx, 'arcTo')).toBeGreaterThanOrEqual(8)
   })
+
+  it('开球线只在 scene 要求时画，画的是台面宽度上的一条虚线', () => {
+    const plain = createFakeCtx()
+    drawScene(plain, { width: 390, height: 844 }, { balls: [] }, 1)
+    expect(countOf(plain, 'setLineDash')).toBe(0)
+
+    const ctx = createFakeCtx()
+    drawScene(ctx, { width: 390, height: 844 }, { balls: [], headString: true }, 1)
+    // 瞄准线也用虚线，但这一帧没有瞄准层，所以场上的虚线只可能是开球线。
+    expect(countOf(ctx, 'setLineDash')).toBe(1)
+
+    // 线的两端取台面内沿的左右边界，y 是开球线，且必须是有限数。
+    const t = fitTable({ width: 390, height: 844 }, TABLE_PADDING)
+    const left = worldToScreen(t, 0, CUE_HEAD_STRING)
+    const right = worldToScreen(t, TABLE_WIDTH, CUE_HEAD_STRING)
+    const moves = ctx.calls.filter((c) => c.method === 'moveTo')
+    const lines = ctx.calls.filter((c) => c.method === 'lineTo')
+    expect(Number(moves[moves.length - 1].args[0])).toBeCloseTo(left.x, 3)
+    expect(Number(lines[lines.length - 1].args[1])).toBeCloseTo(right.y, 3)
+  })
 })
 
 describe('drawScene：瞄准层', () => {
@@ -267,6 +289,36 @@ describe('drawScene：瞄准层', () => {
     const ctx = createFakeCtx()
     drawScene(ctx, { width: 390, height: 844 }, { balls: rackState(), aim: null }, 1)
     expect(countOf(ctx, 'setLineDash')).toBe(0)
+  })
+
+  it('打不了别人的球时：不给幽灵球和去向线，改画红圈加斜杠', () => {
+    const blocked: AimLayer = { ...aim, forbidden: true, guides: { object: null, cue: null } }
+    const ctx = createFakeCtx()
+    drawScene(ctx, { width: 390, height: 844 }, { balls: rackState(), aim: blocked }, 1)
+
+    // 虚线段只剩瞄准线本身：去向引导线（drawGuides 也会开一次虚线段）一条都没有。
+    // 瞄准线留着是故意的，方向还得看得见，只是换成红色。
+    expect(countOf(ctx, 'setLineDash')).toBe(1)
+
+    const t = fitTable({ width: 390, height: 844 }, TABLE_PADDING)
+    const radiusPx = metersToPx(t, BALL_RADIUS) * BALL_DRAW_SCALE
+    const arcs = ctx.calls.filter((c) => c.method === 'arc')
+    // 幽灵球是一倍球半径的圆，禁止符号是 1.5 倍。出现一倍半径的圆就说明
+    // 该被压掉的幽灵球又画出来了。
+    for (const arc of arcs) {
+      expect(Math.abs(Number(arc.args[2]) - radiusPx)).toBeGreaterThan(0.5)
+    }
+    const sign = arcs[arcs.length - 1]
+    expect(Number(sign.args[2])).toBeCloseTo(radiusPx * 1.5, 3)
+    // 圆心 = 幽灵球心沿击球方向再走一个直径，屏幕 y 与 world y 反向。
+    const hit = worldToScreen(t, blocked.hit.x, blocked.hit.y)
+    expect(Number(sign.args[0])).toBeCloseTo(hit.x + Math.cos(blocked.phi) * radiusPx * 2, 2)
+
+    // 斜杠两端必须是有限数：NaN 传进 canvas 不报错，只是静默不画。
+    const moves = ctx.calls.filter((c) => c.method === 'moveTo')
+    const lines = ctx.calls.filter((c) => c.method === 'lineTo')
+    expect(Number.isFinite(Number(moves[moves.length - 1].args[0]))).toBe(true)
+    expect(Number.isFinite(Number(lines[lines.length - 1].args[1]))).toBe(true)
   })
 })
 

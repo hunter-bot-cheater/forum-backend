@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => {
     createInvite: vi.fn(),
     acceptInvite: vi.fn(),
     declineInvite: vi.fn(),
+    requestRematch: vi.fn(),
     onLogout: vi.fn(),
     // frameRegistrations 记录 onFrame 被调用了几次。
     // 「注册两次会不会重复处理」不能靠推送结果去验：Map 按 key 存，
@@ -30,6 +31,7 @@ vi.mock('@/api/pool', () => ({
   createInvite: (id: number) => mocks.createInvite(id),
   acceptInvite: (id: string) => mocks.acceptInvite(id),
   declineInvite: (id: string) => mocks.declineInvite(id),
+  requestRematch: (id: number) => mocks.requestRematch(id),
 }))
 
 vi.mock('@/utils/auth', () => ({
@@ -80,23 +82,95 @@ beforeEach(() => {
   mocks.createInvite.mockReset()
   mocks.acceptInvite.mockReset()
   mocks.declineInvite.mockReset()
+  mocks.requestRematch.mockReset()
   mocks.onLogout.mockReset()
   mocks.frameRegistrations = 0
 })
 
+describe('pool store 的再约一局', () => {
+  // 对方先点：只留一个「他点了」的信号，不跳转。
+  it('收到再约请求时记下是哪一局、谁点的', () => {
+    const store = usePoolStore()
+    store.initWS()
+
+    fire('pool_rematch', {
+      match_id: 88,
+      from: { user_id: 9, nickname: '小满', avatar: '' },
+    })
+
+    expect(store.rematchFrom?.match_id).toBe(88)
+    expect(store.rematchFrom?.from.nickname).toBe('小满')
+    expect(store.rematchStarted).toBeNull()
+  })
+
+  // 双方都点了：等待状态要一起收掉，只留一个跳转信号。
+  // 留着 rematchWaiting 的话，新局页面上一进来就是「等对方回应」。
+  it('开局推送到达时清掉等待状态并给出跳转信号', () => {
+    const store = usePoolStore()
+    store.initWS()
+    store.rematchWaiting = true
+    store.rematchFrom = {
+      match_id: 88,
+      from: { user_id: 9, nickname: '小满', avatar: '' },
+    }
+
+    fire('pool_rematch_started', { match_id: 99, room_code: '123456', breaker: 1 })
+
+    expect(store.rematchWaiting).toBe(false)
+    expect(store.rematchFrom).toBeNull()
+    expect(store.rematchStarted?.match_id).toBe(99)
+  })
+
+  it('只点到一半时进入等待，不跳转', async () => {
+    mocks.requestRematch.mockResolvedValue({ waiting: true })
+    const store = usePoolStore()
+
+    await store.requestRematchAgain(88)
+
+    expect(store.rematchWaiting).toBe(true)
+    expect(store.rematchStarted).toBeNull()
+  })
+
+  // 我这一点把对面那一点补上：服务端直接回 started，跳转信号立刻到位。
+  it('我这一点促成开局时直接给出跳转信号', async () => {
+    mocks.requestRematch.mockResolvedValue({
+      waiting: false,
+      started: { match_id: 99, room_code: '123456', breaker: 0 },
+    })
+    const store = usePoolStore()
+
+    await store.requestRematchAgain(88)
+
+    expect(store.rematchWaiting).toBe(false)
+    expect(store.rematchStarted?.match_id).toBe(99)
+  })
+
+  it('离开对局页时清空三个信号', () => {
+    const store = usePoolStore()
+    store.rematchWaiting = true
+    store.clearRematch()
+
+    expect(store.rematchFrom).toBeNull()
+    expect(store.rematchWaiting).toBe(false)
+    expect(store.rematchStarted).toBeNull()
+  })
+})
+
 describe('pool store 的邀请推送', () => {
-  it('四个推送帧各注册一次，重复调用不会注册两遍', () => {
+  it('六个推送帧各注册一次，重复调用不会注册两遍', () => {
     const store = usePoolStore()
     store.initWS()
     store.initWS()
 
     // 注册次数与「注册了哪几个」都要验：
     // 只数次数的话，把 pool_invite_declined 换成 pool_invite_xxx 也照样是 4。
-    expect(mocks.frameRegistrations).toBe(4)
+    expect(mocks.frameRegistrations).toBe(6)
     expect([...mocks.frames.keys()].sort()).toEqual([
       'pool_invite',
       'pool_invite_accepted',
       'pool_invite_declined',
+      'pool_rematch',
+      'pool_rematch_started',
       'pool_room_joined',
     ])
   })
@@ -192,6 +266,21 @@ describe('pool store 的邀请处理', () => {
 
     expect(room.match_id).toBe(100)
     expect(store.pending).toHaveLength(0)
+  })
+
+  // 接受邀请后大厅要立刻重拉：服务端只给邀请人推「有人进来了」，被邀请人这一侧
+  // 没有任何推送，而 router.replace('/pool') 是同路由，页面不会重新挂载。
+  // 不主动涨 roomTick 的话，被邀请人要等下一轮轮询（最长 10 秒）才看到对手进房。
+  it('接受邀请后把 roomTick 加一，让大厅立刻重拉', async () => {
+    const store = usePoolStore()
+    store.initWS()
+    fire('pool_invite', invite('a'))
+    mocks.acceptInvite.mockResolvedValue({ match_id: 100, room_code: '654321' })
+    expect(store.roomTick).toBe(0)
+
+    await store.accept('a')
+
+    expect(store.roomTick).toBe(1)
   })
 
   it('拒绝接口失败也把本地这条去掉', async () => {

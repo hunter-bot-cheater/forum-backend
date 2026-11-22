@@ -139,6 +139,9 @@ func (h *WSHandler) dispatch(match *Match, seat Seat, conn *wsConn, msg ClientMe
 			Theta float64 `json:"theta"`
 			A     float64 `json:"a"`
 			B     float64 `json:"b"`
+			// Result 是客户端在本地算好的整杆结果（轨迹 + 事件 + 终局）。
+			// 缺省表示老客户端，actor 会退回 pool-sim 现算。
+			Result *sim.Shot `json:"result"`
 		}
 		if err := json.Unmarshal(msg.Data, &payload); err != nil {
 			conn.Send(errorMessage(msg.Seq, ErrCodeBadParams, "杆法参数解析失败"))
@@ -151,7 +154,7 @@ func (h *WSHandler) dispatch(match *Match, seat Seat, conn *wsConn, msg ClientMe
 			Theta: payload.Theta,
 			A:     payload.A,
 			B:     payload.B,
-		}, msg.Seq)
+		}, payload.Result, msg.Seq)
 		if err != nil {
 			conn.Send(errorMessage(msg.Seq, codeOf(err), messageOf(err)))
 		}

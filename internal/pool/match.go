@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -128,10 +129,13 @@ type command struct {
 	conn   Conn
 	brief  PlayerBrief
 	params sim.CueParams
-	seq    int
-	x, y   float64
-	reply  chan error
-	state  chan Snapshot
+	// shot 是客户端随出杆一起上来的整杆结果，nil 表示这份请求没带
+	// （老客户端），由 handleShoot 退回 pool-sim 现算。
+	shot  *sim.Shot
+	seq   int
+	x, y  float64
+	reply chan error
+	state chan Snapshot
 }
 
 // LiveInfo 是观战列表要看的那一小份数据。
@@ -143,6 +147,8 @@ type LiveInfo struct {
 	MatchID uint
 	Status  string
 	Turn    Seat
+	// Breaker 是这一局谁开的球。「再约一局」靠它决定下一局换谁开球。
+	Breaker Seat
 	ShotSeq int
 	Players [2]PlayerBrief
 }
@@ -216,6 +222,7 @@ func (m *Match) publishLive() {
 		MatchID: m.state.MatchID,
 		Status:  m.state.Status,
 		Turn:    m.state.Turn,
+		Breaker: m.state.Breaker,
 		ShotSeq: m.state.ShotSeq,
 		Players: m.state.Players,
 	})
@@ -255,9 +262,13 @@ func (m *Match) SpectatorCount() int {
 	return int(atomic.LoadInt32(&m.spectatorCount))
 }
 
-// Shoot 出一杆。会一直阻塞到这一杆算完（开球约 1.5 秒）。
-func (m *Match) Shoot(seat Seat, params sim.CueParams, seq int) error {
-	return m.call(command{kind: cmdShoot, seat: seat, params: params, seq: seq})
+// Shoot 出一杆。
+//
+// shot 是客户端算好的这一杆：服务端不再自己跑物理，直接采用它并按规则判定。
+// 传 nil 表示老客户端没带结果，退回 pool-sim 现算。
+// 会一直阻塞到这一杆处理完（本地结果时只是校验加广播，几十微秒）。
+func (m *Match) Shoot(seat Seat, params sim.CueParams, shot *sim.Shot, seq int) error {
+	return m.call(command{kind: cmdShoot, seat: seat, params: params, shot: shot, seq: seq})
 }
 
 // PlaceCue 摆放手中球。
@@ -546,16 +557,34 @@ func (m *Match) handleShoot(cmd command) error {
 		return ErrMustPlaceCue
 	}
 
-	shot, err := m.opts.Sim.Shoot(context.Background(), sim.Request{
-		Balls:    m.state.simBalls(),
-		Cue:      cmd.params,
-		SampleHz: 30,
-	})
-	if err != nil {
-		// 这里只记日志并返回错误：错误帧由 WS 层按 error 码统一回一条。
-		// 两处都发的话，玩家会看到两条一模一样的「球桌暂时算不动」。
-		m.log.Error("simulate shot", "error", err)
-		return ErrSimFailed
+	// 这一杆的物理结果优先用客户端算好的那一份。
+	//
+	// 客户端为此在本地跑了一个二维模型（web/src/game/predict.ts）：松手那一刻
+	// 画面就开始动，不用等一个来回。如果服务端再算一遍，两边落点必然不同，
+	// 只能靠补间把球滑过去，玩家看到的就是「击球瞬间卡一下、球堆整体挪位」。
+	// 采用客户端的结果之后，服务端状态与出杆方的画面出自同一次计算，
+	// 对面收到的也是同一份帧，不存在谁在追谁。
+	shot := cmd.shot
+	if shot != nil {
+		if err := validateShotPayload(shot, m.state.simBalls()); err != nil {
+			return err
+		}
+		// 这份结果不是服务端算的，耗时一律记 0：客户的数字混进 sim_ms，
+		// 「物理服务到底慢不慢」这个指标就彻底失真了。
+		shot.SimMS = 0
+	} else {
+		var err error
+		shot, err = m.opts.Sim.Shoot(context.Background(), sim.Request{
+			Balls:    m.state.simBalls(),
+			Cue:      cmd.params,
+			SampleHz: 30,
+		})
+		if err != nil {
+			// 这里只记日志并返回错误：错误帧由 WS 层按 error 码统一回一条。
+			// 两处都发的话，玩家会看到两条一模一样的「球桌暂时算不动」。
+			m.log.Error("simulate shot", "error", err)
+			return ErrSimFailed
+		}
 	}
 
 	verdict := JudgeShot(m.state.ruleState(), shot)
@@ -649,6 +678,8 @@ func (m *Match) applyShot(shot *sim.Shot, verdict Verdict) {
 	m.state.BreakDone = true
 	m.state.ShotSeq++
 	m.state.BallInHand = verdict.BallInHand
+	// 开球已经打出去了，之后的自由球都是整张台面：开球线的限制只属于第一杆。
+	m.state.PlaceZone = PlaceAnywhere
 	// 新的一次手中球要重新摆：上一杆那颗球的位置和落袋状态都不作数了。
 	m.state.CuePlaced = false
 	m.state.Turn = verdict.NextSeat
@@ -683,6 +714,11 @@ func (m *Match) handlePlaceCue(cmd command) error {
 		return ErrNotBallInHand
 	}
 	if !insideTable(cmd.x, cmd.y) {
+		return ErrBadParams
+	}
+	// 开球时只允许摆在开球线之后。球心压线不算越界，与 insideTable 一样
+	// 留 1mm 余量：玩家把球摆在恰好贴线的位置，不该因为浮点误差被拒。
+	if m.state.PlaceZone == PlaceBehindHead && cmd.y > cueHeadString+0.001 {
 		return ErrBadParams
 	}
 
@@ -747,6 +783,15 @@ func (m *Match) handleReady(cmd command) error {
 
 	// 双方都准备：开局。读秒从现在开始算，不是从进房开始。
 	m.state.Status = model.PoolStatusPlaying
+	// 开球方就是此刻该出杆的一方。记下来是为了结算之后「再约」能轮换开球：
+	// Turn 每杆都会变，只有 Breaker 能回答「这一局是谁先开的」。
+	m.state.Breaker = m.state.Turn
+	// 开球这一杆给开球方手中球，但限定在开球线之后。
+	// 摆球表里那颗母球坐标只是一个默认点，玩家可以沿着开球线后重新摆——
+	// 真实球桌开球就是这个规矩，钉死一个点会让人觉得「白球不听话」。
+	m.state.BallInHand = true
+	m.state.PlaceZone = PlaceBehindHead
+	m.state.CuePlaced = false
 	m.state.Deadline = time.Now().Add(m.opts.TurnTimeout)
 	m.broadcastState()
 	m.broadcast(m.wrap(MsgTurn, TurnData{Seat: m.state.Turn, DeadlineMS: m.remainingMS()}))
@@ -802,6 +847,8 @@ func (m *Match) handleTimeout() {
 	// 单次超时只换人并给对手手中球，让局面往前走。
 	m.state.Turn = seat.Other()
 	m.state.BallInHand = true
+	// 超时判罚的自由球没有区域限制：开球线那条规定只对开球那一杆有效。
+	m.state.PlaceZone = PlaceAnywhere
 	m.state.CuePlaced = false
 	m.state.Deadline = time.Now().Add(m.opts.TurnTimeout)
 
@@ -938,6 +985,73 @@ func validateParams(params sim.CueParams) error {
 	return nil
 }
 
+// 客户端上行那份整杆结果的量级上限。
+//
+// 这几条不是防作弊用的（谁来算这件事本来就交给出杆方了），挡的是写错的实现：
+// 帧数或事件数量级不对时，广播出去的 shot 帧会把每个观战者的发件箱撑爆，
+// 最后表现成所有人一起掉线，而日志里只有一片「send buffer full」。
+const (
+	// maxShotFrames 按「20 秒 × 30 Hz」再加一倍余量。本地模型的时长上限是 20 秒。
+	maxShotFrames = 1200
+	// maxShotEvents 是一杆里最多几条碰撞事件。开球实测一两百条。
+	maxShotEvents = 1200
+	// maxShotSeconds 是一杆允许的最长时长，比本地模型的 20 秒上限略宽一点。
+	maxShotSeconds = 25.0
+	// shotCoordSlack 是终局坐标允许越过台面内沿的距离。
+	// 球落袋时球心就停在袋口圆心上，而袋口圆心本来在台面外十几毫米，
+	// 所以不能按「必须落在台面内」判，否则每一杆有球进袋都会被拒。
+	shotCoordSlack = 0.3
+)
+
+// validateShotPayload 校验客户端带上来的整杆结果。
+//
+// 只做形状与量级上的校验，不重算物理：这份结果就是这一杆的权威数据，
+// 重算一遍等于把「两边各算一次」的老问题又搬回来。
+// balls 是这一杆开始时台面上还在的球，终局必须与它一一对应。
+func validateShotPayload(shot *sim.Shot, balls []sim.RequestBall) error {
+	if len(shot.Frames) == 0 || len(shot.Frames) > maxShotFrames {
+		return ErrBadParams
+	}
+	if len(shot.Events) > maxShotEvents {
+		return ErrBadParams
+	}
+	if shot.Duration < 0 || shot.Duration > maxShotSeconds {
+		return ErrBadParams
+	}
+	// 终局必须一颗不多、一颗不少：少了某颗球，那颗球在服务端就停在原地，
+	// 表现为「我这边球被撞开了，对手那边还在原位」；多了则是凭空摆上桌。
+	if len(shot.Final) != len(balls) {
+		return ErrBadParams
+	}
+	expected := make(map[string]bool, len(balls))
+	for _, ball := range balls {
+		expected[ball.ID] = true
+	}
+	seen := make(map[string]bool, len(shot.Final))
+	for _, ball := range shot.Final {
+		if !expected[ball.ID] || seen[ball.ID] {
+			return ErrBadParams
+		}
+		seen[ball.ID] = true
+		if !validShotCoord(ball.X, ball.Y) {
+			return ErrBadParams
+		}
+	}
+	return nil
+}
+
+// validShotCoord 判断一个终局坐标能不能收。
+//
+// 上界放到台面外 0.3 米：进袋的球停在袋口圆心上、已经被判出界的球也不会太远。
+// 这一层挡的是 NaN、Inf，以及「把毫米当米」这类数量级错位。
+func validShotCoord(x, y float64) bool {
+	if math.IsNaN(x) || math.IsNaN(y) || math.IsInf(x, 0) || math.IsInf(y, 0) {
+		return false
+	}
+	return x >= -shotCoordSlack && x <= tableWidth+shotCoordSlack &&
+		y >= -shotCoordSlack && y <= tableLength+shotCoordSlack
+}
+
 // insideTable 判断一个坐标是不是落在台面内。
 //
 // 台面内沿是 0.9906 × 1.9812，但母球半径 28.575mm，球心最多只能贴到离库边一个半径处。
@@ -953,4 +1067,7 @@ func insideTable(x, y float64) bool {
 const (
 	tableWidth  = 0.9906
 	tableLength = 1.9812
+	// cueHeadString 是开球线离开球端库边的距离：台长的四分之一。
+	// 与前端 table.ts 的 CUE_HEAD_STRING 是同一个值，改一处必须改另一处。
+	cueHeadString = tableLength / 4
 )

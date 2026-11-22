@@ -75,7 +75,7 @@ func TestManyMatchesRunConcurrently(t *testing.T) {
 						return
 					}
 				}
-				if err := match.Shoot(seat, sim.CueParams{Phi: 1.5, Power: 0.6}, shot); err != nil {
+				if err := match.Shoot(seat, sim.CueParams{Phi: 1.5, Power: 0.6}, nil, shot); err != nil {
 					errs <- fmt.Errorf("对局 %d 第 %d 杆：%w", matchID, shot+1, err)
 					return
 				}

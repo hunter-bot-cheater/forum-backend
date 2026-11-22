@@ -43,7 +43,25 @@
          右栏整块收起，房间卡占满整行。 -->
     <div class="pl__body" :class="{ 'is-solo': !isOwner }">
       <div class="pl__main">
-        <!-- 我的房间。这一块是整页的主角：点进台球就该看见自己的头像、
+        <!-- 对方在结算界面点了「再约一局」，而我这会儿在大厅。
+             这条请求不该因为换了个页面就消失：对方还在等一个按钮，
+             我这边却一片安静，他会以为这次约请石沉大海。 -->
+        <div v-if="rematchAsk" class="pl__ask">
+          <el-avatar
+            :size="34"
+            :src="rematchAsk.avatar || undefined"
+            :style="{ backgroundColor: avatarColor(rematchAsk.nickname) }"
+          >
+            {{ initialOf(rematchAsk.nickname) }}
+          </el-avatar>
+          <span class="pl__ask-text">{{ rematchAsk.nickname || '对方' }} 想再打一局</span>
+          <button class="pl__ask-btn" type="button" :disabled="rematchBusy" @click="onRematchAccept">
+            {{ rematchBusy ? '开局中…' : '再来一局' }}
+          </button>
+          <button class="pl__ask-close" type="button" @click="pool.clearRematch()">忽略</button>
+        </div>
+
+        <!-- 我的房间。这一块是整页的主角：点进球桌就该看见自己的头像、
              对面那个空位，以及一串能被念出去的数字。 -->
         <section class="pl__room">
           <div class="pl__room-head">
@@ -188,7 +206,7 @@
         </div>
 
         <div class="pl__side-body">
-          <div v-if="onlineLoading && online.length === 0" class="pl__skeleton">
+          <div v-if="onlineLoading && !onlineLoaded" class="pl__skeleton">
             <el-skeleton :rows="3" animated />
           </div>
 
@@ -298,6 +316,32 @@ let roomSeq = 0
 let roomDisposed = false
 
 const roomCode = computed(() => room.value?.room_code || '')
+
+// rematchAsk 是「对方想再打一局」邀请里要展示的那个人，null 表示没有这条邀请。
+//
+// 它来自全局推送而不是本页轮询：对方点下按钮的那一刻我们可能还在任何页面上，
+// 而大厅是唯一能承接它的地方（对局页由结算卡自己处理）。
+const rematchAsk = computed(() => (pool.rematchFrom ? pool.rematchFrom.from : null))
+const rematchBusy = ref(false)
+
+// onRematchAccept 答应再打一局。
+//
+// 只发一个「我也要」的表态：服务端那边对方已经点过，这一发就会把新局开起来，
+// 布局里的全局组件收到开局推送后直接跳到球台，中间没有房间与准备。
+async function onRematchAccept() {
+  const want = pool.rematchFrom
+  if (!want || rematchBusy.value) {
+    return
+  }
+  rematchBusy.value = true
+  try {
+    await pool.requestRematchAgain(want.match_id)
+  } catch {
+    // 上一局已经不在了、对方已经下线，拦截器会给出说明。
+  } finally {
+    rematchBusy.value = false
+  }
+}
 const isOwner = computed(() => (room.value ? room.value.seat === 0 : true))
 
 // me / other 是按「我坐哪」取的两侧资料。
@@ -593,6 +637,13 @@ async function onJoin() {
 const online = ref<OnlineUser[]>([])
 const onlineLoading = ref(false)
 const onlineFailed = ref(false)
+// onlineLoaded 表示「名单成功拉回来过至少一次」。
+//
+// 骨架屏只在它还是 false 时显示。用它而不是 online.length === 0：
+// 一个人待在大厅时名单本来就是空的，按长度判断的话每十秒那一轮轮询
+// 都会把「暂无其他人在线」换成一次骨架屏再换回来——用户看到的就是
+// 「右边那个在线列表总在闪」。
+const onlineLoaded = ref(false)
 const busyId = ref(0)
 
 // ONLINE_POLL_MS 是刷新在线名单的间隔。
@@ -614,7 +665,7 @@ let onlineSeq = 0
 async function loadOnline() {
   const seq = onlineSeq + 1
   onlineSeq = seq
-  if (online.value.length === 0) {
+  if (!onlineLoaded.value) {
     onlineLoading.value = true
   }
   try {
@@ -622,16 +673,21 @@ async function loadOnline() {
     if (seq !== onlineSeq) {
       return
     }
-    online.value = list
+    // 内容一样就不赋值：每十秒把同一份名单重新赋一次，Vue 要走一遍 diff，
+    // 界面上任何一处被判成变化都是一次可见的抖动。轮询的目的只是「发现变化」，
+    // 没变化就不该动 DOM。
+    if (!sameOnline(list)) {
+      online.value = list
+    }
+    onlineLoaded.value = true
     onlineFailed.value = false
   } catch {
     if (seq !== onlineSeq) {
       return
     }
     // 名单已经在屏幕上时不要把它换成错误态：
-    // 「动不动闪一下」就是从这里来的——轮询里碰上一次 429，
-    // 整张名单消失半秒再回来，看着像列表在抽。
-    if (online.value.length === 0) {
+    // 轮询里碰上一次 429，整张名单消失半秒再回来，看着像列表在抽。
+    if (!onlineLoaded.value) {
       onlineFailed.value = true
     }
   } finally {
@@ -639,6 +695,30 @@ async function loadOnline() {
       onlineLoading.value = false
     }
   }
+}
+
+// sameOnline 判断服务端刚给的名单与屏幕上的那份是否完全一致（含顺序）。
+//
+// 比的是「画出来会不会变的东西」：人数、顺序、昵称、头像、关注标记。
+// 顺序也算，因为它是列表的一部分；头像变了要重画，所以也要比。
+function sameOnline(next: OnlineUser[]): boolean {
+  const current = online.value
+  if (current.length !== next.length) {
+    return false
+  }
+  for (let index = 0; index < next.length; index += 1) {
+    const before = current[index]
+    const after = next[index]
+    if (
+      before.user_id !== after.user_id ||
+      before.nickname !== after.nickname ||
+      before.avatar !== after.avatar ||
+      before.following !== after.following
+    ) {
+      return false
+    }
+  }
+  return true
 }
 
 function stopOnlineTimer() {
@@ -1025,6 +1105,59 @@ onBeforeUnmount(() => {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+/* 「对方想再打一局」那条横条。它是打断性的（有人在等回应），
+   所以用主色描边而不是和房间卡一样的中性边框。 */
+.pl__ask {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  background: var(--fs-primary-weak);
+  border: 1px solid var(--fs-primary);
+  border-radius: var(--fs-radius);
+}
+
+.pl__ask-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fs-text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pl__ask-btn {
+  flex: none;
+  height: 34px;
+  padding: 0 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--fs-primary);
+  border: none;
+  border-radius: var(--fs-radius-sm);
+  cursor: pointer;
+}
+
+.pl__ask-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.pl__ask-close {
+  flex: none;
+  height: 34px;
+  padding: 0 10px;
+  font-size: 13px;
+  color: var(--fs-text-3);
+  background: none;
+  border: none;
+  cursor: pointer;
 }
 
 /* ── 我的房间 ── */

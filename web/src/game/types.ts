@@ -32,6 +32,12 @@ export type BallGroup = '' | 'solids' | 'stripes'
 // expired 是 90 秒没人进齐被自动解散。
 export type MatchStatus = 'waiting' | 'playing' | 'finished' | 'expired'
 
+// PlaceZone 是手中球可以摆放的区域。
+//
+// anywhere 是犯规判罚的自由球，整张台面随便摆；behind_head 是开球那一杆，
+// 只能摆在开球线之后。服务端已经校验，前端用它约束虚影并画开球线。
+export type PlaceZone = 'anywhere' | 'behind_head'
+
 // BallState 是一颗球在某一时刻的状态，单位米。
 //
 // z 是球底离台面的腾空高度，静止球为 0。它不是球心高度：
@@ -85,6 +91,9 @@ export interface MatchSnapshot {
   // 能不能出杆只看 status 与 turn，不要拿它反推。
   ready: [boolean, boolean]
   ball_in_hand: boolean
+  // place_zone 是手中球可以摆的区域，与后端 PlaceZone 一一对应。
+  // behind_head 是开球专用：母球只能摆在开球线之后，越线会被服务端拒。
+  place_zone: PlaceZone
   // cue_placed 表示这次手中球已经摆过至少一次。出杆的闸门看它：
   // ball_in_hand 在出杆前一直是 true，光看它分不出「还没摆」与「摆好了」。
   cue_placed: boolean

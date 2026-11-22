@@ -109,6 +109,7 @@ function snapshot(patch: Partial<MatchSnapshot> = {}): MatchSnapshot {
     group: ['solids', 'stripes'],
     ready: [true, true],
     ball_in_hand: false,
+    place_zone: 'anywhere',
     cue_placed: false,
     shot_seq: 3,
     players: [
