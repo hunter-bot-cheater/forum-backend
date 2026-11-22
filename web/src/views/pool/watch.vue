@@ -1,30 +1,39 @@
 <template>
   <div class="wt">
+    <!-- 与对局页同一套排法：左上角一个座位、右上角一个，正中留给「观战」标记。
+         观战者没有「我」这一侧，两张卡都不标「你」，也不按视角翻转。 -->
     <header class="wt__bar">
-      <button class="wt__back" type="button" aria-label="返回" @click="back">
-        <el-icon :size="18"><ArrowLeft /></el-icon>
-      </button>
-
-      <!-- 双方条与对局页同一套座位卡：观战者没有「我」这一侧，
-           所以两张卡都不标「你」，也不按视角左右翻转。 -->
-      <div class="wt__seats">
+      <div class="wt__corner">
+        <button class="wt__back" type="button" aria-label="返回" @click="back">
+          <el-icon :size="18"><ArrowLeft /></el-icon>
+        </button>
         <SeatCard
-          v-for="side in seats"
-          :key="side.seat"
-          :player="side.player"
-          :group="side.group"
-          :remaining="side.remaining"
-          :active="side.active"
+          v-if="leftCard"
+          :player="leftCard.player"
+          :group="leftCard.group"
+          :remaining="leftCard.remaining"
+          :active="leftCard.active"
           :is-me="false"
         />
       </div>
 
       <span class="wt__badge">观战</span>
+
+      <div class="wt__corner wt__corner--right">
+        <SeatCard
+          v-if="rightCard"
+          :player="rightCard.player"
+          :group="rightCard.group"
+          :remaining="rightCard.remaining"
+          :active="rightCard.active"
+          :is-me="false"
+        />
+      </div>
     </header>
 
     <main class="wt__stage fs-table-stage">
       <div class="fs-table-box">
-        <PoolTable :balls="balls" :aim="null" />
+        <PoolTable :balls="balls" :aim="null" :peer-aim="aimLayer" />
       </div>
 
       <Transition name="wt-notice">
@@ -71,14 +80,17 @@ import { ArrowLeft } from '@element-plus/icons-vue'
 import PoolTable from '@/components/pool/PoolTable.vue'
 import SeatCard from '@/components/pool/SeatCard.vue'
 import { applySample, playShot, type PlayHandle } from '@/game/animator'
+import { aimFromCue, aimGuides } from '@/game/aim'
 import {
   CLOSE_SPECTATOR_FULL,
   GameSocket,
+  type AimData,
   type ConnectionState,
   type DownMessage,
   type ResultData,
   type ShotData,
 } from '@/game/protocol'
+import type { AimLayer } from '@/game/renderer'
 import { remainingOf } from '@/game/score'
 import { SEAT_SPECTATOR } from '@/game/types'
 import type { BallState, MatchSnapshot, Seat } from '@/game/types'
@@ -103,6 +115,16 @@ const finishedText = ref('')
 const fatalText = ref('')
 // notice 是犯规之类的短提示，3 秒后自己消失。
 const notice = ref('')
+
+// aimState 是「当前回合那个人」此刻的瞄准姿态，由服务端转发。
+//
+// 观战者看不到操作，但能看到杆子在转——这也是观战本身好看的地方：
+// 能跟着一方的瞄准看清他打算怎么打。
+const aimState = ref<{ seat: Seat; phi: number; power: number; at: number } | null>(null)
+
+// AIM_STALE_MS 之后不再画那根杆。正常瞄准每 60ms 一帧，四秒没有新帧
+// 说明对方停手了，继续挂着会让人以为画面卡住。
+const AIM_STALE_MS = 4000
 
 // deadlineAt 是本杆读秒的本地截止时刻，0 表示不计时。
 const deadlineAt = ref(0)
@@ -136,6 +158,37 @@ const seats = computed(() => {
     remaining: remainingOf(snap, seat),
     active: turn.value === seat && snap.status === 'playing',
   }))
+})
+
+// 左上、右上各一张。快照没到时两边都不渲染，等第一份快照回来再撑开。
+const leftCard = computed(() => seats.value[0] ?? null)
+const rightCard = computed(() => seats.value[1] ?? null)
+
+// aimLayer 把当前这帧瞄准姿态换算成渲染层要的两根线加一根杆。
+//
+// 与对局页算的是同一套东西：服务端只给角度和力度，撞到哪颗球、引导线多长
+// 都是几何问题，本端用同一份球位现算，两端看到的画面才对得上。
+const aimLayer = computed<AimLayer | null>(() => {
+  const state = aimState.value
+  if (!state || !snapshot.value || snapshot.value.status !== 'playing') {
+    return null
+  }
+  if (Date.now() - state.at > AIM_STALE_MS) {
+    return null
+  }
+  const cue = balls.value.find((ball) => ball.id === 'cue')
+  if (!cue || !cue.on_table) {
+    return null
+  }
+  const hit = aimFromCue(balls.value, state.phi)
+  return {
+    cue: { x: cue.x, y: cue.y },
+    hit: { x: hit.x, y: hit.y, kind: hit.kind },
+    phi: state.phi,
+    power: state.power,
+    locked: false,
+    guides: aimGuides(balls.value, state.phi, hit),
+  }
 })
 
 // clockText 是剩余读秒。截止时刻在本地算，避免与服务端钟差。
@@ -200,6 +253,8 @@ function applySnapshot(snap: MatchSnapshot, deadline: number) {
     list.push({ id: ball.id, x: ball.x, y: ball.y, z: ball.z, on_table: ball.on_table })
   }
   balls.value = list
+  // 球位换了，上一帧的瞄准角度不再对应台面，先收起来等下一帧。
+  aimState.value = null
 
   // 快照里已经结算：可能是刚进来时就结束了，或者断线重连回来才发现打完。
   if (snap.status === 'finished' && snap.winner !== null) {
@@ -302,11 +357,17 @@ function onMessage(msg: DownMessage) {
     return
   }
   if (msg.type === 'shot') {
+    // 球已经打出去了：那一杆的杆子要立刻收起来，不能跟着轨迹挂在台上。
+    aimState.value = null
     playShotFrame(msg.data)
     return
   }
   if (msg.type === 'foul') {
     showNotice(msg.data.reason)
+    return
+  }
+  if (msg.type === 'aim') {
+    onAim(msg.data)
     return
   }
   if (msg.type === 'result') {
@@ -319,6 +380,14 @@ function onMessage(msg: DownMessage) {
   }
   // turn / error 在观战这边不需要额外动作：
   // 换人已经包含在随后的快照里，而观战者本来就不发命令，收不到业务错误。
+}
+
+// onAim 收下一条瞄准帧。
+//
+// 观战者会先后看到两边的杆：回合归谁就只会有谁的帧，服务端按轮次过滤，
+// 这里不必自己判断，最后收到的那一条就是当前的。
+function onAim(data: AimData) {
+  aimState.value = { seat: data.seat, phi: data.phi, power: data.power, at: Date.now() }
 }
 
 // finishWith 记下结算结果，名字从快照里取。
@@ -406,13 +475,27 @@ onBeforeUnmount(() => {
   background: #0e1116;
 }
 
+/* 与对局页同一套顶栏：左右各一张座位卡，中间是「观战」标记。
+   grid 的 1fr auto 1fr 让标记钉在正中，两张卡宽度不一样也不会偏。 */
 .wt__bar {
-  display: flex;
+  display: grid;
   flex: none;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
   gap: 8px;
-  height: 52px;
-  padding: 0 10px;
+  min-height: 58px;
+  padding: 6px 10px;
+}
+
+.wt__corner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.wt__corner--right {
+  justify-content: flex-end;
 }
 
 .wt__back {
@@ -430,17 +513,10 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
-.wt__seats {
-  display: flex;
-  flex: 1;
-  gap: 8px;
-  min-width: 0;
-}
-
 .wt__badge {
   flex: none;
-  padding: 3px 8px;
-  font-size: 11px;
+  padding: 4px 10px;
+  font-size: 12px;
   color: #7aa3ff;
   background: rgba(122, 163, 255, 0.16);
   border-radius: 999px;
@@ -455,12 +531,14 @@ onBeforeUnmount(() => {
 
 .wt__notice {
   position: absolute;
-  top: 8px;
+  top: 14px;
   left: 50%;
-  padding: 6px 14px;
-  font-size: 12px;
+  max-width: min(90%, 420px);
+  padding: 9px 18px;
+  font-size: 14px;
+  text-align: center;
   color: #ffd9a8;
-  background: rgba(60, 42, 18, 0.92);
+  background: rgba(60, 42, 18, 0.94);
   border-radius: 999px;
   transform: translateX(-50%);
 }
@@ -480,10 +558,10 @@ onBeforeUnmount(() => {
   top: 50%;
   left: 50%;
   margin: 0;
-  padding: 8px 16px;
-  font-size: 13px;
+  padding: 12px 22px;
+  font-size: 15px;
   color: #e8eaed;
-  background: rgba(18, 22, 30, 0.9);
+  background: rgba(18, 22, 30, 0.92);
   border-radius: 999px;
   transform: translate(-50%, -50%);
 }
@@ -492,12 +570,13 @@ onBeforeUnmount(() => {
   position: absolute;
   top: 50%;
   left: 50%;
-  padding: 10px 20px;
-  font-size: 15px;
-  font-weight: 600;
+  padding: 16px 30px;
+  font-size: 18px;
+  font-weight: 700;
   color: #fff;
-  background: rgba(18, 22, 30, 0.92);
-  border-radius: 12px;
+  background: rgba(18, 22, 30, 0.94);
+  border-radius: 16px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4);
   transform: translate(-50%, -50%);
 }
 

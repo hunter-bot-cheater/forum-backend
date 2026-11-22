@@ -54,25 +54,26 @@ const reasonText = computed(() => reasonLabel(props.reason, props.won))
 
 .rs__card {
   width: 100%;
-  max-width: 300px;
-  padding: 28px 22px 20px;
+  max-width: 350px;
+  padding: 34px 26px 24px;
   text-align: center;
   background: #161a21;
   border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 18px;
+  border-radius: 20px;
   animation: rs-in 0.2s ease-out;
 }
 
 .rs__kicker {
-  margin: 0 0 8px;
-  font-size: 20px;
-  font-weight: 700;
+  margin: 0 0 10px;
+  font-size: 24px;
+  font-weight: 800;
   color: #fff;
 }
 
 .rs__reason {
-  margin: 0 0 24px;
-  font-size: 13px;
+  margin: 0 0 28px;
+  font-size: 14px;
+  line-height: 1.5;
   color: #8a919c;
 }
 
@@ -83,8 +84,8 @@ const reasonText = computed(() => reasonLabel(props.reason, props.won))
 
 .rs__btn {
   flex: 1;
-  height: 42px;
-  font-size: 14px;
+  height: 48px;
+  font-size: 15px;
   font-weight: 600;
   border: none;
   border-radius: 12px;

@@ -5,6 +5,7 @@
 //
 // phi 的约定沿用 pooltool：速度方向 = (cos phi, sin phi)，phi=0 指向 +x，
 // phi=π/2 指向 +y（台面远端）。屏幕的 y 轴朝下，所以由屏幕位移反推 phi 时要取负。
+import type { Point } from './geometry'
 import { BALL_RADIUS, TABLE_LENGTH, TABLE_WIDTH } from './table'
 import type { BallState } from './types'
 
@@ -121,6 +122,87 @@ function findBall(balls: ReadonlyArray<BallState>, id: string): BallState | null
     }
   }
   return null
+}
+
+// 引导线的长度上限，单位米。
+//
+// 0.42 米差不多是七个球直径：再短看不出「球往哪走」，再长会把台面糊成一片虚线，
+// 而且越过后面那颗球之后指向就没有意义了。真正生效的长度还要被库边截断。
+export const OBJECT_GUIDE_LENGTH = 0.42
+export const CUE_GUIDE_LENGTH = 0.3
+
+// GuideSegment 是一段引导线，两端都是世界坐标。
+export interface GuideSegment {
+  from: Point
+  to: Point
+}
+
+// AimGuides 是瞄准时除了母球路线之外的两段预测线。
+//
+// object 是目标球被撞之后的去向（沿两球球心连线），
+// cue 是母球撞完之后分离的方向（连线的切线，也就是「薄厚」的那一侧）。
+// 撞库时两者都是 null：库边反弹的入射角等于反射角，但真正的落点还要看旋转，
+// 画一条不准的线比不画更容易误导。
+export interface AimGuides {
+  object: GuideSegment | null
+  cue: GuideSegment | null
+}
+
+// aimGuides 按一次瞄准结果算出两段引导线。
+//
+// 只做几何近似：假设正碰、不带走位（stun）。真实击球点偏上时母球会跟球，
+// 偏下会缩杆，这两条线只是「大致往哪走」，所以画短一点，不让人当成精确预测。
+export function aimGuides(
+  balls: ReadonlyArray<BallState>,
+  phi: number,
+  hit: AimHit,
+): AimGuides {
+  if (hit.kind !== 'ball' || !hit.targetId) {
+    return { object: null, cue: null }
+  }
+  const target = findBall(balls, hit.targetId)
+  if (!target) {
+    return { object: null, cue: null }
+  }
+
+  // 球心连线：幽灵球心指向目标球心，就是目标球被撞出去的方向。
+  const gapX = target.x - hit.x
+  const gapY = target.y - hit.y
+  const gap = Math.hypot(gapX, gapY)
+  if (gap < 1e-9) {
+    return { object: null, cue: null }
+  }
+  const nx = gapX / gap
+  const ny = gapY / gap
+
+  // 目标球从自己的表面出发，走到库边或长度上限为止。
+  const objectFrom = { x: target.x + nx * BALL_RADIUS, y: target.y + ny * BALL_RADIUS }
+  const objectReach = Math.min(
+    OBJECT_GUIDE_LENGTH,
+    cushionHit(target.x, target.y, nx, ny).distance,
+  )
+  const object: GuideSegment = {
+    from: objectFrom,
+    to: { x: objectFrom.x + nx * objectReach, y: objectFrom.y + ny * objectReach },
+  }
+
+  // 母球撞完沿切线走。切线有两个方向，取与来球同侧的那一支：
+  // 反了会把「往左偏」画成「往右偏」，比不画还糟。
+  const tx = Math.cos(phi)
+  const ty = Math.sin(phi)
+  let px = -ny
+  let py = nx
+  if (px * tx + py * ty < 0) {
+    px = -px
+    py = -py
+  }
+  const cueReach = Math.min(CUE_GUIDE_LENGTH, cushionHit(hit.x, hit.y, px, py).distance)
+  const cue: GuideSegment = {
+    from: { x: hit.x + px * BALL_RADIUS, y: hit.y + py * BALL_RADIUS },
+    to: { x: hit.x + px * cueReach, y: hit.y + py * cueReach },
+  }
+
+  return { object, cue }
 }
 
 // rayCircleDistance 求射线与圆的首个交点距离。

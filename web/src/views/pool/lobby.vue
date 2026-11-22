@@ -287,6 +287,12 @@ let roomTimer: ReturnType<typeof setInterval> | null = null
 // roomPolling 挡住重入：一次请求没回来就不再发下一次，
 // 否则服务端慢的时候会堆起一串请求，最后按乱序覆盖状态。
 let roomPolling = false
+// roomPending 记着「刚才有一次重拉被挡掉了」。
+//
+// 不能直接丢掉：推送（对方进房、对方接受邀请）往往正好撞在一次在途轮询上，
+// 丢掉之后界面就停在旧快照里，只能等下一轮慢轮询——「对方人已经进来了，
+// 我这一屏还是只有我自己」就是这么来的。挡掉的那次在本次请求收尾时补上。
+let roomPending = false
 // roomSeq 是请求代际。弱网下请求会叠起来，只认最新一次的结果。
 let roomSeq = 0
 let roomDisposed = false
@@ -375,7 +381,13 @@ function applyRoom(next: PoolRoom) {
 // （见后端 pool.Manager 的清扫规则），这时 getRoom 会一直 404，
 // 而 getMyRoom 会按库里那条还在 waiting 的行把房间重建出来，自己就恢复了。
 async function loadRoom() {
+  if (roomDisposed) {
+    return
+  }
   if (roomPolling) {
+    // 这一发被挡掉，但要记下来：调用方多半是推送驱动的，
+    // 那条推送只来一次，丢掉就没有第二次了。
+    roomPending = true
     return
   }
   roomPolling = true
@@ -400,15 +412,36 @@ async function loadRoom() {
     }
   } finally {
     roomPolling = false
+    // 补上被挡掉的那次。放在 finally 里而不是成功分支：
+    // 这次失败说明状态更旧，更需要立刻再要一份。
+    if (roomPending && !roomDisposed) {
+      roomPending = false
+      void loadRoom()
+    }
   }
 }
 
 // roomInterval 记着当前表的间隔，用来判断要不要重起。
 let roomInterval = 0
 
+// wantRoomInterval 决定这一轮用快档还是慢档。
+//
+// 判据是「对面有没有可能马上进来」：对面已经坐着人，或者我刚发出邀请在等回应，
+// 这两种情况都该快。慢档只留给「我开着一间空房，人也还没邀请」——
+// 那种时候整页没有任何理由期待变化，靠推送就够了。
+//
+// 光靠推送不够：推送走的是通知连接，切页面、重连那一下都可能丢一条，
+// 丢一条就要等满十秒。等邀请回应的这几十秒里快一点，最贵的那条路就没了。
+function wantRoomInterval(): number {
+  if (!otherEmpty.value || pool.outgoing) {
+    return ROOM_POLL_MS
+  }
+  return ROOM_IDLE_POLL_MS
+}
+
 // startRoomTimer 按当前状态起表：间隔不合适就重起一张。
 function startRoomTimer() {
-  const want = otherEmpty.value ? ROOM_IDLE_POLL_MS : ROOM_POLL_MS
+  const want = wantRoomInterval()
   if (roomTimer && roomInterval === want) {
     return
   }
@@ -642,6 +675,9 @@ async function onInvite(person: OnlineUser) {
   busyId.value = person.user_id
   try {
     await pool.invite(person.user_id, person.nickname)
+    // 发邀请这一步可能顺手给我开了一间新房（手里还没有 waiting 的房间时），
+    // 拉一次让卡上的房号与邀请指向的那间对上；拉不到也不影响邀请本身。
+    await loadRoom()
   } catch {
     // 拦截器已提示。
   } finally {
@@ -821,10 +857,14 @@ watch(
 //
 // immediate 不能省：从对局页「再约一局」回到大厅时，outgoing 在挂载前就已经有值，
 // 不标 immediate 会停在「0 秒后失效」且不再倒数，看起来像一条已经失效的邀请。
+//
+// 表也要跟着重起：等回应的这段时间切快档，邀请结束（接受/拒绝/取消）切回慢档，
+// 否则「刚邀请完还是十秒一拉」或者「邀请没了还两秒一拉」都会留着。
 watch(
   outgoing,
   (value) => {
     stopWaitTimer()
+    startRoomTimer()
     if (!value) {
       waitLeft.value = 0
       return

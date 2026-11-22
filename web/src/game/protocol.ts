@@ -73,6 +73,16 @@ export interface PeerData {
   seat: Seat
 }
 
+// AimData 是某一方此刻的瞄准姿态。
+//
+// 只带角度与力度：杆子画在哪、拉多远由本端算，服务端不掺和外观。
+// 这条消息不进快照、不留历史，丢了下一帧立刻补上。
+export interface AimData {
+  seat: Seat
+  phi: number
+  power: number
+}
+
 export interface ErrorData {
   code: string
   message: string
@@ -89,6 +99,7 @@ export type DownMessage =
   | { type: 'foul'; seq?: number; ts: number; data: FoulData }
   | { type: 'result'; seq?: number; ts: number; data: ResultData }
   | { type: 'peer'; seq?: number; ts: number; data: PeerData }
+  | { type: 'aim'; seq?: number; ts: number; data: AimData }
   | { type: 'error'; seq?: number; ts: number; data: ErrorData }
 
 // ConnectionState 是连接状态，页面据此渲染顶部提示条。
@@ -200,6 +211,13 @@ export class GameSocket {
   // placeCue 把母球摆到指定位置（手中球时用）。
   placeCue(x: number, y: number): number {
     return this.send('place_cue', { x, y })
+  }
+
+  // aim 上报自己的瞄准姿态，服务端转给对面与观战者。
+  //
+  // 不需要 seq：这是一条只播不答的帧，调用方也不该去等它的回执。
+  sendAim(phi: number, power: number): void {
+    this.send('aim', { phi, power })
   }
 
   // leave 告知服务端自己退出。服务端据此判负并结算。
@@ -343,6 +361,7 @@ export function decode(raw: unknown): DownMessage | null {
     case 'foul':
     case 'result':
     case 'peer':
+    case 'aim':
     case 'error':
       return parsed as DownMessage
     default:

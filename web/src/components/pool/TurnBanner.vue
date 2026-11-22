@@ -6,14 +6,14 @@
     <div v-if="visible" class="tb" :class="{ 'is-mine': isMe }">
       <div class="tb__inner">
         <el-avatar
-          :size="34"
+          :size="46"
           :src="avatar || undefined"
           :style="{ backgroundColor: avatarColor(name) }"
         >
           {{ initial }}
         </el-avatar>
         <div class="tb__text">
-          <span class="tb__title">{{ isMe ? '你的回合' : '对手回合' }}</span>
+          <span class="tb__title">{{ title }}</span>
           <span class="tb__sub">{{ subtitle }}</span>
         </div>
       </div>
@@ -22,10 +22,13 @@
 </template>
 
 <script setup lang="ts">
-// 换人横幅。对局页在 turn 帧到达时把 visible 置 true，1.4 秒后置回 false。
+// 换人横幅。页面在 turn 帧到达时把 visible 置 true，1.4 秒后置回 false。
 //
 // 计时放在页面而不是组件里：横幅的显示时长要和「读秒开始」这一步对齐，
 // 组件自己管计时会让两件事各自跑一套定时器，调试时很难说清谁先谁后。
+//
+// 标题由页面传进来而不是在这里按 isMe 拼：「你的回合」「对手回合」只是两种情况，
+// 还有一种「进球了接着打」——同一方的回合没换人，那是不同的意思，得由页面说。
 import { computed } from 'vue'
 import { avatarColor } from '@/utils/avatar'
 import { initials } from '@/utils/format'
@@ -34,6 +37,8 @@ const props = defineProps<{
   visible: boolean
   // isMe 为 true 表示轮到查看者自己，横幅用主色，否则用中性深色。
   isMe: boolean
+  // title 是大字那行（你的回合 / 对手回合 / 继续击打）。
+  title: string
   name: string
   avatar: string
   subtitle: string
@@ -65,36 +70,38 @@ const initial = computed(() => {
 .tb__inner {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 22px 10px 12px;
-  background: rgba(18, 22, 30, 0.82);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  gap: 14px;
+  padding: 14px 30px 14px 16px;
+  background: rgba(18, 22, 30, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 999px;
-  backdrop-filter: blur(6px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.36);
+  backdrop-filter: blur(8px);
 }
 
 /* 轮到自己时整条横幅换主色，余光就能分辨，
    不用去读上面的字。 */
 .tb.is-mine .tb__inner {
-  background: rgba(76, 126, 243, 0.92);
-  border-color: rgba(255, 255, 255, 0.24);
+  background: rgba(76, 126, 243, 0.94);
+  border-color: rgba(255, 255, 255, 0.26);
 }
 
 .tb__text {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
 }
 
 .tb__title {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.15;
   color: #fff;
 }
 
 .tb__sub {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.72);
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.76);
 }
 
 /* 入场从左滑到中间、出场向右滑走：

@@ -146,7 +146,9 @@ describe('观战页', () => {
     push({ type: 'state', ts: 0, data: snapshot() })
     await flushPromises()
 
-    const seats = wrapper.find('.wt__seats').text()
+    // 两张卡分在顶栏左右两个角上，取整条顶栏的文本即可——
+    // 中间那段是「观战」标记，不含昵称，也不影响下面几条断言。
+    const seats = wrapper.find('.wt__bar').text()
     expect(seats).toContain('阿泽')
     expect(seats).toContain('小满')
     // 观战没有「我」这一侧，座位卡不该标「你」。

@@ -1,27 +1,37 @@
 <template>
   <div class="pm">
-    <!-- 顶部只留一条窄栏。对局页不套站点 Layout：60px 顶栏加内容区留白，
-         在竖屏手机上会吃掉球台将近六分之一的高度。 -->
+    <!-- 顶栏三块：左上角一张座位卡、正中读秒、右上角另一张。
+         以前两张卡挤在一条里，两个人黏在一起，看不出谁在左谁在右；
+         拆到两个角上之后，「我」永远在左上，对手永远在右上，一眼能对上。 -->
     <header class="pm__bar">
-      <button class="pm__back" type="button" aria-label="返回" @click="leave">
-        <el-icon :size="18"><ArrowLeft /></el-icon>
-      </button>
-
-      <!-- 双方条放在顶栏里而不是单独占一行：竖屏手机上球台越高越好，
-           而这两张座位卡只需要一行的位置。 -->
-      <div class="pm__seats">
+      <div class="pm__corner">
+        <button class="pm__back" type="button" aria-label="返回" @click="leave">
+          <el-icon :size="18"><ArrowLeft /></el-icon>
+        </button>
         <SeatCard
-          v-for="side in seats"
-          :key="side.seat"
-          :player="side.player"
-          :group="side.group"
-          :remaining="side.remaining"
-          :active="side.active"
-          :is-me="side.seat === mySeat"
+          v-if="leftCard"
+          :player="leftCard.player"
+          :group="leftCard.group"
+          :remaining="leftCard.remaining"
+          :active="leftCard.active"
+          :is-me="leftCard.seat === mySeat"
+          :continuing="leftCard.active && continuing"
         />
       </div>
 
       <span class="pm__clock">{{ clockText }}</span>
+
+      <div class="pm__corner pm__corner--right">
+        <SeatCard
+          v-if="rightCard"
+          :player="rightCard.player"
+          :group="rightCard.group"
+          :remaining="rightCard.remaining"
+          :active="rightCard.active"
+          :is-me="rightCard.seat === mySeat"
+          :continuing="rightCard.active && continuing"
+        />
+      </div>
     </header>
 
     <main class="pm__stage fs-table-stage">
@@ -32,6 +42,7 @@
         <PoolTable
           :balls="tableBalls"
           :aim="aim"
+          :peer-aim="peerAim"
           :ghost="ghost"
           @drag="onDrag"
           @tap="onTap"
@@ -42,10 +53,22 @@
         <TurnBanner
           :visible="bannerVisible"
           :is-me="bannerMine"
+          :title="bannerTitle"
           :name="bannerName"
           :avatar="bannerAvatar"
           :subtitle="bannerSubtitle"
         />
+
+        <!-- 自由球：拿到手中球的那一刻弹一块大牌子。
+             这件事只在底栏写一行小字是看不出来的——玩家正盯着球台，
+             不知道「为什么现在打不出杆」，只会觉得界面卡住了。
+             牌子不拦点击（pointer-events: none），点哪里球就落在哪里。 -->
+        <Transition name="pm-ballin">
+          <div v-if="ballInHandTip" class="pm__ballin" role="status">
+            <span class="pm__ballin-tag">自由球</span>
+            <span class="pm__ballin-text">点一下台面，把白球放在那里</span>
+          </div>
+        </Transition>
 
         <!-- 犯规与提示条。3 秒后自动消失，不需要用户去点。 -->
         <Transition name="pm-notice">
@@ -59,9 +82,22 @@
     </main>
 
     <footer class="pm__foot">
-      <!-- 手中球：那圈微调尺用不上（方向还没定），换成一行提示。
-           提示留在底栏而不是球台上，免得压住库边影响点击。 -->
+      <!-- 桌下那一排：已经进袋的球，按落袋先后排开。
+           它是「这一局打到哪了」最直观的一条，比顶部席位卡上的小球更清楚。 -->
+      <div v-if="pottedOrder.length > 0" class="pm__potted" aria-label="已进袋的球">
+        <span
+          v-for="id in pottedOrder"
+          :key="id"
+          class="pm__potted-ball"
+          :style="pottedStyle(id)"
+          >{{ id }}</span
+        >
+      </div>
+      <!-- 手中球：那圈微调尺用不上（方向还没定），换成一块明显的提示。
+           提示留在底栏而不是只盖在球台上，是因为弹出来的牌子几秒后会收起，
+           而「还在等他放球」这件事要一直看得到。 -->
       <div v-if="mustPlace" class="pm__place">
+        <span class="pm__place-tag">自由球</span>
         <span class="pm__place-tip">点一下台面，白球就放在那里</span>
       </div>
       <FineTuneRail v-else :phi="phi" :disabled="!canAim" @nudge="onNudge" />
@@ -117,11 +153,13 @@ import PowerSlider from '@/components/pool/PowerSlider.vue'
 import ResultSheet from '@/components/pool/ResultSheet.vue'
 import SeatCard from '@/components/pool/SeatCard.vue'
 import TurnBanner from '@/components/pool/TurnBanner.vue'
-import { adjustPhi, aimFromCue, normalizePhi, rotateByDrag } from '@/game/aim'
+import { adjustPhi, aimFromCue, aimGuides, normalizePhi } from '@/game/aim'
 import { applySample, playShot, type PlayHandle } from '@/game/animator'
+import { ballLookOf } from '@/game/balls'
 import type { Point } from '@/game/geometry'
 import {
   GameSocket,
+  type AimData,
   type ConnectionState,
   type DownMessage,
   type FoulData,
@@ -177,6 +215,27 @@ const phi = ref(0)
 const shooting = ref(false)
 const notice = ref('')
 
+// pottedOrder 是桌下那一排「已经进袋的球」，按落袋先后排。
+//
+// 不直接从 balls 里筛 on_table=false：那样得到的是摆球时的顺序，
+// 一颗颗进袋的过程就看不出来了，而视频里那排球是越打越长的。
+const pottedOrder = ref<string[]>([])
+
+// peerAimState 是对面此刻的瞄准姿态（由服务端转发的 aim 帧刷新）。
+//
+// at 用来判断「这帧还新不新鲜」：对面掉了线或走了，最后一帧不该一直挂在台上。
+const peerAimState = ref<{ seat: Seat; phi: number; power: number; at: number } | null>(null)
+
+// AIM_STALE_MS 之后不再显示对面的杆子。正常瞄准是每 60ms 一帧，
+// 四秒没新帧说明对面停了，再挂着一根杆会让人以为他还在瞄。
+const AIM_STALE_MS = 4000
+
+// AIM_SEND_INTERVAL 是上报瞄准的最小间隔。
+//
+// 60ms 约等于 16 帧每秒：对面看到的转杆是连贯的，而一条一局几分钟的连接
+// 也不会被这个频率打满。手速再快也没必要每像素发一帧。
+const AIM_SEND_INTERVAL = 60
+
 // aimLocked 表示方向已经定住：鼠标再怎么移、手指再怎么拖，杆子都不动。
 //
 // 这是视频里那套操作的核心一步。不锁的话，手从球台移到右边的力度条这一段路
@@ -184,9 +243,21 @@ const notice = ref('')
 // 根本没法瞄。锁了之后，调力度、点微调都不会影响方向。
 const aimLocked = ref(false)
 
+// continuing 表示当前这一手是「上一杆进球之后接着打」，不是换人。
+//
+// 服务端换人帧只在座位号上体现结果：进了球回合还归同一个人，帧里的 seat
+// 和上一杆一样。光看 seat 分不清「他连打」还是「正常轮到他」，
+// 所以记住上一杆是谁打的，两者一比对就知道是不是连击。
+const continuing = ref(false)
+
+// lastShooter 是上一杆的击球方，用来判断下一帧 turn 是不是连击。
+// 不能用 turn.value 比较：换人帧到达时 turn 已经被改成新的一方了。
+let lastShooter: Seat | null = null
+
 // 换人横幅
 const bannerVisible = ref(false)
 const bannerMine = ref(false)
+const bannerTitle = ref('')
 const bannerName = ref('')
 const bannerAvatar = ref('')
 const bannerSubtitle = ref('')
@@ -222,10 +293,6 @@ let pendingFoul: FoulData | null = null
 let pendingTurn: { data: TurnData; deadlineAt: number } | null = null
 let pendingState: { snap: MatchSnapshot; deadlineAt: number } | null = null
 let pendingResult: ResultData | null = null
-
-// 拖动起点的角度。整个拖动过程都基于它加总位移，
-// 逐帧累加会把浮点误差攒起来，拖久了瞄准线会慢慢偏。
-let dragBase = 0
 
 let socket: GameSocket | null = null
 // switchingToWatch 挡住重复跳转：joined 与紧随其后的 state 都会撞上观战座位，
@@ -264,11 +331,24 @@ const mustPlace = computed(() => {
 // 球已经跟着走了，永远按不出「先摆好后确认」。
 const ghost = ref<Point | null>(null)
 
+// ballInHandTip 控制「自由球」那块大牌子的显示。
+//
+// 只在拿到手中球的那一刻弹一次、几秒后收起：牌子会盖住半个球台，
+// 一直挂着就没法看球位了。底栏那一条会一直留着，说明不会丢。
+const ballInHandTip = ref(false)
+let ballInHandTimer: ReturnType<typeof setTimeout> | null = null
+
 // 拿到手中球时把虚影摆在一个合理的位置：母球还在台上就摆它现在的位置
 // （视觉上「球被拿起来了」），已经落袋了就摆在开球线附近，免得虚影出现在袋口。
+// 同时弹一次大牌子——这是「为什么现在打不出杆」的唯一解释。
 watch(mustPlace, (holding) => {
+  if (ballInHandTimer) {
+    clearTimeout(ballInHandTimer)
+    ballInHandTimer = null
+  }
   if (!holding) {
     ghost.value = null
+    ballInHandTip.value = false
     return
   }
   const cue = balls.value.find((b) => b.id === 'cue')
@@ -276,6 +356,11 @@ watch(mustPlace, (holding) => {
     cue && cue.on_table
       ? { x: cue.x, y: cue.y }
       : { x: TABLE_WIDTH / 2, y: TABLE_LENGTH * 0.25 }
+  ballInHandTip.value = true
+  ballInHandTimer = setTimeout(() => {
+    ballInHandTip.value = false
+    ballInHandTimer = null
+  }, 3200)
 })
 
 // tableBalls 是画到球台上的球。
@@ -302,10 +387,79 @@ const canShoot = computed(
   () => isMyTurn.value && !shotPending.value && !shooting.value && !mustPlace.value,
 )
 
+// refreshPotted 把「已经进袋的球」同步到桌下那一排。
+//
+// 已有的顺序不动，只把新掉袋的按号码补到末尾。重连或刷新时没有真实先后，
+// 按号码补至少每次打开都一样，不会看起来在乱跳。
+function refreshPotted() {
+  const kept: string[] = []
+  const off: string[] = []
+  for (const ball of balls.value) {
+    if (ball.on_table) {
+      continue
+    }
+    off.push(ball.id)
+    if (pottedOrder.value.includes(ball.id)) {
+      kept.push(ball.id)
+    }
+  }
+  const added: string[] = []
+  for (const id of off) {
+    if (!kept.includes(id)) {
+      added.push(id)
+    }
+  }
+  added.sort(byBallNumber)
+  const next = kept.concat(added)
+
+  // 只在真的变了才赋值：这个函数在每一帧动画里都会被调用，
+  // 每次都换一个新数组会让整个底栏跟着重渲染。
+  if (next.length !== pottedOrder.value.length) {
+    pottedOrder.value = next
+    return
+  }
+  for (let i = 0; i < next.length; i += 1) {
+    if (next[i] !== pottedOrder.value[i]) {
+      pottedOrder.value = next
+      return
+    }
+  }
+}
+
+// byBallNumber 按球号排：母球排最后（正常不会出现在这里），非法号也排最后。
+function byBallNumber(a: string, b: string): number {
+  const na = Number(a)
+  const nb = Number(b)
+  const va = Number.isFinite(na) ? na : 99
+  const vb = Number.isFinite(nb) ? nb : 99
+  return va - vb
+}
+
+// pottedStyle 给桌下那一排的小球上色，和台面上的球对得上。
+//
+// 花色球用白底加一道色带，纯色球整颗上色；号码用深色字，
+// 因为这一排的球只有二十来像素，白字压在黄球上根本看不清。
+function pottedStyle(id: string): Record<string, string> {
+  const look = ballLookOf(id)
+  if (look.striped) {
+    return {
+      background:
+        'linear-gradient(180deg, #fbfaf6 0 26%, ' +
+        look.color +
+        ' 26% 74%, #fbfaf6 74% 100%)',
+    }
+  }
+  return { background: look.color }
+}
+
 // canAim 只影响瞄准线与微调尺：动画期间不该让瞄准线跟着手指跑。
 const canAim = computed(() => isMyTurn.value && !shooting.value)
 
-// seats 是双方条要传的数据：座位、该侧组别、该侧剩余球。
+// seats 是两张座位卡要传的数据：座位、该侧组别、该侧剩余球。
+//
+// 顺序固定是「我先、对手后」：左上角永远是查看者自己，右上角永远是对手。
+// 不按座位号排——按座位号排的话，坐 1 号位的人会看到自己在右上角，
+// 每次重开一局左右都要重新认一遍。
 const seats = computed(() => {
   const snap = snapshot.value
   if (!snap) {
@@ -327,6 +481,11 @@ const seats = computed(() => {
     active: turn.value === seat && snap.status === 'playing',
   }))
 })
+
+// 左上、右上各取一张。拆成两个 computed 而不是在模板里写 seats[0]：
+// 数组可能为空（快照还没到），模板里取下标要额外判空，写在这里一次就够。
+const leftCard = computed(() => seats.value[0] ?? null)
+const rightCard = computed(() => seats.value[1] ?? null)
 
 // clockText 是右上角的读秒。
 const clockText = computed(() => {
@@ -372,6 +531,81 @@ const aim = computed<AimLayer | null>(() => {
     phi: phi.value,
     power: power.value,
     locked: aimLocked.value,
+    guides: aimGuides(balls.value, phi.value, hit),
+  }
+})
+
+// peerAim 是对面那一方的瞄准层，画在自己这一层下面、淡一档。
+//
+// 用本地同一套 aimFromCue 现算：服务端只转发角度与力度，杆子落在哪、
+// 会撞到哪颗球，都是几何问题，本端算比多传一份数据更省也更不会不同步。
+const peerAim = computed<AimLayer | null>(() => {
+  const state = peerAimState.value
+  if (!state || !snapshot.value || snapshot.value.status !== 'playing') {
+    return null
+  }
+  // 自己发出去的帧（理论上服务端不会回显）不该画成对面的杆。
+  if (state.seat === mySeat.value) {
+    return null
+  }
+  if (Date.now() - state.at > AIM_STALE_MS) {
+    return null
+  }
+  const cue = balls.value.find((b) => b.id === 'cue')
+  if (!cue || !cue.on_table) {
+    return null
+  }
+  const hit = aimFromCue(balls.value, state.phi)
+  return {
+    cue: { x: cue.x, y: cue.y },
+    hit: { x: hit.x, y: hit.y, kind: hit.kind },
+    phi: state.phi,
+    power: state.power,
+    locked: false,
+    guides: aimGuides(balls.value, state.phi, hit),
+  }
+})
+
+// onPeerAim 收到对面的瞄准帧：把角度与力度存下来，交给 peerAim 去画。
+//
+// 不校验轮次：服务端只会转发「当前回合的那个人」的帧，
+// 这里再判一遍反而会在换人的瞬间把最后一帧挡掉，杆子闪一下。
+function onPeerAim(data: AimData) {
+  if (data.seat === mySeat.value) {
+    return
+  }
+  peerAimState.value = { seat: data.seat, phi: data.phi, power: data.power, at: Date.now() }
+}
+
+// 上报自己的瞄准姿态，让对面与观战者看到杆子在转。
+//
+// 节流到 60ms：拖动一秒能产生上百个事件，全发没必要，而对面 16fps 已经连贯。
+// 用「尾帧必发」的方式节流：间隔不够时挂一个定时器把最后一次的值补上去，
+// 否则松手前的最后一个角度可能永远发不出去，对面看到的是上一帧的杆位。
+let aimSentAt = 0
+let aimTimer: ReturnType<typeof setTimeout> | null = null
+
+// flushAim 立即发一帧当前姿态。
+function flushAim() {
+  aimTimer = null
+  if (!socket || !isMyTurn.value || shooting.value || mustPlace.value) {
+    return
+  }
+  aimSentAt = Date.now()
+  socket.sendAim(phi.value, power.value)
+}
+
+watch([phi, power], () => {
+  if (!socket || !isMyTurn.value || shooting.value || mustPlace.value) {
+    return
+  }
+  const wait = AIM_SEND_INTERVAL - (Date.now() - aimSentAt)
+  if (wait <= 0) {
+    flushAim()
+    return
+  }
+  if (aimTimer === null) {
+    aimTimer = setTimeout(flushAim, wait)
   }
 })
 
@@ -418,12 +652,18 @@ function applySnapshot(snap: MatchSnapshot, deadline: number) {
   shotPending.value = false
   // 每次权威状态回来都解锁：球位可能变了，上一杆锁定的方向已经不作数。
   aimLocked.value = false
+  // 对面的瞄准帧同样作废：快照之后球位可能全变了，旧角度画出来是错的。
+  peerAimState.value = null
+  // 快照本身不区分「连击」与「换人」，先按换人处理；
+  // 同一批帧里紧随其后的 turn 帧会把它改回连击（见 flushAfterShot 的顺序）。
+  continuing.value = false
 
   const list: BallState[] = []
   for (const ball of snap.balls) {
     list.push({ id: ball.id, x: ball.x, y: ball.y, z: ball.z, on_table: ball.on_table })
   }
   balls.value = list
+  refreshPotted()
 
   // 默认瞄准角必须在球位落地之后算：它要读母球与球堆的位置。
   // 放在上面会让第一杆永远朝 +x（phi=0）打出去——开球直接空杆犯规。
@@ -506,6 +746,10 @@ function onMessage(msg: DownMessage) {
     onPeer(msg.data.event)
     return
   }
+  if (msg.type === 'aim') {
+    onPeerAim(msg.data)
+    return
+  }
   if (msg.type === 'error') {
     onServerError(msg.data)
   }
@@ -525,6 +769,10 @@ function playShotFrame(data: ShotData) {
   shotPending.value = false
   placing.value = false
   shooting.value = true
+  // 记下这一杆是谁打的：紧跟着的 turn 帧要靠它判断「连击还是换人」。
+  lastShooter = data.seat
+  // 球已经打出去了，对面那根杆要立刻收起来，不能跟着轨迹一起挂在台上。
+  peerAimState.value = null
   // 力度在发出去的那一刻就清零了，这里不再重复：
   // 两处都清会让人以为「播放帧」也要负责界面状态。
 
@@ -533,6 +781,9 @@ function playShotFrame(data: ShotData) {
     {
       onSample: (sample) => {
         applySample(balls.value, sample)
+        // 每帧对一次：这一杆里刚掉袋的球要立刻进桌下那一排，
+        // 等动画结束才更新的话，进球那一下完全没有反馈。
+        refreshPotted()
       },
       onDone: () => {
         handle = null
@@ -565,6 +816,7 @@ function applyFinal(data: ShotData) {
     ball.z = item.z
     ball.on_table = item.on_table
   }
+  refreshPotted()
 }
 
 // flushAfterShot 在动画播完之后把攒下的消息依次放出去。
@@ -619,6 +871,10 @@ function applyFoul(data: FoulData) {
 function applyTurn(data: TurnData, deadline: number) {
   turn.value = data.seat
   deadlineAt.value = deadline
+  // 换人意味着上一手结束了：他停手之后留下的那根杆不该继续挂在台上。
+  peerAimState.value = null
+  // 回合还归上一杆那个人，说明他进了球在接着打；换人了才是真的换人。
+  continuing.value = lastShooter !== null && data.seat === lastShooter
   showBanner(data.seat)
 }
 
@@ -669,6 +925,9 @@ function showNotice(text: string) {
 }
 
 // showBanner 弹换人横幅，1.4 秒后收起。
+//
+// 三种情况分开写文案：连击时说「继续击打」，别让人以为自己刚被换上场——
+// 连击和换人的区别全在「上一杆也是他打的」，横幅要替玩家把这件事说明白。
 function showBanner(seat: Seat) {
   const snap = snapshot.value
   if (!snap) {
@@ -678,7 +937,13 @@ function showBanner(seat: Seat) {
   bannerMine.value = mine
   bannerName.value = snap.players[seat].nickname
   bannerAvatar.value = snap.players[seat].avatar
-  bannerSubtitle.value = mine ? '该你出杆了' : '等他出杆'
+  if (continuing.value) {
+    bannerTitle.value = '继续击打'
+    bannerSubtitle.value = mine ? '进了球，接着来' : '他进球了，接着打'
+  } else {
+    bannerTitle.value = mine ? '你的回合' : '对手回合'
+    bannerSubtitle.value = mine ? '该你出杆了' : '等他出杆'
+  }
   bannerVisible.value = true
 
   if (bannerTimer) {
@@ -738,13 +1003,22 @@ function onHover(point: Point) {
   if (aimLocked.value) {
     return
   }
+  aimTowards(point)
+}
+
+// aimTowards 把瞄准线指向台面上的某一点。
+//
+// 桌面端靠鼠标悬停、手机端靠手指拖动，两条路都走这里：手指/指针在哪，
+// 球就往哪走。以前手机端按水平位移换算角度，斜着划或者在屏幕中间来回擦时
+// 方向会和手感对不上——有时反着走，有时干脆不动，因为竖直分量被丢掉了。
+function aimTowards(point: Point) {
   const cue = balls.value.find((b) => b.id === 'cue')
   if (!cue || !cue.on_table) {
     return
   }
-  // 指针压在母球上时方向没有意义，保持原角度，免得线在原地乱抖。
   const dx = point.x - cue.x
   const dy = point.y - cue.y
+  // 指针压在母球上时方向没有意义，保持原角度，免得线在原地乱抖。
   if (Math.hypot(dx, dy) < BALL_RADIUS * 1.2) {
     return
   }
@@ -759,9 +1033,9 @@ function moveGhost(point: Point) {
   ghost.value = clampIntoCueArea(point)
 }
 
-// onDrag 处理画布拖动：只认水平位移，换算出新的瞄准角。
+// onDrag 处理画布拖动：拖动即瞄准，方向指向手指所在的位置。
 //
-// 触摸屏上没有悬停，转角度就靠这一条；鼠标上它只是「按住微调」的快捷方式。
+// 触摸屏上没有悬停，这是手机端唯一的瞄准方式；鼠标上它等同于按住跟手。
 // 锁定之后一律不理，理由同 onHover。
 function onDrag(payload: PoolDrag) {
   // 手里握着球时拖动就是挪球。触摸屏没有悬停，这是手机上唯一的挪法。
@@ -771,14 +1045,10 @@ function onDrag(payload: PoolDrag) {
     }
     return
   }
-  if (!canAim.value || aimLocked.value) {
+  if (!canAim.value || aimLocked.value || !payload.point) {
     return
   }
-  if (payload.phase === 'start') {
-    dragBase = phi.value
-    return
-  }
-  phi.value = rotateByDrag(dragBase, payload.dx)
+  aimTowards(payload.point)
 }
 
 // onNudge 处理底部微调按钮与键盘方向键上报的度数增量。
@@ -877,6 +1147,9 @@ function shoot() {
   // 出杆之后力度归零、方向解锁：下一杆从「自由瞄准」开始。
   power.value = 0
   aimLocked.value = false
+  // 连击标记跟着这一杆一起结束：进球之后接着打，是下一次判定的结果，
+  // 不是一直挂着的状态。不在这里清掉，出杆动画期间卡片上还写着「继续击打」。
+  continuing.value = false
 }
 
 // isPlaying 表示对局还在进行、也还没出结果。
@@ -995,9 +1268,18 @@ function cleanup() {
     clearTimeout(bannerTimer)
     bannerTimer = null
   }
+  // 节流中的瞄准帧也要撤掉：组件已经卸了，定时器再发一帧只是白发。
+  if (aimTimer) {
+    clearTimeout(aimTimer)
+    aimTimer = null
+  }
   if (noticeTimer) {
     clearTimeout(noticeTimer)
     noticeTimer = null
+  }
+  if (ballInHandTimer) {
+    clearTimeout(ballInHandTimer)
+    ballInHandTimer = null
   }
   if (socket) {
     socket.close()
@@ -1085,17 +1367,34 @@ onBeforeRouteLeave(() => {
   background: radial-gradient(120% 80% at 50% 40%, #2d2e3b 0%, #20212c 58%, #171720 100%);
 }
 
+/* 顶栏三列：左边一张卡、中间读秒、右边另一张卡。
+   用 grid 的 1fr auto 1fr 而不是 flex：读秒要钉在屏幕正中，
+   两侧内容宽度不一样时 flex 会让它偏，grid 的两条 1fr 把它夹在中间。 */
 .pm__bar {
-  display: flex;
+  display: grid;
   flex: none;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
   gap: 8px;
   width: 100%;
   max-width: 820px;
-  height: 48px;
+  min-height: 58px;
   margin: 0 auto;
-  padding: 0 10px;
+  padding: 6px 10px;
   color: #e8eaed;
+}
+
+/* 左上角：返回键贴着左边，座位卡紧跟着。 */
+.pm__corner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 右上角：只有卡片，靠到右边缘。 */
+.pm__corner--right {
+  justify-content: flex-end;
 }
 
 .pm__back {
@@ -1117,19 +1416,13 @@ onBeforeRouteLeave(() => {
   background: rgba(255, 255, 255, 0.18);
 }
 
-/* 双方条占满中间，时钟钉在右边。 */
-.pm__seats {
-  display: flex;
-  flex: 1;
-  gap: 4px;
-  min-width: 0;
-}
-
+/* 读秒压在两张卡中间，号码固定宽度不跟着跳。 */
 .pm__clock {
   flex: none;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: #8a919c;
+  white-space: nowrap;
 }
 
 /* 剩余空间全给球台。min-height: 0 是 flex 子项能收缩的前提，
@@ -1178,22 +1471,64 @@ onBeforeRouteLeave(() => {
   padding: 2px 10px 8px;
 }
 
-/* 提示条浮在球台上方而不是顶栏里：
+/* 桌下那一排已进袋的球：按落袋先后从左往右排，新进来的有一个落下的动作。 */
+.pm__potted {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: center;
+  padding: 0 4px 2px;
+}
+
+.pm__potted-ball {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  font-size: 9px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.55);
+  border-radius: 50%;
+  box-shadow:
+    inset 0 -3px 5px rgba(0, 0, 0, 0.32),
+    inset 0 2px 3px rgba(255, 255, 255, 0.35),
+    0 1px 2px rgba(0, 0, 0, 0.45);
+  animation: pm-potted-in 240ms ease-out;
+}
+
+/* 从上方落进这一排：进袋是「往下掉」，落到槽里那一下要有点惯性。 */
+@keyframes pm-potted-in {
+  from {
+    opacity: 0;
+    transform: translateY(-7px) scale(0.55);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 提示条浮在球台正上方而不是顶栏里：
    犯规、掉线这些消息和球台是同一件事的上下文，
-   放到顶栏会和双方条抢那一行的位置。
-   圆角给 14px 而不是胶囊形：犯规说明会折成两行，胶囊圆角在换行后像一块药片。 */
+   放到顶栏会和座位卡抢那一行的位置。
+   字号按「不用凑近也能读到」定，这一条是玩家唯一能知道「刚才发生了什么」的地方。
+   圆角给 16px 而不是胶囊形：犯规说明会折成两行，胶囊圆角在换行后像一块药片。 */
 .pm__notice {
   position: absolute;
-  top: 16px;
+  top: 18px;
   left: 50%;
-  max-width: min(88%, 340px);
-  padding: 7px 14px;
-  font-size: 12px;
+  max-width: min(90%, 420px);
+  padding: 10px 20px;
+  font-size: 14px;
   line-height: 1.5;
   color: #fff;
   text-align: center;
-  background: rgba(18, 22, 30, 0.9);
-  border-radius: 14px;
+  background: rgba(18, 22, 30, 0.92);
+  border-radius: 16px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.34);
   transform: translateX(-50%);
   pointer-events: none;
 }
@@ -1209,18 +1544,77 @@ onBeforeRouteLeave(() => {
   transform: translateX(-50%) translateY(-6px);
 }
 
-/* 手中球只有一句提示：落位靠点台面，底栏不放按钮——
+/* 自由球大牌子：盖在球台正中偏上，闪一下就走。
+   竖排而不是横排——「自由球」三个字是这一下的全部信息，
+   横着写会和后面的说明挤成一行，反而看不出重点。 */
+.pm__ballin {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 34px 16px;
+  background: rgba(28, 32, 44, 0.9);
+  border: 1px solid rgba(240, 192, 47, 0.55);
+  border-radius: 20px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  transform: translate(-50%, -50%);
+  /* 不拦点击：牌子就在球台中间，点它后面的台面也得能落球。 */
+  pointer-events: none;
+}
+
+.pm__ballin-tag {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: 4px;
+  color: #f0c02f;
+  text-shadow: 0 2px 10px rgba(240, 192, 47, 0.35);
+}
+
+.pm__ballin-text {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.pm-ballin-enter-active,
+.pm-ballin-leave-active {
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+.pm-ballin-enter-from,
+.pm-ballin-leave-to {
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.86);
+}
+
+/* 手中球时底栏换成一块黄底提示条：落位靠点台面，不放按钮——
    球跟着指针走，挪去按按钮的路上球就跑了。 */
 .pm__place {
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 10px;
   height: 44px;
+  border: 1px solid rgba(240, 192, 47, 0.4);
+  border-radius: 12px;
+  background: rgba(240, 192, 47, 0.12);
+}
+
+.pm__place-tag {
+  padding: 2px 9px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #2a2100;
+  background: #f0c02f;
+  border-radius: 999px;
 }
 
 .pm__place-tip {
-  font-size: 12px;
-  color: rgba(255, 255, 255, 0.62);
+  font-size: 13px;
+  color: #f4d98a;
 }
 
 .pm__gone {
@@ -1237,13 +1631,13 @@ onBeforeRouteLeave(() => {
 
 .pm__gone-text {
   margin: 0;
-  font-size: 15px;
+  font-size: 18px;
   color: #e8eaed;
 }
 
 .pm__gone-sub {
   margin: -10px 0 0;
-  font-size: 12px;
+  font-size: 13px;
   color: #8a919c;
 }
 
@@ -1253,9 +1647,9 @@ onBeforeRouteLeave(() => {
 }
 
 .pm__gone-btn {
-  height: 42px;
-  padding: 0 26px;
-  font-size: 15px;
+  height: 46px;
+  padding: 0 28px;
+  font-size: 16px;
   font-weight: 600;
   color: #fff;
   background: #4c7ef3;

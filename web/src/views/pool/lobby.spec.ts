@@ -211,6 +211,37 @@ describe('大厅的房间', () => {
     expect(seats[1].classes()).toContain('is-ready')
   })
 
+  it('推送正好撞上一次在途轮询时，收尾会补拉一次，不会停在「只有自己」', async () => {
+    // 第一次请求挂住：模拟「对面进房的那一瞬间，我这边正好有一发在路上」。
+    // 以前这一发收尾时会把推送触发的那次重拉直接丢掉，界面就停在旧快照上，
+    // 要等下一轮十秒的慢轮询才变——「对方明明进来了，我这一屏还是只有我自己」。
+    let release = (value: PoolRoom) => {
+      void value
+    }
+    mocks.myRoom.mockImplementationOnce(
+      () =>
+        new Promise<PoolRoom>((resolve) => {
+          release = resolve
+        }),
+    )
+    const { wrapper } = await mountPage()
+    expect(mocks.myRoom).toHaveBeenCalledTimes(1)
+
+    // 对方进房的推送到了（store 里就是把 roomTick 加一，大厅 watch 它重拉）。
+    const pool = usePoolStore()
+    pool.roomTick += 1
+    await flushPromises()
+    // 前一次还在路上，这一发只能先记下，不能发出去。
+    expect(mocks.myRoom).toHaveBeenCalledTimes(1)
+
+    // 前一次回来了：补拉的那一发必须立刻发出，并且用补回来的那份画出对面。
+    mocks.myRoom.mockResolvedValue(occupied())
+    release(room())
+    await flushPromises()
+    expect(mocks.myRoom).toHaveBeenCalledTimes(2)
+    expect(wrapper.findAll('.pl__seat')[1].text()).toContain('小满')
+  })
+
   it('座位号是 1 时自己仍然排在左边，标题说明这是对方的房间', async () => {
     // ready 故意反过来：只有座位 1（我）准备了。
     // 如果代码按「界面上的第几项」去取 ready，这一条就会红。

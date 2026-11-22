@@ -3,6 +3,11 @@
 // 号码不用图片：16 张 PNG 加起来几十 KB，还要处理不同 DPR 下的模糊。
 // 用离屏 canvas 现画一次再缓存，整页零外部资源，首屏不受图片加载影响。
 //
+// 这里画的是**反照率**（底色、花色带、号码），不含明暗与高光。
+// 明暗必须在绘制时按屏幕方向补，理由见 renderer.ts 的 drawBall：
+// 球滚动时贴图要跟着转，而光源方向是固定的，烘焙进贴图的光斑会跟着转，
+// 看起来像台灯绕着球跑。
+//
 // 缓存键带像素尺寸：窗口放大或换到高分屏时球的直径会变，
 // 沿用旧尺寸的贴图会被拉伸成糊的号码。尺寸变了就重建一份，旧的自然被丢弃。
 
@@ -83,7 +88,9 @@ export function ballTexture(ballId: string, size: number): HTMLCanvasElement {
   return canvas
 }
 
-// paintBall 把一颗球画进正方形画布。分四层：底色、花色带、球面明暗、号码。
+// paintBall 把一颗球的反照率画进正方形画布：底色、花色带、号码。
+//
+// 明暗与高光不在这里画（见文件头注释），调用方在球旋转之后补上去。
 function paintBall(ctx: CanvasRenderingContext2D, side: number, look: BallLook): void {
   const c = side / 2
   const r = side / 2 - Math.max(1, side * 0.01)
@@ -105,22 +112,6 @@ function paintBall(ctx: CanvasRenderingContext2D, side: number, look: BallLook):
     ctx.fillStyle = look.color
     ctx.fillRect(0, 0, side, side)
   }
-
-  // 球面明暗：左上一团高光、右下一圈变暗，让平面圆看起来是球。
-  // 用径向渐变而不是描边，渐变能同时表达高光和球体边缘的收暗。
-  const shade = ctx.createRadialGradient(c - r * 0.35, c - r * 0.4, r * 0.08, c, c, r)
-  shade.addColorStop(0, 'rgba(255, 255, 255, 0.62)')
-  shade.addColorStop(0.45, 'rgba(255, 255, 255, 0.06)')
-  shade.addColorStop(1, 'rgba(0, 0, 0, 0.34)')
-  ctx.fillStyle = shade
-  ctx.fillRect(0, 0, side, side)
-
-  // 一小块死白的高光点。只有它才让球看起来是抛光树脂；
-  // 光靠上面那圈渐变，球会像一颗哑光塑料珠子。
-  ctx.beginPath()
-  ctx.ellipse(c - r * 0.38, c - r * 0.44, r * 0.2, r * 0.13, -0.5, 0, Math.PI * 2)
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.88)'
-  ctx.fill()
 
   // 号码：白圆垫底再写黑字。母球（number 为 0）跳过这一层。
   if (look.number > 0) {

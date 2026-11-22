@@ -1,5 +1,11 @@
-import { describe, expect, it, vi } from 'vitest'
-import { BALL_DRAW_SCALE, drawScene, TABLE_PADDING, type AimLayer } from './renderer'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import {
+  BALL_DRAW_SCALE,
+  drawScene,
+  resetBallMotion,
+  TABLE_PADDING,
+  type AimLayer,
+} from './renderer'
 import { fitTable, metersToPx, worldToScreen } from './geometry'
 import { BALL_RADIUS, RACK_EIGHTBALL } from './table'
 import type { BallState } from './types'
@@ -77,6 +83,12 @@ function countOf(ctx: FakeCtx, method: string): number {
   return n
 }
 
+// 滚动角度与落袋动画都是模块级状态（跨帧累积才有意义），
+// 用例之间必须清一次，否则上一条用例的球会「继续滚进」这一条的画面里。
+beforeEach(() => {
+  resetBallMotion()
+})
+
 describe('drawScene：球', () => {
   it('16 颗球各画一次，清屏一次', () => {
     const ctx = createFakeCtx()
@@ -111,13 +123,24 @@ describe('drawScene：球', () => {
     expect(BALL_DRAW_SCALE).toBeGreaterThan(1)
   })
 
-  it('球的绘制发生在影子之后：所有 fill 都在第一个 drawImage 之前', () => {
+  it('球的绘制发生在影子之后：影子都在第一颗球之前', () => {
     const ctx = createFakeCtx()
     drawScene(ctx, { width: 390, height: 844 }, { balls: rackState() }, 2)
     const firstDraw = ctx.calls.findIndex((c) => c.method === 'drawImage')
-    const lastFill = ctx.calls.map((c) => c.method).lastIndexOf('fill')
     expect(firstDraw).toBeGreaterThan(-1)
-    expect(lastFill).toBeLessThan(firstDraw)
+
+    // 影子是 ellipse + fill，球体高光也是 ellipse，所以只看前 16 个：
+    // 它们必须全部落在第一次 drawImage 之前。
+    const ellipses: number[] = []
+    ctx.calls.forEach((call, index) => {
+      if (call.method === 'ellipse') {
+        ellipses.push(index)
+      }
+    })
+    expect(ellipses.length).toBeGreaterThanOrEqual(16)
+    for (const index of ellipses.slice(0, 16)) {
+      expect(index).toBeLessThan(firstDraw)
+    }
   })
 
   it('落袋的球不画', () => {
@@ -286,7 +309,8 @@ describe('drawScene：球杆', () => {
   it('杆头与先角各画一次，杆身是渐变的而不是纯色', () => {
     const ctx = createFakeCtx()
     drawScene(ctx, { width: 390, height: 844 }, { balls: rackState(), aim: base }, 1)
-    expect(countOf(ctx, 'createLinearGradient')).toBe(1)
+    // 袋口的喇叭口也用线性渐变，所以这里不能断言恰好 1 个。
+    expect(countOf(ctx, 'createLinearGradient')).toBeGreaterThanOrEqual(1)
     expect(countOf(ctx, 'fillRect')).toBeGreaterThanOrEqual(2)
   })
 })

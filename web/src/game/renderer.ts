@@ -3,9 +3,18 @@
 // 分层顺序是固定的：木框 → 库边 → 台呢 → 袋口 → 瞄准线 → 球影 → 球。
 // 顺序错一层就会出现「球被库边压住」或者「袋口被台呢盖住」这种一眼假的画面，
 // 所以整帧一次画完，不做局部重绘——16 颗球的完整重绘在手机上也只有 1ms 左右。
+import type { AimGuides } from './aim'
 import { ballTexture } from './balls'
 import { fitTable, metersToPx, worldToScreen, type ViewTransform, type Viewport } from './geometry'
-import { BALL_RADIUS, CUSHION_WIDTH, POCKETS, RAIL_WIDTH, TABLE_LENGTH, TABLE_WIDTH } from './table'
+import {
+  BALL_RADIUS,
+  CUSHION_WIDTH,
+  POCKETS,
+  RAIL_WIDTH,
+  TABLE_LENGTH,
+  TABLE_WIDTH,
+  type Pocket,
+} from './table'
 import type { BallState } from './types'
 
 // 从台面内沿到最外层木框边缘的距离，与 geometry 里算缩放时用的是同一个数。
@@ -66,6 +75,8 @@ export interface AimLayer {
   power: number
   // locked 表示方向已经定住（点过台面），球杆换成暖色。
   locked: boolean
+  // guides 是目标球与母球撞完之后的去向。撞库时为 null，见 aim.ts 的 aimGuides。
+  guides?: AimGuides | null
 }
 
 // Scene 是一帧要画的全部内容。以后加球杆、击球点提示也放这里，
@@ -73,6 +84,9 @@ export interface AimLayer {
 export interface Scene {
   balls: ReadonlyArray<BallState>
   aim?: AimLayer | null
+  // peerAim 是对面那一方此刻的瞄准层。画得淡一点、压在自己的瞄准层下面：
+  // 两根杆子同时出现时，一眼能分出哪根是自己的。
+  peerAim?: AimLayer | null
   // ghost 是手中球（自由球）的预览位置，世界坐标。只画半透明的虚影，
   // 因为它还没真的落位——落位由服务端确认，之后才作为一颗正常的球进 balls。
   ghost?: { x: number; y: number } | null
@@ -95,11 +109,30 @@ export function drawScene(
   drawCushion(ctx, t)
   drawCloth(ctx, t)
   drawPockets(ctx, t)
+  if (scene.peerAim) {
+    // 对面的杆子画得淡一档，并且压在自己那一层下面：
+    // 两根杆子同时出现时，一眼分得出哪根是自己的。
+    ctx.save()
+    ctx.globalAlpha = 0.62
+    drawAim(ctx, t, scene.peerAim)
+    if (scene.peerAim.guides) {
+      drawGuides(ctx, t, scene.peerAim.guides)
+    }
+    drawCue(ctx, t, scene.peerAim)
+    ctx.restore()
+  }
   if (scene.aim) {
     drawAim(ctx, t, scene.aim)
+    if (scene.aim.guides) {
+      drawGuides(ctx, t, scene.aim.guides)
+    }
     drawCue(ctx, t, scene.aim)
   }
+  trackPotted(scene.balls)
   drawBalls(ctx, t, scene.balls, dpr)
+  // 刚落袋的球再画一小段「滚进袋口」：帧里它直接消失太生硬，
+  // 而且看不出是从哪个袋进去的。
+  drawSinking(ctx, t, ballRadiusPx(t), dpr)
   // 虚影画在真球之上：拖动时它会压过别的球，被压住就看不出落在哪了。
   if (scene.ghost) {
     drawGhostBall(ctx, t, scene.ghost)
@@ -318,11 +351,40 @@ function drawCloth(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   ctx.fill()
 }
 
+// 口沿比洞口大一圈：真实袋口是「皮口 + 洞」，皮口把库边切出一个比洞更宽的缺口。
+// 只画一个和洞一样大的圆，远看就是一个贴在台面上的黑点，分不清从哪边能进。
+const POCKET_MOUTH_SCALE = 1.2
+
+// pocketOutward 给出袋口朝台外的单位方向（世界坐标）。
+//
+// 角袋朝斜角出去，中袋只朝垂直库边出去；喇叭口与皮口都靠它摆。
+// 用坐标判断而不是给每个袋口写死方向：以后换成不同规格的台子，袋口位置一变
+// 方向就自动跟着对，不会出现「袋子换了个位置、开口还朝老方向」。
+function pocketOutward(p: Pocket): { x: number; y: number } {
+  let dx = 0
+  let dy = 0
+  if (p.x < 0) {
+    dx = -1
+  } else if (p.x > TABLE_WIDTH) {
+    dx = 1
+  }
+  if (p.y < 0) {
+    dy = -1
+  } else if (p.y > TABLE_LENGTH) {
+    dy = 1
+  }
+  const len = Math.hypot(dx, dy)
+  return { x: dx / len, y: dy / len }
+}
+
 // drawPockets 画六个袋口。
 //
-// 袋口圆有一半落在台面之外，中袋的圆甚至会伸到木框之外。整帧裁剪到木框范围内，
-// 木框的外轮廓才是完整的——不裁的话木框中间会多出两个黑圆，
-// 看起来像木头被打了两个洞。
+// 袋口有三层：往外张开的喇叭口（库边被切开的那一段）、洞口本身、
+// 以及口沿一圈皮边。只看一个黑圆判断不出「球从哪个方向进来」，
+// 参考视频里袋口的缺口是明显敞开的，这里照那个形状画。
+//
+// 整帧裁剪到木框范围内：中袋的喇叭口会伸到木框之外，
+// 不裁的话木框中间会多出两个黑块，看起来像木头被啃了。
 function drawPockets(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   const rail = railRect(t)
 
@@ -333,18 +395,98 @@ function drawPockets(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   for (const p of POCKETS) {
     const center = worldToScreen(t, p.x, p.y)
     const radius = metersToPx(t, p.radius)
+    const mouth = radius * POCKET_MOUTH_SCALE
+    const out = pocketOutward(p)
+    // 屏幕 y 朝下，世界方向要翻转一次才对得上画面。
+    const ox = out.x
+    const oy = -out.y
+    // 沿袋口切线的方向，喇叭口的两个边就落在这条线上。
+    const tx = -oy
+    const ty = ox
+    const reach = radius * 1.7
 
+    // 1) 喇叭口：从洞口两侧往外张开，像车床车的喇叭。这一段盖住库边，
+    //    视觉上就是「库边在这里被切开」，开口方向一眼能看出来。
     ctx.beginPath()
-    ctx.arc(center.x, center.y, radius, 0, Math.PI * 2)
-    ctx.fillStyle = COLORS.pocket
+    ctx.moveTo(center.x + tx * radius, center.y + ty * radius)
+    ctx.lineTo(center.x + tx * mouth + ox * reach, center.y + ty * mouth + oy * reach)
+    ctx.lineTo(center.x - tx * mouth + ox * reach, center.y - ty * mouth + oy * reach)
+    ctx.lineTo(center.x - tx * radius, center.y - ty * radius)
+    ctx.closePath()
+    const throat = ctx.createLinearGradient(
+      center.x,
+      center.y,
+      center.x + ox * reach,
+      center.y + oy * reach,
+    )
+    throat.addColorStop(0, '#05080d')
+    throat.addColorStop(1, '#02040a')
+    ctx.fillStyle = throat
     ctx.fill()
 
-    // 袋口内圈一圈灰边，模拟皮口的倒角。不画只会是一个纯黑贴纸；
-    // 参考视频里这一圈很明显，袋口才像「有皮子包着的洞」。
+    // 2) 洞口：中心偏外一点最暗，靠台面那一侧透出一点灰，才有「洞有深度」的感觉。
+    const hole = ctx.createRadialGradient(
+      center.x + ox * radius * 0.25,
+      center.y + oy * radius * 0.25,
+      radius * 0.1,
+      center.x,
+      center.y,
+      radius,
+    )
+    hole.addColorStop(0, '#010206')
+    hole.addColorStop(1, '#0b1016')
     ctx.beginPath()
-    ctx.arc(center.x, center.y, radius * 0.82, 0, Math.PI * 2)
-    ctx.strokeStyle = 'rgba(198, 205, 214, 0.22)'
-    ctx.lineWidth = Math.max(1, radius * 0.1)
+    ctx.arc(center.x, center.y, radius, 0, Math.PI * 2)
+    ctx.fillStyle = hole
+    ctx.fill()
+
+    // 3) 皮口：一圈亮边压在洞口上，宽度按半径缩放。
+    ctx.beginPath()
+    ctx.arc(center.x, center.y, radius * 0.92, 0, Math.PI * 2)
+    ctx.strokeStyle = 'rgba(198, 205, 214, 0.34)'
+    ctx.lineWidth = Math.max(1, radius * 0.12)
+    ctx.stroke()
+
+    // 4) 喇叭口的两条切口线：浅灰细线，告诉眼睛「库边到这里为止」。
+    ctx.beginPath()
+    ctx.moveTo(center.x + tx * radius, center.y + ty * radius)
+    ctx.lineTo(center.x + tx * mouth + ox * reach, center.y + ty * mouth + oy * reach)
+    ctx.moveTo(center.x - tx * radius, center.y - ty * radius)
+    ctx.lineTo(center.x - tx * mouth + ox * reach, center.y - ty * mouth + oy * reach)
+    ctx.strokeStyle = 'rgba(206, 214, 224, 0.16)'
+    ctx.lineWidth = Math.max(1, radius * 0.08)
+    ctx.stroke()
+  }
+
+  ctx.restore()
+}
+
+// drawGuides 画目标球与母球的去向引导线。
+//
+// 两种颜色区分「这是哪颗球的线」：目标球用暖白（与瞄准线同色系），
+// 母球用偏冷的浅蓝。线都短，只用来提示方向，不做精确预测。
+function drawGuides(ctx: CanvasRenderingContext2D, t: ViewTransform, guides: AimGuides): void {
+  ctx.save()
+  ctx.setLineDash([4, 5])
+  ctx.lineWidth = 1.5
+
+  if (guides.object) {
+    const from = worldToScreen(t, guides.object.from.x, guides.object.from.y)
+    const to = worldToScreen(t, guides.object.to.x, guides.object.to.y)
+    ctx.strokeStyle = 'rgba(255, 246, 220, 0.62)'
+    ctx.beginPath()
+    ctx.moveTo(from.x, from.y)
+    ctx.lineTo(to.x, to.y)
+    ctx.stroke()
+  }
+
+  if (guides.cue) {
+    const from = worldToScreen(t, guides.cue.from.x, guides.cue.from.y)
+    const to = worldToScreen(t, guides.cue.to.x, guides.cue.to.y)
+    ctx.strokeStyle = 'rgba(150, 205, 255, 0.5)'
+    ctx.beginPath()
+    ctx.moveTo(from.x, from.y)
+    ctx.lineTo(to.x, to.y)
     ctx.stroke()
   }
 
@@ -520,19 +662,245 @@ function drawBalls(
     if (!ball.on_table) {
       continue
     }
-    const center = worldToScreen(t, ball.x, ball.y)
-    const lift = metersToPx(t, ball.z)
-    // 腾空时球体略放大：真实的透视下球离镜头更近。
-    const drawRadius = radiusPx * (1 + ball.z * BALL_GROWTH)
-    const texture = ballTexture(ball.id, textureSide)
+    drawBall(ctx, t, ball, radiusPx, textureSide)
+  }
+}
 
+// 滚动角度缓存。渲染层本来「只读输入」，这是唯一的例外：
+// 一颗球转了多少只跟它走过的路径有关，光看当前位置推不出来。
+// 键是球号，值里同时记着上一帧的位置，用来算位移。
+interface RollState {
+  x: number
+  y: number
+  angle: number
+}
+
+const rollState = new Map<string, RollState>()
+
+// 一帧里位移超过这个距离就当成「瞬移」而不是滚动：
+// 换局、重连补齐、自由球落位都会让球直接出现在别处，那时转半圈很假。
+const TELEPORT_DISTANCE = BALL_RADIUS * 6
+
+// rollAngleOf 返回这颗球当前该转到的角度（弧度）。
+//
+// 纯滚动：球面转过的弧长等于走过的距离，角度 = 距离 / 半径。
+// 屏幕 y 朝下，所以往右、往下都取正号（顺时针）。竖直方向在正俯视里
+// 本来就没有「滚动」可言，取个一致的符号就够，肉眼看到的是号码在转。
+function rollAngleOf(ball: BallState): number {
+  const prev = rollState.get(ball.id)
+  if (!prev) {
+    rollState.set(ball.id, { x: ball.x, y: ball.y, angle: 0 })
+    return 0
+  }
+
+  const dx = ball.x - prev.x
+  const screenDy = -(ball.y - prev.y)
+  const distance = Math.hypot(dx, screenDy)
+  prev.x = ball.x
+  prev.y = ball.y
+  if (distance > TELEPORT_DISTANCE) {
+    return prev.angle
+  }
+
+  let sign = 1
+  if (Math.abs(dx) >= Math.abs(screenDy)) {
+    sign = dx >= 0 ? 1 : -1
+  } else {
+    sign = screenDy >= 0 ? 1 : -1
+  }
+  const twoPi = Math.PI * 2
+  prev.angle = (prev.angle + (distance / BALL_RADIUS) * sign) % twoPi
+  return prev.angle
+}
+
+// drawBall 画一颗球：先按滚动角度贴球面，再叠一层不随球转的光影。
+//
+// 号码必须跟着球转，球才像在滚而不是一张贴纸在图面上平移。
+// 但光影不能转——台灯是固定的，把高光烘焙进贴图再整体旋转，
+// 看起来会像有人举着灯绕台子走。所以贴图只存反照率（见 balls.ts），
+// 明暗与高光每次按屏幕方向补。
+function drawBall(
+  ctx: CanvasRenderingContext2D,
+  t: ViewTransform,
+  ball: BallState,
+  radiusPx: number,
+  textureSide: number,
+): void {
+  const center = worldToScreen(t, ball.x, ball.y)
+  const lift = metersToPx(t, ball.z)
+  // 腾空时球体略放大：真实的透视下球离镜头更近。
+  const drawRadius = radiusPx * (1 + ball.z * BALL_GROWTH)
+  const cy = center.y - lift * 0.6
+
+  ctx.save()
+  ctx.translate(center.x, cy)
+  ctx.rotate(rollAngleOf(ball))
+  ctx.drawImage(
+    ballTexture(ball.id, textureSide),
+    -drawRadius,
+    -drawRadius,
+    drawRadius * 2,
+    drawRadius * 2,
+  )
+  ctx.restore()
+
+  ctx.save()
+  ctx.beginPath()
+  ctx.arc(center.x, cy, drawRadius, 0, Math.PI * 2)
+  ctx.clip()
+
+  // 球面明暗：左上一团亮、右下一圈收暗，让平面圆看起来是球。
+  const shade = ctx.createRadialGradient(
+    center.x - drawRadius * 0.4,
+    cy - drawRadius * 0.44,
+    drawRadius * 0.1,
+    center.x,
+    cy,
+    drawRadius * 1.02,
+  )
+  shade.addColorStop(0, 'rgba(255, 255, 255, 0.5)')
+  shade.addColorStop(0.42, 'rgba(255, 255, 255, 0.04)')
+  shade.addColorStop(0.78, 'rgba(0, 0, 0, 0.1)')
+  shade.addColorStop(1, 'rgba(0, 0, 0, 0.42)')
+  ctx.fillStyle = shade
+  ctx.fillRect(center.x - drawRadius, cy - drawRadius, drawRadius * 2, drawRadius * 2)
+
+  // 一小块死白的高光点。只有它才让球看起来是抛光树脂。
+  ctx.beginPath()
+  ctx.ellipse(
+    center.x - drawRadius * 0.36,
+    cy - drawRadius * 0.42,
+    drawRadius * 0.24,
+    drawRadius * 0.15,
+    -0.5,
+    0,
+    Math.PI * 2,
+  )
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)'
+  ctx.fill()
+  ctx.restore()
+}
+
+// 落袋动画的时长与状态。
+//
+// 帧里球是一瞬间消失的，直接照抄会看到球「咔」地不见。这里让它按帧里最后
+// 的位置往最近的袋口滚进去，同时缩小变淡，和真实落袋的观感接近。
+const SINK_MS = 340
+
+interface SinkState {
+  fromX: number
+  fromY: number
+  toX: number
+  toY: number
+  at: number
+}
+
+const sinking = new Map<string, SinkState>()
+// 上一帧还在台面上的球号。用它判断这一帧谁刚掉袋。
+let visibleIds = new Set<string>()
+
+// nearestPocket 返回离给定点最近的袋口中心（世界坐标）。
+function nearestPocket(x: number, y: number): { x: number; y: number } {
+  let best = POCKETS[0]
+  let bestDistance = Number.POSITIVE_INFINITY
+  for (const pocket of POCKETS) {
+    const d = (pocket.x - x) * (pocket.x - x) + (pocket.y - y) * (pocket.y - y)
+    if (d < bestDistance) {
+      bestDistance = d
+      best = pocket
+    }
+  }
+  return { x: best.x, y: best.y }
+}
+
+// trackPotted 在每次绘制前比对「谁不在了」，给刚落袋的球起一段动画。
+//
+// 球不在采样结果里时 applySample 只会把 on_table 置 false，坐标留着最后
+// 一帧的位置，正好拿来当动画起点。
+function trackPotted(balls: ReadonlyArray<BallState>): void {
+  const now = performance.now()
+  const current = new Set<string>()
+  for (const ball of balls) {
+    if (ball.on_table) {
+      current.add(ball.id)
+    }
+  }
+
+  for (const id of visibleIds) {
+    if (current.has(id)) {
+      continue
+    }
+    const ball = findBallById(balls, id)
+    if (!ball) {
+      continue
+    }
+    const pocket = nearestPocket(ball.x, ball.y)
+    sinking.set(id, { fromX: ball.x, fromY: ball.y, toX: pocket.x, toY: pocket.y, at: now })
+  }
+  visibleIds = current
+
+  // 播完的一次性清掉，别让这张表跟着一局局对局长下去。
+  for (const [id, state] of sinking) {
+    if (now - state.at > SINK_MS) {
+      sinking.delete(id)
+    }
+  }
+}
+
+// findBallById 不过在台面上与否，按球号找一份状态。
+function findBallById(balls: ReadonlyArray<BallState>, id: string): BallState | null {
+  for (const ball of balls) {
+    if (ball.id === id) {
+      return ball
+    }
+  }
+  return null
+}
+
+// resetBallMotion 清空滚动角度与落袋动画的缓存。
+//
+// 这两份状态是模块级的（球的转动只跟路径有关，从当前位置推不出来），
+// 同一次会话里必须跨帧累积才对。代价是测试之间会互相影响：
+// 上一帧的残留会让「空球局」也画出两颗正在往袋里滚的球，所以用例要先调它。
+export function resetBallMotion(): void {
+  rollState.clear()
+  sinking.clear()
+  visibleIds = new Set<string>()
+}
+
+// drawSinking 画还在往袋口滚的球。
+//
+// 进度用平方曲线：一开始慢、越靠近袋口越快，球的「被吸进去」的感觉就出来了。
+function drawSinking(
+  ctx: CanvasRenderingContext2D,
+  t: ViewTransform,
+  radiusPx: number,
+  dpr: number,
+): void {
+  if (sinking.size === 0) {
+    return
+  }
+  const now = performance.now()
+  const textureSide = Math.round(radiusPx * 2 * dpr)
+
+  for (const [id, state] of sinking) {
+    const progress = Math.min(1, (now - state.at) / SINK_MS)
+    const eased = progress * progress
+    const x = state.fromX + (state.toX - state.fromX) * eased
+    const y = state.fromY + (state.toY - state.fromY) * eased
+    const center = worldToScreen(t, x, y)
+    const radius = radiusPx * (1 - 0.55 * eased)
+
+    ctx.save()
+    ctx.globalAlpha = 1 - 0.8 * progress
     ctx.drawImage(
-      texture,
-      center.x - drawRadius,
-      center.y - drawRadius - lift * 0.6,
-      drawRadius * 2,
-      drawRadius * 2,
+      ballTexture(id, textureSide),
+      center.x - radius,
+      center.y - radius,
+      radius * 2,
+      radius * 2,
     )
+    ctx.restore()
   }
 }
 

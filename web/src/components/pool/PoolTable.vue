@@ -26,6 +26,8 @@ import type { BallState, PoolDrag } from '@/game/types'
 const props = defineProps<{
   balls: BallState[]
   aim?: AimLayer | null
+  // peerAim 是对面那一方此刻的瞄准层，对局页与观战页都靠它看到「对面在转杆」。
+  peerAim?: AimLayer | null
   // ghost 是手中球还没落位时跟着指针走的虚影位置（世界坐标）。
   ghost?: { x: number; y: number } | null
 }>()
@@ -108,7 +110,12 @@ function paint(): void {
   }
   const dpr = dprOf()
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  drawScene(ctx, size, { balls: props.balls, aim: props.aim, ghost: props.ghost }, dpr)
+  drawScene(
+    ctx,
+    size,
+    { balls: props.balls, aim: props.aim, peerAim: props.peerAim, ghost: props.ghost },
+    dpr,
+  )
 }
 
 // schedule 把多次重画请求压到下一帧，避免同一帧里画好几遍。
@@ -124,7 +131,7 @@ function schedule(): void {
 
 // 球位是数组里的对象，浅比较会在原地修改坐标时漏掉变化，所以用 deep。
 // 16 颗球的 deep 遍历成本远低于一次重绘，不值得为它写更细的脏检查。
-watch(() => [props.balls, props.aim, props.ghost], schedule, { deep: true })
+watch(() => [props.balls, props.aim, props.peerAim, props.ghost], schedule, { deep: true })
 
 // onPointerDown 记录起点并捕获指针。
 // 捕获之后手指移出画布甚至移出窗口，move 与 up 仍然会回到这个元素，

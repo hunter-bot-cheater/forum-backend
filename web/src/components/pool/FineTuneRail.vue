@@ -33,8 +33,6 @@
     >
       +0.1°
     </button>
-
-    <span class="ft__tip">方向键也行</span>
   </div>
 </template>
 
@@ -157,20 +155,6 @@ onBeforeUnmount(stopRepeat)
   font-variant-numeric: tabular-nums;
   color: rgba(255, 255, 255, 0.9);
   text-align: center;
-}
-
-/* 「方向键也行」是补一句桌面端的快捷方式，手机上看不见也用不上，
-   所以只在宽一点的屏幕上显示。 */
-.ft__tip {
-  display: none;
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.38);
-}
-
-@media (min-width: 720px) {
-  .ft__tip {
-    display: inline;
-  }
 }
 
 .ft.is-off {

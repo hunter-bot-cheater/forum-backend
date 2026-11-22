@@ -1,7 +1,7 @@
 <template>
   <div class="sc" :class="{ 'is-active': active, 'is-me': isMe, 'is-empty': !player.nickname }">
     <el-avatar
-      :size="34"
+      :size="38"
       :src="player.avatar || undefined"
       :style="{ backgroundColor: avatarColor(player.nickname) }"
     >
@@ -32,15 +32,21 @@
              这时候 remaining 是空数组，不给提示会让人以为界面出错了。 -->
         <span v-if="remaining.length === 0" class="sc__finish">打黑八</span>
       </div>
+
+      <!-- 「继续击打」是进球之后的连击状态：回合没换人，但玩家容易以为是
+           对手在打（球台上杆子还在、读秒还归自己）。放在卡片里一直挂着，
+           直到这一杆出杆才消失，比一条三秒就滑走的横幅可靠。 -->
+      <div v-if="continuing" class="sc__cont">继续击打</div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-// 双方条上的一张座位卡：头像、昵称、剩余球。
+// 一张座位卡：头像、昵称、剩余球。对局页把它放在顶栏左上与右上两个角，
+// 观战页同样两侧各一张。
 //
-// 只做展示，不读 store 也不发请求：对局页拿一份快照，两边各传一次。
-// 这样「谁该打」只有对局页一个判断源，卡片不会自己算出第二套结论。
+// 只做展示，不读 store 也不发请求：页面拿一份快照，两边各传一次。
+// 这样「谁该打」只有页面一个判断源，卡片不会自己算出第二套结论。
 import { computed } from 'vue'
 import { ballLookOf } from '@/game/balls'
 import { groupLabel, hasGroup } from '@/game/score'
@@ -57,6 +63,9 @@ const props = defineProps<{
   // active 表示当前轮到他打。
   active: boolean
   isMe: boolean
+  // continuing 表示这一手是「上一杆进球之后接着打」，不是换人。
+  // 观战页不传：观战者看到的是轮次，谁连打由画面自己说明。
+  continuing?: boolean
 }>()
 
 // assigned 表示这一侧已经定组。
@@ -95,15 +104,15 @@ function dotStyle(id: string): Record<string, string> {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  padding: 6px 8px;
-  border-radius: 10px;
+  padding: 6px 10px 6px 8px;
+  border-radius: 12px;
   transition: background-color 0.2s;
 }
 
 /* 轮到他时给一层底色而不是边框：球台就在下面，
    画边框会让整条状态栏看起来像被框住了一块。 */
 .sc.is-active {
-  background: rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .sc.is-empty {
@@ -112,8 +121,9 @@ function dotStyle(id: string): Record<string, string> {
 
 .sc__body {
   display: flex;
+  flex: 1;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -125,54 +135,76 @@ function dotStyle(id: string): Record<string, string> {
 }
 
 .sc__name {
-  max-width: 96px;
+  max-width: 110px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 13px;
   color: #e8eaed;
 }
 
 .sc__me {
-  font-size: 10px;
+  font-size: 11px;
   color: #8a919c;
 }
 
 .sc__count {
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 700;
   color: #f0c02f;
 }
 
 .sc__group {
-  font-size: 10px;
-  color: #6f7681;
+  font-size: 11px;
+  color: #79808b;
 }
 
+/* 球点允许折行：一组最多 7 颗，窄屏上一行放不下。
+   挤成一行会溢出卡片、压到时钟上，折成两行反而更好认。 */
 .sc__dots {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 2px;
+  gap: 3px;
 }
 
-/* 球点压到 13px：一排 7 颗要放进半屏宽的一条状态栏里，
-   再大就会把昵称挤成省略号。 */
 .sc__dot {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 13px;
-  height: 13px;
-  font-size: 8px;
+  width: 16px;
+  height: 16px;
+  font-size: 9px;
   font-weight: 700;
   line-height: 1;
   border: 1px solid transparent;
   border-radius: 50%;
 }
 
+/* 手机上每张卡只有约 130px 宽：球点小一档，才装得下一整组。 */
+@media (max-width: 520px) {
+  .sc__dot {
+    width: 14px;
+    height: 14px;
+    font-size: 8px;
+  }
+}
+
 .sc__finish {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   color: #f0c02f;
+}
+
+/* 连击标记：黄底深字的小胶囊。用底色而不是只有一行字，
+   是因为它在余光里要能被看见——玩家正盯着球台，不会去读卡片。 */
+.sc__cont {
+  align-self: flex-start;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #2a2100;
+  background: #f0c02f;
+  border-radius: 999px;
 }
 </style>
