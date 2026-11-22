@@ -139,3 +139,8 @@ echo "  tar -xzf /tmp/forum-linux-amd64.tar.gz -C /opt/forum"
 echo "  cd /opt/forum && sed -i '/^IMAGE_TAG=/d' .env && echo \"IMAGE_TAG=\$(cat .build/IMAGE_TAG)\" >> .env"
 echo "  cd /opt/forum && COMPOSE_FILE=/opt/forum/docker-compose.yml:/opt/forum/deploy/prod/docker-compose.prod.yml:/opt/forum/deploy/prod/docker-compose.artifact.yml \\"
 echo "    docker compose build api web && docker compose up -d --no-deps api"
+echo
+# 台球物理服务是 Python，不在这份产物里，第一次部署（或 pool-sim/ 有改动）时单独构建。
+# 不提示的话，up -d --no-build 会去找一个根本不存在的镜像，报 pull access denied。
+echo "首次部署还有一步（台球物理服务，只在服务器上构建）："
+echo "  cd /opt/forum && docker compose build pool-sim"

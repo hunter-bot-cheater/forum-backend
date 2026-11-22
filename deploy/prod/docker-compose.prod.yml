@@ -81,3 +81,16 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  # 台球物理服务。日志是 uvicorn 的访问日志，一杆一条，平时不多；
+  # 但 pool-sim 挂了时 api 会连着报错重试，同样要压上限。
+  pool-sim:
+    environment:
+      # 它只算物理，不碰时间列；设 TZ 只为让 access log 的时间与 api 的
+      # 日志能对上，排查时不用在心里减八小时。
+      TZ: Asia/Shanghai
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
