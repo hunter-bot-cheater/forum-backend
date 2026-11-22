@@ -87,10 +87,16 @@ if $do_api; then
   # CGO_ENABLED=0 是交叉编译的关键：关掉 cgo 才能在没有 Linux 工具链的机器上产出
   # 不依赖 libc 的二进制，和 Dockerfile 里的编译参数保持一致。
   # -trimpath 去掉本机绝对路径；-s -w 去符号表，体积小三成左右。
+  #
+  # -p 2 是本机内存的护栏：默认并行度会同时铺开十几个 compile.exe，
+  # 提交内存（页面文件）不够时报 "The paging file is too small" 或
+  # "out of memory allocating heap arena map"，看起来像卡死。压到两个并行
+  # 只慢几十秒，但每次都能跑完。GOGC 一并调低，让每个编译进程更早回收。
+  export GOGC=60
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags="-s -w" -o "$OUT_DIR/api/forum-server" ./cmd/server
+    go build -p 2 -trimpath -ldflags="-s -w" -o "$OUT_DIR/api/forum-server" ./cmd/server
   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags="-s -w" -o "$OUT_DIR/api/forum-migrate" ./cmd/migrate
+    go build -p 2 -trimpath -ldflags="-s -w" -o "$OUT_DIR/api/forum-migrate" ./cmd/migrate
   # 镜像里那份配置是默认值，生产实际用的那份从宿主机挂进去。
   cp config/config.docker.yaml "$OUT_DIR/api/config/config.yaml"
   # artifact 版 Dockerfile 只做 COPY，构建时从上下文目录里取。
