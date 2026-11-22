@@ -579,7 +579,7 @@ const PLATE_MID = '#726e6a'
 // 标准图里从台呢往洞口是「布 → 斜边顶面（受光）→ 侧壁（墨绿黑）→ 皮革边」
 // 四段连续过渡，少了这一段，布就直接切在洞沿上，像贴了一张绿纸；给多了
 // 又会在袋口糊出一块黑三角，反倒比没有更假。
-const JAW_FACE_WIDTH = 0.013
+const JAW_FACE_WIDTH = 0.020
 
 // 袋兜（洞口外面那圈皮革内壁）铺到 1.3 个半径。
 // 再往外是斜边折下去的绿面，不是皮革——整块缺口刷成棕的，袋角就成了棕色三角。
@@ -850,8 +850,8 @@ function drawJawBase(ctx: CanvasRenderingContext2D, t: ViewTransform, i: number)
     center.y,
     radius * 2.1,
   )
-  face.addColorStop(0, '#0c2a1e')
-  face.addColorStop(0.5, '#155640')
+  face.addColorStop(0, '#123a2a')
+  face.addColorStop(0.5, '#1a6a4b')
   face.addColorStop(1, CUSHION_FACE)
   ctx.fillStyle = face
   ctx.fillRect(green.x, green.y, green.width, green.height)
