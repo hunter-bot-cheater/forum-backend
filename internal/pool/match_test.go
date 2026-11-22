@@ -314,21 +314,7 @@ func TestShootBroadcastsFoul(t *testing.T) {
 	}
 }
 
-// 手里握着球不能出杆，必须先落位。
-func TestShootRequiresCuePlacement(t *testing.T) {
-	match, _, _ := newTestMatch(t, &fakeSim{shot: quietShot()})
-
-	// 先制造一个犯规，让球权带上手中球。
-	match.state.BallInHand = true
-	match.state.Turn = Seat0
-
-	err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0)
-	if !errors.Is(err, ErrMustPlaceCue) {
-		t.Fatalf("err = %v，期望 ErrMustPlaceCue", err)
-	}
-}
-
-// 摆球：台外坐标拒掉，合法坐标落位并清掉手中球标记。
+// 摆球：台外坐标拒掉，合法坐标落位；落位不收回手中球，可以接着挪。
 func TestPlaceCue(t *testing.T) {
 	match, conn0, _ := newTestMatch(t, &fakeSim{shot: quietShot()})
 	match.state.BallInHand = true
@@ -341,8 +327,12 @@ func TestPlaceCue(t *testing.T) {
 	}
 
 	snapshot, _ := match.Snapshot(Seat0)
-	if snapshot.BallInHand {
-		t.Error("落位之后手中球标记应当清掉")
+	if !snapshot.BallInHand || !snapshot.CuePlaced {
+		t.Errorf("落位后应当留着手中球并记下已摆过：%+v", snapshot)
+	}
+	// 摆完还得能再挪：这是「同一颗球摆两次」的核心，服务端不能再拒。
+	if err := match.PlaceCue(Seat0, 0.5, 0.7); err != nil {
+		t.Fatalf("重复落位不该被拒：%v", err)
 	}
 	for _, item := range snapshot.Balls {
 		if item.ID != sim.CueBallID {
@@ -359,6 +349,23 @@ func TestPlaceCue(t *testing.T) {
 	}
 	if _, ok := conn0.last(MsgState); !ok {
 		t.Error("落位后要广播快照，否则对手画面上球还在袋里")
+	}
+
+	// 摆过之后就能出杆了：闸门看的是 CuePlaced，不是 BallInHand。
+	if err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0); err != nil {
+		t.Fatalf("摆好之后出杆不该被拒：%v", err)
+	}
+}
+
+// 母球还在袋里（没摆过）时出杆要被拒：那颗球的 z 是负值，物理算不出来。
+func TestShootRequiresCuePlacement(t *testing.T) {
+	match, _, _ := newTestMatch(t, &fakeSim{shot: quietShot()})
+	match.state.BallInHand = true
+	match.state.Turn = Seat0
+
+	err := match.Shoot(Seat0, sim.CueParams{Phi: 1.5, Power: 0.6}, 0)
+	if !errors.Is(err, ErrMustPlaceCue) {
+		t.Fatalf("err = %v，期望 ErrMustPlaceCue", err)
 	}
 }
 

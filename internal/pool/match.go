@@ -538,8 +538,9 @@ func (m *Match) handleShoot(cmd command) error {
 	if err := validateParams(cmd.params); err != nil {
 		return err
 	}
-	if m.state.BallInHand {
-		// 手里还握着球就出杆，说明客户端没等落位结果，直接拒。
+	// 摆过一次就可以打：拿着手中球反复挪是允许的，
+	// 但一次都没摆过时母球可能还在袋里（z 为负），直接送进物理会算不出结果。
+	if m.state.BallInHand && !m.state.CuePlaced {
 		return ErrMustPlaceCue
 	}
 
@@ -646,6 +647,8 @@ func (m *Match) applyShot(shot *sim.Shot, verdict Verdict) {
 	m.state.BreakDone = true
 	m.state.ShotSeq++
 	m.state.BallInHand = verdict.BallInHand
+	// 新的一次手中球要重新摆：上一杆那颗球的位置和落袋状态都不作数了。
+	m.state.CuePlaced = false
 	m.state.Turn = verdict.NextSeat
 	// 这一杆打出来了，这个人的连续超时计数归零。
 	m.state.Timeouts[shooter] = 0
@@ -665,6 +668,8 @@ func (m *Match) applyShot(shot *sim.Shot, verdict Verdict) {
 //
 // 只校验「在台面内且没压住别的球」，不做「母球是否贴库」这种细致判定：
 // 物理侧会把非法球位算出一个怪结果，而那正是玩家自己摆出来的。
+//
+// 摆完不收回 BallInHand：玩家可以接着挪，直到出杆（见 handleShoot 的闸门）。
 func (m *Match) handlePlaceCue(cmd command) error {
 	if m.state.Status != model.PoolStatusPlaying {
 		return ErrNotPlaying
@@ -689,7 +694,7 @@ func (m *Match) handlePlaceCue(cmd command) error {
 	cue.X, cue.Y, cue.Z = cmd.x, cmd.y, 0
 	cue.OnTable = true
 	m.state.setBall(cue)
-	m.state.BallInHand = false
+	m.state.CuePlaced = true
 
 	m.broadcastState()
 	return nil
@@ -795,6 +800,7 @@ func (m *Match) handleTimeout() {
 	// 单次超时只换人并给对手手中球，让局面往前走。
 	m.state.Turn = seat.Other()
 	m.state.BallInHand = true
+	m.state.CuePlaced = false
 	m.state.Deadline = time.Now().Add(m.opts.TurnTimeout)
 
 	m.broadcast(m.wrap(MsgFoul, FoulData{

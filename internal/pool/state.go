@@ -147,6 +147,7 @@ type Snapshot struct {
 	Group      [2]BallGroup     `json:"group"`
 	Ready      [2]bool          `json:"ready"`
 	BallInHand bool             `json:"ball_in_hand"`
+	CuePlaced  bool             `json:"cue_placed"`
 	ShotSeq    int              `json:"shot_seq"`
 	Players    [2]PlayerBrief   `json:"players"`
 	Winner     *Seat            `json:"winner"`
@@ -165,9 +166,17 @@ type MatchState struct {
 	Groups    [2]BallGroup
 	Balls     []sim.ResultBall
 
-	Ready      [2]bool
+	Ready [2]bool
+	// BallInHand 表示本回合可以自由摆放母球，直到出杆之前都有效。
+	//
+	// 落位一次不清它：玩家摆下去之后往往要再挪两次才满意，
+	// 收回权限就只能靠出杆前的那一次落位碰运气。
 	BallInHand bool
-	ShotSeq    int
+	// CuePlaced 表示这次手中球已经摆过至少一次。
+	// 出杆的闸门看的是它，而不是 BallInHand——母球在袋里时直接开算，
+	// pooltool 会抛 argmin of an empty sequence。
+	CuePlaced bool
+	ShotSeq   int
 	// Timeouts 记录每个座位连续超时的次数。
 	// 该座位每成功击球一次就清零（见 handleShoot），
 	// 所以「两次超时之间只要打过一杆」就不再算连续。
@@ -278,6 +287,7 @@ func (s *MatchState) snapshot(viewer Seat, now time.Time) Snapshot {
 		Group:      s.Groups,
 		Ready:      s.Ready,
 		BallInHand: s.BallInHand,
+		CuePlaced:  s.CuePlaced,
 		ShotSeq:    s.ShotSeq,
 		Players:    s.Players,
 		Winner:     s.Winner,
