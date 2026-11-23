@@ -221,8 +221,14 @@ describe('drawScene：台面', () => {
     const begin = methods.slice(0, clip).lastIndexOf('beginPath')
     const seg = methods.slice(begin, clip)
     // 只挖一整圈圆的话，中袋这块一条 lineTo 都没有，库边上就是一圈圆齿。
-    expect(seg.filter((m) => m === 'lineTo').length).toBe(20)
+    // 中袋现在是两条各自闭合的子路径（梯形 3 条折线 + 弓形 1 段弧），
+    // 所以 4 个角袋 × 3 + 2 个中袋 × 3 = 18 条折线。
+    expect(seg.filter((m) => m === 'lineTo').length).toBe(18)
     expect(seg.filter((m) => m === 'arc').length).toBe(2)
+    // 角袋各 1 个 + 中袋各 2 个 = 8 个起点（台呢那块用 rect，不算 moveTo）。
+    // 中袋两个起点是这次的关键：梯形与弓形必须各自闭合，串成一条会在
+    // 折返点带出尖角，袋兜铺上去就是洞口两侧凸出来的一块。
+    expect(seg.filter((m) => m === 'moveTo').length).toBe(8)
   })
 
   it('袋口整组裁在库边的圆角矩形里，木框角上不会多出黑圆', () => {

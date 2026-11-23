@@ -430,7 +430,8 @@ function drawCushion(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
 
   ctx.save()
   ctx.beginPath()
-  addGreenOutline(ctx, t)
+  // 中袋缺口不挖：布铺到洞沿，与真实台桌一致（见 addGreenOutline 的说明）。
+  addGreenOutline(ctx, t, true)
   ctx.clip('evenodd')
 
   // 上、下两条横跨整宽（含两侧的角），左右两条只画中间那截。
@@ -703,25 +704,34 @@ function sideNotchGeometry(i: number): {
   }
 }
 
-// addSideNotch 把中袋缺口加成一条闭合路径：从一侧鼻尖沿斜边走完梯形，
-// 再沿洞口的圆弧绕回另一侧鼻尖。两个鼻尖、梯形的两个外角、库边脸与圆的
-// 两个交点首尾相接，所以整条边界是连续的，不会在库边脸上留下毛刺。
+// addSideNotch 把中袋缺口加成两条子路径：
+//   1) 库边里那块梯形（两个鼻尖 + 两条斜边外端）；
+//   2) 台呢里那块弓形（洞口圆被库边脸切下来的那一半 + 弦）。
+//
+// 早先是一条闭合折线把两者串起来，在「鼻尖 → 库边脸 → 圆弧起点」这几处会
+// 出现角度极小的折返。填充本身看不出问题，但裁剪区域在折返点会带出一个
+// 几像素的尖刺：袋兜铺上去之后，洞口右两侧各冒出一个小三角，看着像洞的
+// 圆边「突出来一块」。拆成两条各自闭合的子路径，弓形就是圆的一段弧加弦，
+// 形状上不可能多出尖角。
 function addSideNotch(ctx: CanvasRenderingContext2D, t: ViewTransform, i: number): void {
   const g = sideNotchGeometry(i)
   const mouth = g.mouth.map((q) => worldToScreen(t, q.x, q.y))
+
+  // 梯形：鼻尖 → 斜边外端 → 另一侧斜边外端 → 另一侧鼻尖，closePath 沿库边脸封口。
+  ctx.moveTo(mouth[0].x, mouth[0].y)
+  ctx.lineTo(mouth[1].x, mouth[1].y)
+  ctx.lineTo(mouth[2].x, mouth[2].y)
+  ctx.lineTo(mouth[3].x, mouth[3].y)
+  ctx.closePath()
+
+  // 弓形：以袋心为圆心、洞沿为半径，从库边脸这一侧的交点绕到另一侧。
+  // 弦由 closePath 补出来，正好落在库边脸上。
   const from = worldToScreen(t, g.capFrom.x, g.capFrom.y)
   const to = worldToScreen(t, g.capTo.x, g.capTo.y)
   const center = worldToScreen(t, g.center.x, g.center.y)
   const radius = metersToPx(t, g.radius)
   const inward = { x: g.inward.x, y: -g.inward.y }
-
-  // 先沿梯形走一圈：鼻尖 → 斜边外端 → 另一侧斜边外端 → 另一侧鼻尖。
-  ctx.moveTo(mouth[0].x, mouth[0].y)
-  ctx.lineTo(mouth[1].x, mouth[1].y)
-  ctx.lineTo(mouth[2].x, mouth[2].y)
-  ctx.lineTo(mouth[3].x, mouth[3].y)
-  // 再从本侧鼻尖往库边脸里退到圆周上，绕洞口探进台呢的那半个圆，回到另一侧。
-  ctx.lineTo(from.x, from.y)
+  ctx.moveTo(from.x, from.y)
   arcThrough(ctx, center, radius, from, to, inward)
   ctx.closePath()
 }
@@ -759,14 +769,23 @@ function greenRectScreen(t: ViewTransform): Rect {
   return worldRect(t, -w, -w, TABLE_WIDTH + w, TABLE_LENGTH + w)
 }
 
-// addGreenOutline 往当前路径里追加「库边外沿 + 六处袋口缺口」这条轮廓。
+// addGreenOutline 往当前路径里追加「库边外沿 + 袋口缺口」这条轮廓。
 //
 // 它是「铺过布的轮廓」：库边的斜坡条要裁在它里面，缺口的角要跟着它的形状走。
 // 自己不 beginPath，方便和别的子路径凑成一条 evenodd 路径。
-function addGreenOutline(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
+//
+// skipSide 为 true 时不挖中袋的缺口。中袋要这么做：它的斜边只在库边里收进去
+// 12.5mm，挖出来是一块 128×50mm 的梯形，而洞口圆大部分压在库边上——布一旦
+// 被挖走，那块就只剩金属，只能靠皮革内壁去盖，结果就是洞沿两侧各鼓起一块
+// 棕三角，看着像圆边「突出来」。真实台桌的中袋，布是一路铺到洞沿的。
+// 角袋不跳过：它的斜槽深 105mm，缺口是实打实的凹槽，布本来就该断在那里。
+function addGreenOutline(ctx: CanvasRenderingContext2D, t: ViewTransform, skipSide = false): void {
   const outer = greenRectScreen(t)
   ctx.rect(outer.x, outer.y, outer.width, outer.height)
   for (let i = 0; i < POCKETS.length; i += 1) {
+    if (skipSide && POCKETS[i].kind === 'side') {
+      continue
+    }
     addNotch(ctx, t, i)
   }
 }
@@ -864,8 +883,16 @@ function drawJawBase(ctx: CanvasRenderingContext2D, t: ViewTransform, i: number)
 // 它只围到 1.3 个半径：把整个缺口都刷成暗棕的话，袋角会出现一大片黑，
 // 标准图里那两块是绿的（见 drawJawBase）。这一圈必须暗——填成金属的话，
 // 洞口就像镶了一圈银边，中袋两侧还会露出两道灰弧探进绿台面。
+//
+// 中袋不画。它的缺口在库边里是一块 128×50mm 的梯形，比洞口圆还宽一圈；
+// 内壁铺进去之后，圆的两侧各多出一个棕三角，看着就是「洞的圆边突出来一块」。
+// 中袋这里布已经铺到洞沿（见 addGreenOutline 的 skipSide），洞沿往外的
+// 暗色由 drawHole 渐变的最后一档负责，不需要再垫一层。
 function drawLiner(ctx: CanvasRenderingContext2D, t: ViewTransform, i: number): void {
   const p = POCKETS[i]
+  if (p.kind === 'side') {
+    return
+  }
   const center = worldToScreen(t, p.x, p.y)
   const radius = metersToPx(t, p.radius)
   // 内壁只画到库边外沿：再往外是木框，那里该露出护角的金属。
@@ -969,11 +996,15 @@ function drawGuard(
   ctx.restore()
 }
 
-// drawJawFace 画角袋的斜边端面：两段颊板各一条短坡，再加正面那一条。
+// drawJawFace 画角袋的斜边端面：两段颊板各铺一条短坡。
 //
-// 三条坡都从台呢剪口往里 13mm 收暗，压在袋兜与绿面之上。这是「斜边有厚度」
+// 两条坡都从台呢剪口往里 20mm 收暗，压在袋兜与绿面之上。这是「斜边有厚度」
 // 唯一的视觉线索：少了它，布就是一刀切在水平面上；有了它，放大看能看出库边
 // 是折下来、在袋口有个立着的端面——球撞斜边时弹的就是这条边。
+//
+// 曾经还有第三条「正面坡」连在两个鼻尖之间。它在画面上就是一根横在洞口的
+// 横杠：两个鼻尖本来就隔着 119mm，铺 20mm 宽的亮绿上去，比洞还抢眼。
+// 真实的袋口正面并不是一块立面，而是一段圆弧（洞本身），所以删掉。
 //
 // 中袋不画：它的两条颊板整段落在洞口圆里，画了也会被洞盖掉；中袋的端面在
 // 洞沿上，由台呢剪口那道暗边代表。
@@ -992,10 +1023,9 @@ function drawJawFace(ctx: CanvasRenderingContext2D, t: ViewTransform, i: number)
   addNotch(ctx, t, i)
   ctx.clip()
 
-  // 三条边的内法向都指向袋心，所以同一个参考点够用。
+  // 两条坡的内法向都指向袋心，所以同一个参考点够用。
   jawFace(ctx, t, m.jawA, m.noseA, center, width)
   jawFace(ctx, t, m.noseB, m.jawB, center, width)
-  jawFace(ctx, t, m.noseA, m.noseB, center, width)
 
   ctx.restore()
 }
