@@ -1376,10 +1376,73 @@ function drawBalls(
   }
   spriteTurn += 1
 
+  // 先算这一帧谁和谁贴着。球与球的边界只靠各自的边缘暗撑不住，
+  // 十六颗球挤在三角里会糊成一片色块；朝邻居那一侧压一道暗，
+  // 球才一颗颗分得开（真实的台球也是靠这道接触阴影分开的）。
+  const contacts = contactMap(onTable)
+
   for (const ball of onTable) {
     const rank = rankOf.get(ball.id)
-    drawBall(ctx, t, ball, radiusPx, textureSide, rank === undefined ? 0 : rank)
+    const touching = contacts.get(ball.id)
+    drawBall(ctx, t, ball, radiusPx, textureSide, rank === undefined ? 0 : rank, touching)
   }
+}
+
+// Contact 是一颗球朝着某个邻居的方向（单位向量，屏幕坐标系）。
+interface Contact {
+  dx: number
+  dy: number
+}
+
+// 两颗球中心的距离小于这个值就算贴着。摆球时相邻两颗正好差一个直径，
+// 留 10% 余量兜住滚动中的轻微穿透。
+const CONTACT_REACH = BALL_RADIUS * 2.1
+
+// contactMap 扫一遍所有球对，返回「球号 → 朝各邻居的方向」。
+//
+// 只有十几颗球，两两比较 120 次远比在渲染循环里维护一份空间索引便宜；
+// 一颗球同时贴住三颗以上的情况很少，超过三颗只取最近的几颗，
+// 免得球堆中心那颗被四道暗斑压成黑的。
+const MAX_CONTACTS = 3
+
+function contactMap(balls: ReadonlyArray<BallState>): Map<string, Contact[]> {
+  const out = new Map<string, Contact[]>()
+  for (let i = 0; i < balls.length; i += 1) {
+    for (let j = i + 1; j < balls.length; j += 1) {
+      const a = balls[i]
+      const b = balls[j]
+      // 一上一下的两颗球不是贴着，是叠着（跳球），不能压接触阴影。
+      if (Math.abs(a.z - b.z) > BALL_RADIUS * 0.5) {
+        continue
+      }
+      const dx = b.x - a.x
+      const dy = b.y - a.y
+      const distance = Math.hypot(dx, dy)
+      if (distance > CONTACT_REACH || distance < 1e-6) {
+        continue
+      }
+      const unit: Contact = { dx: dx / distance, dy: dy / distance }
+      pushContact(out, a.id, unit)
+      pushContact(out, b.id, { dx: -unit.dx, dy: -unit.dy })
+    }
+  }
+  return out
+}
+
+// pushContact 往某颗球的邻居列表里加一条，满了就不再收。
+//
+// 这里不比较远近：要「丢掉最远的那条」就得先量完所有邻居，而球堆里
+// 一颗球最多也就贴住三四颗，多出来的那几条压在边缘上，少画一道看不出来。
+function pushContact(out: Map<string, Contact[]>, id: string, contact: Contact): void {
+  const list = out.get(id)
+  if (!list) {
+    out.set(id, [contact])
+    return
+  }
+  if (list.length >= MAX_CONTACTS) {
+    return
+  }
+  list.push(contact)
 }
 
 // ===== 球的三维朝向 =====
@@ -1537,6 +1600,13 @@ let shadeSide = 0
 let shadeLayer: HTMLCanvasElement | null = null
 
 // ballShade 取（必要时生成）一张边长为 side 的球面明暗层。
+//
+// 明暗按参考录屏的球重新标过：顶灯压在球的中上部，亮部是一大片柔和的亮区
+// （最亮处偏白，约占球面三成），暗部集中在底部与右下，轮廓一圈压到本色五成
+// 左右——不再是从前那块「左上死白、右下近黑」的塑料球。
+//
+// 高光单独用一层径向渐变画，不再用硬边椭圆：硬边椭圆在三十来像素的球上
+// 只剩一个白点，看起来像贴片；渐变收边才是抛光树脂被灯照出来的那条亮带。
 function ballShade(side: number): HTMLCanvasElement | null {
   if (shadeLayer && shadeSide === side) {
     return shadeLayer
@@ -1551,31 +1621,58 @@ function ballShade(side: number): HTMLCanvasElement | null {
   const c = side / 2
 
   // 裁成圆形再填：渐变在圆外会一直用最后一个色标，不裁的话四个角
-  // 会带上 42% 的黑，贴到台上就是一个方块——这正是「进球时变成方框」的由来。
+  // 会带上最外圈的黑，贴到台上就是一个方块——这正是「进球时变成方框」的由来。
   ctx.beginPath()
   ctx.arc(c, c, c, 0, Math.PI * 2)
   ctx.clip()
 
+  // 主体光照。亮心在球的正中偏上，而不是偏左上：录屏里十六颗球的高光
+  // 都压在球顶（台灯是顶光），偏得太靠左会让球看起来在往左滚。
+  //
+  // 亮度分布是「中间略亮、边上明显暗」：球面法线越接近轮廓越背离光源，
+  // 真实台球的轮廓一圈本来就暗，全靠这一圈才有体积。峰值只给 0.24 白，
+  // 再多球色就被冲淡了——一号球会变成奶黄球、八号球发灰。
   const shade = ctx.createRadialGradient(
-    c - c * 0.4,
-    c - c * 0.44,
-    c * 0.1,
+    c - c * 0.16,
+    c - c * 0.34,
+    c * 0.05,
     c,
-    c,
+    c * 1.0,
     c * 1.02,
   )
-  shade.addColorStop(0, 'rgba(255, 255, 255, 0.5)')
-  shade.addColorStop(0.42, 'rgba(255, 255, 255, 0.04)')
-  shade.addColorStop(0.78, 'rgba(0, 0, 0, 0.1)')
-  shade.addColorStop(1, 'rgba(0, 0, 0, 0.42)')
+  shade.addColorStop(0, 'rgba(255, 255, 255, 0.24)')
+  shade.addColorStop(0.26, 'rgba(255, 255, 255, 0.11)')
+  shade.addColorStop(0.52, 'rgba(255, 255, 255, 0)')
+  shade.addColorStop(0.72, 'rgba(0, 0, 0, 0.1)')
+  shade.addColorStop(0.9, 'rgba(0, 0, 0, 0.32)')
+  shade.addColorStop(1, 'rgba(0, 0, 0, 0.52)')
   ctx.fillStyle = shade
   ctx.fillRect(0, 0, side, side)
 
-  // 一小块死白的高光点。只有它才让球看起来是抛光树脂。
-  ctx.beginPath()
-  ctx.ellipse(c - c * 0.36, c - c * 0.42, c * 0.24, c * 0.15, -0.5, 0, Math.PI * 2)
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)'
-  ctx.fill()
+  // 高光带：球顶偏左的一条横亮带。参考录屏里十六颗球的高光都是横着铺开的
+  // 一道弧，而不是一个圆点——球面把顶灯的圆形光斑横向拉长了。
+  //
+  // 做法是把坐标系竖直压扁到 0.72 再画圆形渐变：clip 的圆是在变换之前设的，
+  // 不受影响。半径压到 0.3c：再大就和号码盘连成一片白，号码先糊掉。
+  ctx.save()
+  ctx.translate(c - c * 0.16, c - c * 0.42)
+  ctx.scale(1.3, 0.72)
+  const spec = ctx.createRadialGradient(0, 0, 0, 0, 0, c * 0.3)
+  spec.addColorStop(0, 'rgba(255, 255, 255, 0.58)')
+  spec.addColorStop(0.45, 'rgba(255, 255, 255, 0.2)')
+  spec.addColorStop(1, 'rgba(255, 255, 255, 0)')
+  ctx.fillStyle = spec
+  ctx.fillRect(-side, -side, side * 2, side * 2)
+  ctx.restore()
+
+  // 底下贴台的那一条暗弧。球不是浮在台呢上的，接触点附近要压一点，
+  // 否则球像一块圆形贴纸。用竖直渐变而不是整圈压暗：整圈会让球看起来
+  // 套了个黑箍，而台面反光其实只挡得住下半边的光。
+  const contact = ctx.createLinearGradient(0, c * 0.6, 0, side)
+  contact.addColorStop(0, 'rgba(0, 0, 0, 0)')
+  contact.addColorStop(1, 'rgba(0, 0, 0, 0.15)')
+  ctx.fillStyle = contact
+  ctx.fillRect(0, 0, side, side)
 
   shadeLayer = canvas
   shadeSide = side
@@ -1684,7 +1781,7 @@ function ballSprite(ball: BallState, side: number, m: number[], rank: number): H
 }
 
 // drawBall 画一颗球：贴一张按当前三维朝向重采样出来的球面，再叠一层
-// 不随球转的光影。
+// 不随球转的光影，最后按邻居方向压接触阴影。
 //
 // 号码与花色必须跟着球滚，球才像在滚而不是一张贴纸在图面上平移。
 // 但光影不能跟着转——台灯固定在台面上方，把高光烘焙进贴图再整体旋转，
@@ -1697,6 +1794,7 @@ function drawBall(
   radiusPx: number,
   textureSide: number,
   rank: number,
+  contacts?: Contact[],
 ): void {
   const center = worldToScreen(t, ball.x, ball.y)
   const lift = metersToPx(t, ball.z)
@@ -1725,6 +1823,56 @@ function drawBall(
   if (shade) {
     ctx.drawImage(shade, center.x - drawRadius, cy - drawRadius, drawRadius * 2, drawRadius * 2)
   }
+
+  if (!contacts || contacts.length === 0) {
+    return
+  }
+  const blob = contactShadowSprite()
+  if (!blob) {
+    return
+  }
+  // 暗斑必须裁在球内：球外的部分是台呢，压暗了会看到一圈脏边。
+  ctx.save()
+  ctx.beginPath()
+  ctx.arc(center.x, cy, drawRadius, 0, Math.PI * 2)
+  ctx.clip()
+  const reach = drawRadius * 0.56
+  for (const contact of contacts) {
+    // 暗斑中心放在球缘上：完全放在轮廓外时，一半的暗落在圆内被裁掉，
+    // 剩下那半只剩一条硬边；放在轮廓上，压出来的就是一条贴着球的窄暗缝。
+    const px = center.x + contact.dx * drawRadius * 0.98
+    const py = cy + contact.dy * drawRadius * 0.98
+    ctx.drawImage(blob, px - reach, py - reach, reach * 2, reach * 2)
+  }
+  ctx.restore()
+}
+
+// 接触阴影用的暗斑。做成一张 64 像素的固定位图反复缩放，
+// 而不是每颗球每个邻居都 createRadialGradient：一帧最多三四十次，
+// 建渐变比贴一张图贵一个量级，手机上能省出半毫秒。
+let contactBlob: HTMLCanvasElement | null = null
+
+function contactShadowSprite(): HTMLCanvasElement | null {
+  if (contactBlob) {
+    return contactBlob
+  }
+  const side = 64
+  const canvas = document.createElement('canvas')
+  canvas.width = side
+  canvas.height = side
+  const ctx = context2d(canvas)
+  if (!ctx) {
+    return null
+  }
+  const c = side / 2
+  const g = ctx.createRadialGradient(c, c, 0, c, c, c)
+  g.addColorStop(0, 'rgba(0, 0, 0, 0.42)')
+  g.addColorStop(0.5, 'rgba(0, 0, 0, 0.18)')
+  g.addColorStop(1, 'rgba(0, 0, 0, 0)')
+  ctx.fillStyle = g
+  ctx.fillRect(0, 0, side, side)
+  contactBlob = canvas
+  return canvas
 }
 
 // 落袋动画的时长与状态。

@@ -96,6 +96,24 @@ export function ballTexture(ballId: string, size: number): HTMLCanvasElement {
 // 再宽又回到「整颗都是彩」——那就又和全色球分不出来了。
 const STRIPE_HALF = 0.58
 
+// 母球上的红点，照练习球（measle ball）的样子点六颗。
+//
+// 白球是全白的，滚动时看不出它在转还是整车平移——球杆一推，白球像块
+// 圆形贴纸在台呢上滑过去。点六颗红点就有了参照物：转过多少、朝哪边转，
+// 一眼就能看出来。
+//
+// 六颗点落在球面三根正交轴的六个极点上（±x、±y、±z），这也是真练习球的
+// 分布。贴图是从极点看过去的正投影，于是：
+//   前后两个极点都落在画布正中心（正投影下它们重合），画一个圆就都有了；
+//   另外四颗在赤道上，落在画布四条边的中点，只画朝内的那一半——正投影下
+//   赤道点的另一半被球体自己挡住，真球也是只看得到一半。
+//
+// 0.19 是点的半径（相对球面半径的比例），对应球心角约 11°。再小就只剩
+// 两三个像素，滚起来还是一团白；再大就成了「白底红点球」，号码球里
+// 一眼分不出哪个是母球。
+const CUE_DOT_SCALE = 0.19
+const CUE_DOT_COLOR = '#c8332a'
+
 // paintBall 把一颗球的反照率画进正方形画布：底色、花色带、号码。
 //
 // 视角是**从极点看**，不是常见的侧视图：画布中心就是球的一个极点，
@@ -129,18 +147,54 @@ function paintBall(ctx: CanvasRenderingContext2D, side: number, look: BallLook):
     ctx.fillRect(0, 0, side, side)
   }
 
-  // 号码：白圆垫底再写黑字。母球（number 为 0）跳过这一层。
+  // 号码：白圆垫底再写黑字。母球（number 为 0）跳过这一层，换成红点。
   if (look.number > 0) {
-    const badge = r * 0.46
+    const badge = r * 0.47
     ctx.beginPath()
     ctx.arc(c, c, badge, 0, Math.PI * 2)
     ctx.fillStyle = '#fbfaf6'
     ctx.fill()
 
-    ctx.fillStyle = '#1d2129'
-    ctx.font = 'bold ' + String(Math.round(badge * 1.45)) + 'px "Helvetica Neue", Arial, sans-serif'
+    // 数字描一圈同色边再加粗一档：屏幕上的球只有三十来像素，普通 bold 的
+    // 竖笔只剩一个像素，缩到手机上就糊成一块灰。参考录屏里的号码明显更实。
+    const fontPx = Math.round(badge * 1.5)
+    ctx.font = 'bold ' + String(fontPx) + 'px "Helvetica Neue", Arial, sans-serif'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
+    ctx.lineWidth = Math.max(1, badge * 0.1)
+    ctx.strokeStyle = '#1d2129'
+    ctx.fillStyle = '#1d2129'
+    ctx.strokeText(String(look.number), c, c + badge * 0.04)
     ctx.fillText(String(look.number), c, c + badge * 0.04)
+  } else {
+    paintCueDots(ctx, c)
+  }
+}
+
+// paintCueDots 在母球贴图上点六颗红点。c 是画布中心，也是贴图内切圆的半径。
+//
+// 贴图坐标等于球面法线，所以画布中心是球的一个极点，内切圆是赤道。
+// 赤道上的四颗点圆心就落在内切圆上，画完整圆之后画布只留下朝内的半边，
+// 正好是「赤道点只看得到一半」——不需要额外裁剪。
+function paintCueDots(ctx: CanvasRenderingContext2D, c: number): void {
+  const dot = c * CUE_DOT_SCALE
+  ctx.fillStyle = CUE_DOT_COLOR
+
+  // 前后两个极点（正投影下重合在画布中心）。
+  ctx.beginPath()
+  ctx.arc(c, c, dot, 0, Math.PI * 2)
+  ctx.fill()
+
+  // 赤道上四颗：左右上下，各自只有朝内的半圆留在画布内。
+  const offsets = [
+    [-c, 0],
+    [c, 0],
+    [0, -c],
+    [0, c],
+  ]
+  for (const offset of offsets) {
+    ctx.beginPath()
+    ctx.arc(c + offset[0], c + offset[1], dot, 0, Math.PI * 2)
+    ctx.fill()
   }
 }
