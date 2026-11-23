@@ -991,8 +991,10 @@ func validateParams(params sim.CueParams) error {
 // 帧数或事件数量级不对时，广播出去的 shot 帧会把每个观战者的发件箱撑爆，
 // 最后表现成所有人一起掉线，而日志里只有一片「send buffer full」。
 const (
-	// maxShotFrames 按「20 秒 × 30 Hz」再加一倍余量。本地模型的时长上限是 20 秒。
-	maxShotFrames = 1200
+	// maxShotFrames 按「20 秒 × 60 Hz」再加一倍余量。本地模型的关键帧是
+	// 60Hz（为了播放顺滑，见 web/src/game/predict.ts 的 FRAME_DT），
+	// 时长上限 20 秒，正常一杆三四百帧，两千四已经宽得离谱。
+	maxShotFrames = 2400
 	// maxShotEvents 是一杆里最多几条碰撞事件。开球实测一两百条。
 	maxShotEvents = 1200
 	// maxShotSeconds 是一杆允许的最长时长，比本地模型的 20 秒上限略宽一点。

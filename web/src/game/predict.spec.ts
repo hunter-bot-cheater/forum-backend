@@ -105,9 +105,10 @@ describe('本地预测', () => {
       expect(Number.isFinite(cue[2])).toBe(true)
       if (previous) {
         const step = Math.hypot(cue[1] - previous.x, cue[2] - previous.y)
-        // 一帧 1/30 秒，出射速度上限 4.8 m/s，单帧位移不可能超过 0.25 米。
-        // 超过就说明积分炸了（位置发散），画面上是球在乱飞。
-        expect(step).toBeLessThan(0.25)
+        // 一帧 1/60 秒，出射速度上限 3.36 m/s，单帧位移不可能超过 0.06 米；
+        // 卡到 0.1 米是留了撞库瞬间换向的余量。超过就说明积分炸了（位置发散），
+        // 画面上是球在乱飞。
+        expect(step).toBeLessThan(0.1)
         lastStep = step
       }
       previous = { x: cue[1], y: cue[2] }
