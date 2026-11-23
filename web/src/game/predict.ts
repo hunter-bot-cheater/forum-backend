@@ -14,8 +14,9 @@ import type { BallState, ShotParams } from './types'
 
 // 重力与摩擦系数。u_s 是滑动摩擦、u_r 是纯滚动摩擦（台呢阻尼）。
 //
-// 除 u_r 之外全部取 pooltool 的默认值（objects/ball/params.py 的 BallParams）：
-// u_s 0.2、e_b 0.95、e_c 0.85、f_c 0.2、g 9.81。
+// u_s 与 g 取 pooltool 的默认值（objects/ball/params.py 的 BallParams）：0.2、9.81。
+// 三个碰撞参数（e_b、e_c、f_c）原本也是 pooltool 默认，后来按用户要求把
+// 碰撞损耗减半，改成了下面那组——详见常量定义处的推导。
 //
 // u_r 当前 0.012，是从用户给的参考视频里量出来的，不是拍的：
 // 视频 592×1280 / 29.97fps，球直径 25px（横穿球心一行量出边缘 −12.5/+12.5px），
@@ -40,10 +41,19 @@ const SLIDE_DECEL = SLIDE_FRICTION * GRAVITY
 const ROLL_DECEL = ROLL_FRICTION * GRAVITY
 const SPIN_GAIN = 2.5
 
-// 球与球、球与库边的恢复系数，以及库边的切向摩擦。同样是 pooltool 的默认值。
-const BALL_RESTITUTION = 0.95
-const CUSHION_RESTITUTION = 0.85
-const CUSHION_FRICTION = 0.2
+// 球与球、球与库边的恢复系数，以及库边的切向摩擦。
+//
+// 初值取 pooltool 的默认值（e_b 0.95、e_c 0.85、f_c 0.2），之后按用户要求
+// 「碰撞的能量损失减半」重标过一档。这里要按能量算不能按速度算：
+// 碰撞损失的能量是动能的 (1 − e²)，要让它减半就解 1 − e'² = (1 − e²)/2，
+// 也就是 e' = √((1 + e²)/2)。直接拿 e 乘 0.5 是错的——e 从 0.95 掉到 0.475
+// 那是损失了八成功耗，球撞完几乎不动。
+//
+// 切向摩擦同样按动能口径减半：切向速度乘 (1 − f)，切向动能乘 (1 − f)²，
+// 损失从 36% 降到 18%，对应 f 从 0.2 收到 0.1。
+const BALL_RESTITUTION = 0.975
+const CUSHION_RESTITUTION = 0.928
+const CUSHION_FRICTION = 0.1
 
 // 力度到母球出射速度的映射。上限按参考视频量的：开球那一杆母球在
 // 842→511px 的四帧里匀速走 63px/帧，29.97fps 下是 1900px/s，
