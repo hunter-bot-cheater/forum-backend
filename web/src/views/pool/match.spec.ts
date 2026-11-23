@@ -3,7 +3,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { usePoolStore } from '@/store/modules/pool'
 import type { DownMessage, GameSocketOptions } from '@/game/protocol'
-import { CUE_HEAD_STRING } from '@/game/table'
+import { BALL_RADIUS, CUE_HEAD_STRING } from '@/game/table'
 import type { BallState, MatchSnapshot } from '@/game/types'
 
 // 对局页的用例只盯「服务端说了什么，界面就说什么」这一层：
@@ -102,7 +102,7 @@ const MatchPage = (await import('@/views/pool/match.vue')).default
 const stubs = {
   PoolTable: {
     props: ['balls', 'aim', 'ghost', 'headString'],
-    emits: ['tap', 'drag'],
+    emits: ['tap', 'drag', 'hover'],
     template:
       '<div class="tbl-wrap" :data-ghost="ghost ? ghost.x + \',\' + ghost.y : \'\'"' +
       ' :data-head="headString ? \'1\' : \'\'"' +
@@ -111,6 +111,8 @@ const stubs = {
       '<button class="tbl-drag" @click="$emit(\'drag\', { phase: \'end\', dx: 30, dy: 10, point: { x: 0.7, y: 0.8 } })" />' +
       '<button class="tbl-aim-move" @click="$emit(\'drag\', { phase: \'move\', dx: 20, dy: 10, point: { x: 0.7, y: 0.8 } })" />' +
       '<button class="tbl-aim-end" @click="$emit(\'drag\', { phase: \'end\', dx: 90, dy: 90, point: { x: 0.1, y: 0.1 } })" />' +
+      '<button class="tbl-hover" @click="$emit(\'hover\', { x: 0.9, y: 0.2 })" />' +
+      '<button class="tbl-hover-far" @click="$emit(\'hover\', { x: 0.1, y: 0.9 })" />' +
       '</div>',
   },
   // 力度条那一下要能真的出杆：出杆之后页面会在本地算整杆并开始播，
@@ -437,8 +439,33 @@ describe('对局页的自由球', () => {
     expect(mocks.sends.filter((item) => item === 'place_cue')).toHaveLength(2)
   })
 
-  it('手机上拖动摆球：抬手那一下落位', async () => {
+  // 摆球时落点压在别的球上，落位要被顶开到相切——不然一松手就是
+  // 「白球跟另一颗球叠在一起」，看着像渲染坏了，而它确实是个非法球位。
+  it('落点压在别的球上时被推开，落位不会跟那颗球重叠', async () => {
     const { wrapper, push } = await mountPage()
+    push({
+      type: 'state',
+      ts: 0,
+      data: snapshot({
+        ball_in_hand: true,
+        balls: [
+          { id: 'cue', x: 0.2, y: 0.1, z: -0.05, on_table: false },
+          { id: '3', x: 0.5, y: 0.6, z: 0, on_table: true },
+        ],
+      }),
+    })
+    await flushPromises()
+
+    // 点台面这一下正好落在 3 号球身上（壳固定发 0.5,0.6）。
+    await wrapper.find('.tbl').trigger('click')
+    await flushPromises()
+
+    // 正好压在球心上，没有方向可推，约定往台面中线（+y）让开一个球径。
+    const gap = Math.hypot(mocks.placeAt.x - 0.5, mocks.placeAt.y - 0.6)
+    expect(gap).toBeCloseTo(BALL_RADIUS * 2, 4)
+  })
+
+  it('手机上拖动摆球：抬手那一下落位', async () => {    const { wrapper, push } = await mountPage()
     push({
       type: 'state',
       ts: 0,
@@ -493,8 +520,51 @@ describe('对局页的瞄准拖动', () => {
   })
 })
 
-describe('对局页的开球摆球', () => {
-  // 开球时服务端给的是「开球线后」的手中球：虚影能跟着指针走，
+// 加塞面板展开时，指针怎么动都不能改方向。
+//
+// 玩家的实际动作是：瞄好 → 点开面板调塞 → 点面板外面关掉。从面板挪到台面的
+// 这一段路上鼠标会一路发悬停，真机上看到的就是「点外面关面板，杆跳了一下」。
+// 这条用例锁住「开着不动」与「关掉之后的第一下也不动」。
+describe('对局页的加塞面板', () => {
+  it('面板展开时不跟随悬停，关掉之后的第一下也不会带偏方向', async () => {
+    const { wrapper, push } = await mountPage()
+    push({ type: 'state', ts: 0, data: snapshot() })
+    await flushPromises()
+
+    expect(wrapper.find('.sp__panel').exists()).toBe(false)
+    await wrapper.find('.sp__toggle').trigger('click')
+    expect(wrapper.find('.sp__panel').exists()).toBe(true)
+
+    const before = wrapper.find('.tbl-wrap').attributes('data-phi')
+
+    // 面板开着：悬停到 (0.9, 0.2) 一点都不能动。
+    await wrapper.find('.tbl-hover').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.tbl-wrap').attributes('data-phi')).toBe(before)
+
+    // 点面板外面：面板收起，而且那一下被吃掉，不再往下传。
+    const outside = new Event('pointerdown', { bubbles: true, cancelable: true })
+    document.body.dispatchEvent(outside)
+    await flushPromises()
+    expect(wrapper.find('.sp__panel').exists()).toBe(false)
+    expect(outside.defaultPrevented).toBe(true)
+
+    // 关掉之后指针还停在原地：第一下悬停吞掉，方向仍然不动。
+    await wrapper.find('.tbl-hover').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.tbl-wrap').attributes('data-phi')).toBe(before)
+
+    // 真的走开了才恢复跟随（母球在 0.5,0.5，指到 0.1,0.9）。
+    await wrapper.find('.tbl-hover-far').trigger('click')
+    await flushPromises()
+    expect(Number(wrapper.find('.tbl-wrap').attributes('data-phi'))).toBeCloseTo(
+      Math.atan2(0.4, -0.4),
+      4,
+    )
+  })
+})
+
+describe('对局页的开球摆球', () => {  // 开球时服务端给的是「开球线后」的手中球：虚影能跟着指针走，
   // 但越线的点必须被夹回线内，否则线上就是画着好看。
   it('虚影落在线内，越线的落点被夹回开球线', async () => {
     const { wrapper, push } = await mountPage()

@@ -495,6 +495,25 @@ func TestPlaceCue(t *testing.T) {
 	}
 }
 
+// 母球不能摆在别的球身上。
+//
+// 允许的话，快照里就是「两颗球叠在一起」，下一步物理还要先花一步把它们挤开；
+// 玩家看到的是渲染坏了，实际是摆出了一个非法球位。恰好相切仍然是合法的。
+func TestPlaceCueRejectsOverlap(t *testing.T) {
+	match, _, _ := newTestMatch(t, &fakeSim{shot: quietShot()})
+	match.state.BallInHand = true
+
+	// 顶点球在 (0.4953, 1.4859)，把母球摆在它球心上。
+	if err := match.PlaceCue(Seat0, 0.4953, 1.4859); !errors.Is(err, ErrBadParams) {
+		t.Fatalf("压在别的球上应当被拒，实际 %v", err)
+	}
+	// 贴着摆（球心距 2R 再多 2 毫米）是合法的：这条线不能画得太紧，
+	// 真实摆位里「紧贴着一颗球」是常见需求。
+	if err := match.PlaceCue(Seat0, 0.4953, 1.4859-ballRadius*2-0.002); err != nil {
+		t.Fatalf("贴着别的球摆不该被拒：%v", err)
+	}
+}
+
 // 母球还在袋里（没摆过）时出杆要被拒：那颗球的 z 是负值，物理算不出来。
 func TestShootRequiresCuePlacement(t *testing.T) {
 	match, _, _ := newTestMatch(t, &fakeSim{shot: quietShot()})

@@ -85,11 +85,11 @@ describe('本地预测', () => {
     // 这一条盯的是「像在玻璃上打球」那个毛病：摩擦调小、速度上限调高都会
     // 让这一杆拖到四五秒，球一直在台上爬。
     //
-    // 上界一路从 0.7 放到 0.8、再到 0.95，每次都是因为主动改了手感参数，
-    // 不是放宽标准：碰撞改成「分离时带一半滚动」多滚一截；台呢阻尼减半、
-    // 停球阈值收到 1mm/s 又多滚一截；最后再加上 0.4 秒的收尾减速，
-    // 现在开球这一杆是参考时长的 0.89 倍。判据只剩一句——
-    // 不能比 pooltool 还久，真回到那个量级说明参数又飘了。
+    // 上界一路从 0.7 放到 0.8、再到 0.95，每次都是主动改手感参数，不是放宽标准：
+    // 碰撞改成「分离时带一半滚动」多滚一截；台呢阻尼减半、停球阈值往下收
+    // 又多滚一截。现在开球这一杆是参考时长的 0.90 倍（停球那段柔软的收尾
+    // 去掉之后又回来一点）。判据只剩一句——不能比 pooltool 还久，
+    // 真回到那个量级说明参数又飘了。
     const ratio = predicted.duration / shot.duration
     expect(ratio).toBeGreaterThan(0.3)
     expect(ratio).toBeLessThan(0.95)
@@ -331,5 +331,38 @@ describe('加塞', () => {
     expect(Math.abs(none)).toBeLessThan(0.001)
     expect(right).toBeGreaterThan(0.01)
     expect(left).toBeLessThan(-0.01)
+  })
+})
+
+// 停球那一段只有一种减速：台呢的阻尼。
+//
+// 曾经在最末段叠过一层「速度越低、减速度越小」的柔化，想做出「越走越慢」的
+// 观感，实际看到的是球滚到一半忽然减速、再爬半秒才不动——那一顿比直接停
+// 更显眼。现在从出杆到静止减速度是同一个值，速度线性归零。
+describe('停球', () => {
+  it('从 3 cm/s 到静止只走完匀速减速那半秒，没有额外的爬行段', () => {
+    // 母球贴着左库往右推，力度压到最小档：全程约 0.27 米，
+    // 到不了右库，速度曲线就是纯粹的摩擦减速（撞库那一下位移会反向，
+    // 用位移量出来的「速度」会误判成已经停了）。
+    const balls: BallState[] = [{ id: 'cue', x: 0.15, y: 0.5, z: 0, on_table: true }]
+    const shot = predictShot(balls, { phi: 0, power: 0.03, theta: 0, a: 0, b: 0 })!
+    // 关键帧的坐标只保留到 0.1 毫米，低速时单帧差值的噪声比信号还大，
+    // 所以隔 WINDOW 帧量一次平均速度（0.07 秒），噪声压到 1 mm/s 以内。
+    const WINDOW = 8
+    let start = -1
+    for (let i = 0; i + WINDOW < shot.frames.length; i += 1) {
+      const a = shot.frames[i]
+      const b = shot.frames[i + WINDOW]
+      const step = Math.hypot(b.balls[0][1] - a.balls[0][1], b.balls[0][2] - a.balls[0][2])
+      if (step / (b.t - a.t) < 0.03) {
+        start = i
+        break
+      }
+    }
+    expect(start).toBeGreaterThan(0)
+    const tail = shot.frames[shot.frames.length - 1].t - shot.frames[start].t
+    // 匀速减速下 3 cm/s 掉到零要 0.03 / 0.059 ≈ 0.51 秒（窗口本身再占 0.07 秒）。
+    // 加过柔化收尾时这一段实测在 1.2 秒以上，0.8 秒的窗口能把两种做法分开。
+    expect(tail).toBeLessThan(0.8)
   })
 })

@@ -1,9 +1,12 @@
 <template>
-  <!-- 收起态：一颗小球，红点就是击球点，上方挂当前塞的角度。
-       故意做成「球」而不是图标：这是唯一一处需要玩家读「击球点在哪」的控件，
-       形状本身就在解释怎么用——点它在球面上选位置。 -->
-  <div v-if="!open" class="sp">
+  <!-- 外层这一格始终占着 46×46：收起态是小球，展开态是面板的锚点。
+       它不能跟着一起消失，否则面板没有参照物，会掉到球台中间去。 -->
+  <div class="sp">
+    <!-- 收起态：一颗小球，红点就是击球点，左边挂当前塞的角度。
+         故意做成「球」而不是图标：这是唯一一处需要玩家读「击球点在哪」的控件，
+         形状本身就在解释怎么用——点它在球面上选位置。 -->
     <button
+      v-if="!open"
       class="sp__toggle"
       type="button"
       :disabled="disabled"
@@ -15,12 +18,10 @@
         <span class="sp__mini-dot" :style="dotStyle"></span>
       </span>
     </button>
-  </div>
 
-  <!-- 展开态：整块面板盖在球台右下角。尺寸与配色对着参考图做，
-       球面上一横一竖两条虚线是「中杆」的基准，红点离开哪条线就是加了哪一项。 -->
-  <div v-else class="sp sp--open">
-    <div class="sp__panel">
+    <!-- 展开态：整块面板从这颗球往上长。尺寸与配色对着参考图做，
+         球面上一横一竖两条虚线是「中杆」的基准，红点离开哪条线就是加了哪一项。 -->
+    <div v-else ref="panelEl" class="sp__panel">
       <div class="sp__head">
         <button class="sp__reset" type="button" @click="reset">重置</button>
         <span class="sp__value">{{ valueText }}</span>
@@ -64,7 +65,10 @@
 //
 // 拖动半径内才有效：超出球面就沿半径方向夹到边上，不会因为手指滑出去而丢掉
 // 已经调好的比例。中心留 8% 的死区，想打中杆时不用在像素级对准圆心。
-import { computed, ref } from 'vue'
+//
+// 点面板外面任何地方都算「关掉面板」，而且那一下会被吃掉（见 onDocPointerDown）：
+// 玩家点外面是为了关面板，不是为了顺手重新瞄一杆。
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 // 中心死区（占半径的比例）。手指按在中心附近时吸附回 (0, 0)。
 const DEAD_ZONE = 0.08
@@ -83,10 +87,15 @@ const props = defineProps<{
 const emit = defineEmits<{
   'update:a': [value: number]
   'update:b': [value: number]
+  // open-change 把面板开合告诉页面。展开期间页面要把瞄准停住：
+  // 玩家为了关面板会往台面上点，手从面板移到台面的路上会一路发悬停，
+  // 不拦的话「关面板」就等于「重新瞄一次」，刚瞄好的杆就这么被带走了。
+  'open-change': [open: boolean]
 }>()
 
 const open = ref(false)
 const stage = ref<HTMLDivElement | null>(null)
+const panelEl = ref<HTMLDivElement | null>(null)
 let dragging = false
 
 // valueText 是右上角那串坐标，按参考图的格式：括号、逗号、一位小数。
@@ -118,13 +127,63 @@ const dotStyle = computed(() => {
   return { left: x + '%', top: y + '%' }
 })
 
+// setOpen 统一改开合状态并通知页面，别处不要直接改 open——
+// 漏一次通知，页面那边就会以为面板还开着，瞄准一直不动，看起来像卡住了。
+function setOpen(next: boolean) {
+  if (open.value === next) {
+    return
+  }
+  open.value = next
+  emit('open-change', next)
+}
+
 // toggle 切换展开／收起。收起时不动已经设好的塞：打完一杆还会想接着用。
 function toggle() {
   if (props.disabled && !open.value) {
     return
   }
-  open.value = !open.value
+  setOpen(!open.value)
 }
+
+// onDocPointerDown 处理「点面板外面」：关掉面板，并且把这一下吞掉。
+//
+// 监听挂在 window 的捕获阶段，事件还没到达球台就被拦住，所以这一次按下
+// 既不会让球台锁定／解锁方向，也不会把母球落到别处、更不会出杆。
+// 这是「关面板不许动杆」唯一可靠的落点：如果只关面板、让事件继续往下走，
+// 球台会把这次点按当成一次 tap，方向当场被切换，玩家看到的是杆自己跳了一下。
+//
+// 面板内部（含右缘那个收起箭头）直接放行，否则拖加塞红点也会被自己关掉。
+function onDocPointerDown(e: PointerEvent) {
+  if (!open.value) {
+    return
+  }
+  const panel = panelEl.value
+  if (panel && e.target instanceof Node && panel.contains(e.target)) {
+    return
+  }
+  e.preventDefault()
+  e.stopPropagation()
+  setOpen(false)
+}
+
+// 回合结束、开始摆球时面板就失效了，不等玩家去点：留在台上会挡住球台，
+// 而且那时调塞根本没有意义（还没有可以出杆的母球）。
+watch(
+  () => props.disabled,
+  (blocked) => {
+    if (blocked) {
+      setOpen(false)
+    }
+  },
+)
+
+onMounted(() => {
+  window.addEventListener('pointerdown', onDocPointerDown, true)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('pointerdown', onDocPointerDown, true)
+})
 
 // reset 把击球点放回圆心。
 function reset() {
@@ -205,19 +264,16 @@ function round2(value: number): number {
 </script>
 
 <style scoped>
-/* 收起态：贴球台右下角，不高过 52px，不压住底部的微调尺。 */
+/* 收起态：挂在力度条正下方（父级是 .pm__power，见 match.vue），
+   和滑轨同一条竖轴，下沿往下空 14px——紧贴着会看成滑轨的一部分。 */
 .sp {
-  /* 挂底栏的右端（父级 .pm__ctls 是 relative）。收起态与微调尺同高，
-     展开态向上长——面板盖球台，球不盖角袋。 */
   position: absolute;
-  right: 0;
-  bottom: -1px;
+  top: calc(100% + 14px);
+  /* 球 46 宽、滑轨 44 宽，往右多伸 1px 就是一根轴。 */
+  right: -1px;
+  width: 46px;
+  height: 46px;
   z-index: 6;
-}
-
-.sp--open {
-  /* 展开时面板往上长，底边仍贴着原来那颗球的位置。 */
-  bottom: 0;
 }
 
 .sp__toggle {
@@ -261,11 +317,11 @@ function round2(value: number): number {
   box-shadow: 0 0 4px rgba(211, 58, 44, 0.75);
 }
 
-/* 角度标签挂在球的斜上方：球面上没有位置写字，又不能让字挡着球。 */
+/* 角度标签挂在球的左边：球的上方就是力度条，标签压上去会和滑轨粘成一块。 */
 .sp__badge {
   position: absolute;
-  top: -15px;
-  left: 50%;
+  top: 50%;
+  right: calc(100% + 7px);
   padding: 1px 7px;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -274,16 +330,18 @@ function round2(value: number): number {
   white-space: nowrap;
   background: rgba(12, 18, 24, 0.82);
   border-radius: 8px;
-  transform: translateX(-50%);
+  transform: translateY(-50%);
 }
 
-/* 展开面板：半透明深底 + 一圈冷色描边，和台呢的绿分得开又不刺眼。 */
+/* 展开面板：从球往上长，整体往左让 15px——右缘挂着的收起箭头是 -14px 出去的，
+   贴着屏幕右边摆的话它会被裁掉一半。台面本来就在屏幕里侧 3px，让出这一段正好。 */
 .sp__panel {
   position: absolute;
-  right: 0;
-  bottom: 52px;
+  right: 15px;
+  bottom: calc(100% + 10px);
   width: min(232px, 62vw);
   padding: 10px 12px 14px;
+  /* 半透明深底 + 一圈冷色描边，和台呢的绿分得开又不刺眼。 */
   background: rgba(13, 30, 34, 0.86);
   border: 1.5px solid rgba(132, 214, 232, 0.55);
   border-radius: 18px;

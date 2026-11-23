@@ -18,8 +18,11 @@ import type { BallState, ShotParams } from './types'
 // 三个碰撞参数（e_b、e_c、f_c）原本也是 pooltool 默认，后来按用户要求把
 // 碰撞损耗减半，改成了下面那组——详见常量定义处的推导。
 //
-// u_r 当前 0.006。视频标定值是 0.012（下面那段推导），用户先要求「阻尼再小一倍」，
-// 于是按字面减半——0.012 是「球缓缓停下」的参考量，减半之后球要多滚一倍的路。
+// u_r 当前 0.005，另外还叠了一份跟速度成正比的阻尼（见 ROLL_VISCOUS）。
+//
+// 视频标定值是 0.012（下面那段推导），用户先要求「阻尼再小一倍」，于是按字面
+// 减半到 0.006；后来「中段太快、末段又 abrupt」的问题改由速度项去解决，
+// 常数项再让一档到 0.005——末段的减速因此更绵，但不至于变成匀速爬行。
 //
 // 视频 592×1280 / 29.97fps，球直径 25px（横穿球心一行量出边缘 −12.5/+12.5px），
 // 开球后母球在 (264.9, 641.8) 停住，从 11.45s 到 13.65s 的轨迹做二次拟合，
@@ -35,7 +38,7 @@ import type { BallState, ShotParams } from './types'
 // 「滚动比滑动还费劲」，物理上讲不通，手感上会变成球一落稳就急刹。
 const GRAVITY = 9.81
 const SLIDE_FRICTION = 0.2
-const ROLL_FRICTION = 0.006
+const ROLL_FRICTION = 0.005
 
 // 滑动阶段球心减速度，以及转动让它提前进入纯滚动的比例。
 // 球是实心球，转动惯量 2/5 mR²：滑动摩擦让球心减速 μg 的同时，
@@ -43,6 +46,15 @@ const ROLL_FRICTION = 0.006
 const SLIDE_DECEL = SLIDE_FRICTION * GRAVITY
 const ROLL_DECEL = ROLL_FRICTION * GRAVITY
 const SPIN_GAIN = 2.5
+
+// ROLL_VISCOUS 是滚动阻尼里跟速度成正比的那一份，单位 1/s。
+//
+// 只用常数阻尼时，球在中段几乎是匀速——满力那杆从 2.4 m/s 到 1.6 m/s 要走一秒多，
+// 画面上是「一冲出去就一直那么快」，然后低速段又只剩 0.05 m/s² 的刹车，
+// 看着像「忽然停住」。加一份与速度成正比的阻尼之后，减速度随速度一起下降：
+// 高速段掉得快（3 m/s 时合计 0.5 m/s²，是常数项的十倍），低速段几乎只剩常数项，
+// 整条速度曲线是平滑的指数衰减，没有「匀速巡航」也没有「突然刹车」。
+const ROLL_VISCOUS = 0.15
 
 // 球与球、球与库边的恢复系数，以及库边的切向摩擦。
 //
@@ -113,30 +125,15 @@ function spinAfterImpact(vx: number, vy: number): number {
 const SPEED_MIN = 0.05
 const SPEED_MAX = 4.4
 
-// 速度低于这个值就当停住。pooltool 会让球以毫米级速度继续爬，
-// 这里没有这个必要，但阈值也绝不能大：早先取 3 cm/s，在手机上相当于每秒
-// 走十来个像素，球明明还在慢慢挪却被一步清零，看起来就是「说到就到」。
+// 停球阈值。给到 0.1 mm/s——实际上等于「不设阈值」：
 //
-// 现在收到 1 mm/s。判定是按积分步（1/240 秒）做的，滚动减速 0.059 m/s²
-// 一步只掉 0.25 mm/s，所以真正归零的速度是「阈值 + 一步的量」，约 1.25 mm/s。
-// 手机上台面约 361 像素一米，换算下来每秒 0.45 个像素，四十个球径才走一个，
-// 归零时既看不出位移，也留不下刹车点。
-// 想更极致可以再往下收，但 1 mm/s 已经是「位移比像素还小」的量级，
-// 再小只会让球在最后半秒多积几百帧。
-const STOP_SPEED = 0.001
-
-// 收尾段的速度门槛（见 applyFriction）。3 cm/s 在手机上大约每秒十一像素，
-// 是「明显还看得出在动」的量级：从这儿开始往下收减速度，球就会有一段
-// 越走越慢的过渡，而不是匀速挪到某一帧忽然不动。再往上提意义不大——
-// 更高速就开始收，会让正常滚动也显得发飘。
-const CREEP_SPEED = 0.03
-
-// 收尾段的减速下限（相对正常滚动减速的比例）。
-//
-// 只按速度比例收而不设下限，减速度会一路趋近于零，球在最后几毫米上爬一秒
-// 多——观感从「撞墙」变成「粘住」，一样不对。压到 0.35 之后整条尾巴约 0.6 秒：
-// 前段明显在减速，后段干脆停下，中间没有可以指出来的转折点。
-const CREEP_FLOOR = 0.35
+// 判定按积分步（1/240 秒）做，滚动的常数减速度是 0.049 m/s²，一步掉 0.2 mm/s。
+// 所以球速只要落在 0.1 mm/s 下面，下一步一定会变成负数，于是就地归零，
+// 真正停下的速度上限仍是 0.2 mm/s（约每 40 秒走一个像素），肉眼就是「滚到没」。
+// 阈值本身只用来保证积分一定收敛，不再是观感上的旋钮：
+// 早先把它设成 3 cm/s（手机上一秒走十来个像素），球还在慢慢挪却被一步清零，
+// 看起来就是「说到就到」。
+const STOP_SPEED = 0.0001
 
 // 侧旋的自然衰减率（每秒），见 applyFriction。
 const SIDE_DECAY = 0.8
@@ -171,6 +168,7 @@ const STEP_DT = FRAME_DT / STEPS_PER_FRAME
 //
 // 原来给的是 20 秒，阻尼从 0.012 减半到 0.006 之后，满力单球要滚 17.98 秒，
 // 离上限只剩 2 秒——斜着打、撞库次数多的杆子很容易触顶。提到 24 秒留出余量。
+// 后来滚动阻尼加了速度项，满力单球降到 12 秒左右，24 秒是两倍余量，不用再动。
 // 提这个数要同步看服务端的 maxShotFrames：24 秒 × 120Hz = 2880 帧，
 // 那边是 4800，仍然够。
 const MAX_DURATION = 24
@@ -682,11 +680,11 @@ function reflect(ball: SimBall, nx: number, ny: number): void {
 // 出杆瞬间完全不打转，要滑到 5/7 初速才滚起来；碰撞后已经带着一半滚动
 // （见 COLLISION_SPIN_CARRY），滑到 6/7 左右就接上了。
 //
-// 末段还有一层「收尾」：速度掉到 CREEP_SPEED 以下时，减速度按速度比例往下收，
-// 于是最后那一段是渐隐而不是匀速撞墙。匀速减速在数学上没错，可玩家看到的是
-// 「球一直匀速挪，忽然没了」——真实球台上台呢的阻力在极低速时也会变小一点，
-// 视觉上就是球自己慢慢化掉。指数尾巴在 2 cm/s 到 1 mm/s 之间大约要 1 秒、
-// 多走 7 毫米，正好是「看得出来在减速、但看不出在哪一刻停住」的量。
+// 末段不做任何特殊处理：减速度从头到尾一个值，速度线性掉到零。
+//
+// 曾经在低速段加过一段「按速度比例收减速度」的柔软收尾，结果每一杆的尾巴
+// 都有一下明显的减速停顿——那一段比真实球台慢太多，反而成了刹车点。
+// 现在就是匀速减速，0.25 mm/s 一步掉完，看不出在哪一帧停的。
 function applyFriction(ball: SimBall, dt: number): void {
   const speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy)
   if (speed <= STOP_SPEED) {
@@ -697,32 +695,26 @@ function applyFriction(ball: SimBall, dt: number): void {
     return
   }
 
-  // 低速时减速度按比例收缩，speed 越低收得越多（柔和的收尾），但不低于 CREEP_FLOOR。
-  let creep = 1
-  if (speed < CREEP_SPEED) {
-    creep = speed / CREEP_SPEED
-    if (creep < CREEP_FLOOR) {
-      creep = CREEP_FLOOR
-    }
-  }
-
   let next = speed
   if (ball.spin < speed) {
     // 滑动：球心减速的同时，摩擦把球转起来，直到转动跟上平移。
-    const drop = SLIDE_DECEL * dt * creep
+    const drop = SLIDE_DECEL * dt
     next = speed - drop
     ball.spin += drop * SPIN_GAIN
     if (ball.spin > next) {
       ball.spin = next
     }
   } else {
-    next = speed - ROLL_DECEL * dt * creep
+    // 滚动：阻尼 = 常数项 + 速度项（见 ROLL_VISCOUS）。速度项让高速段掉得快，
+    // 低速段几乎只剩台呢那点常数阻力，末段于是是「慢慢化掉」而不是「刹住」。
+    const decel = ROLL_DECEL + ROLL_VISCOUS * speed
+    next = speed - decel * dt
     ball.spin = next
   }
 
   // 侧旋不参与滚动，按同一份阻力慢慢泄掉；完全不管的话，一颗撞了三次库
   // 还在爬的球会一直带着初速那份塞，反弹角越滚越夸张。
-  ball.side *= 1 - SIDE_DECAY * dt * creep
+  ball.side *= 1 - SIDE_DECAY * dt
 
   if (next <= STOP_SPEED) {
     ball.vx = 0

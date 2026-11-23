@@ -716,6 +716,13 @@ func (m *Match) handlePlaceCue(cmd command) error {
 	if !insideTable(cmd.x, cmd.y) {
 		return ErrBadParams
 	}
+	// 压住别的球不行。允许的话下一步物理要先花一步把它们挤开，玩家看到的是
+	// 「白球跟另一颗球叠在一起」——那画面像渲染坏了，而这其实是个非法球位。
+	// 前端拖动时也会把虚影推开（match.vue 的 cueSpot），这里再挡一次是因为
+	// 协议是公开的：手搓坐标的人不该能把球摆进另一颗球里。
+	if m.state.overlapsBall(cmd.x, cmd.y) {
+		return ErrBadParams
+	}
 	// 开球时只允许摆在开球线之后。球心压线不算越界，与 insideTable 一样
 	// 留 1mm 余量：玩家把球摆在恰好贴线的位置，不该因为浮点误差被拒。
 	if m.state.PlaceZone == PlaceBehindHead && cmd.y > cueHeadString+0.001 {
@@ -1063,10 +1070,9 @@ func validShotCoord(x, y float64) bool {
 // 半径与前端 table.ts 的 BALL_RADIUS 是同一个数（标准球的 1.2 倍），
 // 判定留 1mm 余量，避免玩家把球摆在恰好擦库的位置被拒。
 func insideTable(x, y float64) bool {
-	const radius = 0.03429
 	const margin = 0.001
-	return x >= radius-margin && x <= tableWidth-radius+margin &&
-		y >= radius-margin && y <= tableLength-radius+margin
+	return x >= ballRadius-margin && x <= tableWidth-ballRadius+margin &&
+		y >= ballRadius-margin && y <= tableLength-ballRadius+margin
 }
 
 // 台面内沿尺寸，与前端 table.ts 的 TABLE_WIDTH / TABLE_LENGTH 是同一组数。
@@ -1076,4 +1082,28 @@ const (
 	// cueHeadString 是开球线离开球端库边的距离：台长的四分之一。
 	// 与前端 table.ts 的 CUE_HEAD_STRING 是同一个值，改一处必须改另一处。
 	cueHeadString = tableLength / 4
+	// ballRadius 与前端 table.ts 的 BALL_RADIUS 是同一颗球（比标准球大两成）。
+	// 它同时是「母球能不能摆在这」与「球是否出界」的判定半径。
+	ballRadius = 0.03429
+	// ballRadiusHair 是判重叠时让出来的发丝级余量：球心距正好 2R 是合法的
+	// 相切摆位，不该让浮点误差把「贴着摆」判成压球。
+	ballRadiusHair = 0.001
 )
+
+// overlapsBall 判断母球落在 (x, y) 会不会压住台面上别的球。
+//
+// 母球自己不算：它马上就要被挪到这个点上。
+func (s *MatchState) overlapsBall(x, y float64) bool {
+	limit := ballRadius*2 - ballRadiusHair
+	for _, ball := range s.Balls {
+		if !ball.OnTable || ball.ID == sim.CueBallID {
+			continue
+		}
+		dx := ball.X - x
+		dy := ball.Y - y
+		if dx*dx+dy*dy < limit*limit {
+			return true
+		}
+	}
+	return false
+}

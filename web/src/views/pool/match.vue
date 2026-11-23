@@ -97,6 +97,16 @@
 
         <div class="pm__power">
           <PowerSlider v-model:value="power" :disabled="!canShoot" @shoot="shoot" />
+          <!-- 加塞入口：挂在力度条正下方，跟滑轨同一根竖轴。
+               放在力度条这一层而不是底栏，是因为「调力度」和「调击球点」是
+               连着做的两件事，手不用在屏幕上下两端来回跑。
+               面板从这颗球往上展开，盖住球台右下一块，和参考图一致。 -->
+          <SpinPad
+            v-model:a="spinA"
+            v-model:b="spinB"
+            :disabled="!canAim"
+            @open-change="onSpinOpenChange"
+          />
         </div>
 
       </div>
@@ -145,11 +155,6 @@
           </button>
           <FineTuneRail :phi="phi" :disabled="!canAim" @nudge="onNudge" />
         </template>
-        <!-- 加塞：收起时是底栏右侧一颗小球，点开才铺开整块面板。
-             入口放在底栏而不是球台四角——挂在球台里会正好压住角袋，
-             那一颗球是玩家判断走位的参照物，遮住它就等于遮住一半的台面。
-             面板向上展开，展开后盖住球台右下一块，和参考图一致。 -->
-        <SpinPad v-model:a="spinA" v-model:b="spinB" :disabled="!canAim" />
       </div>
     </footer>
 
@@ -271,6 +276,12 @@ const phi = ref(0)
 // a 只影响撞库后的反弹角，b 在母球第一次撞球时结算成跟进／拉回。
 const spinA = ref(0)
 const spinB = ref(0)
+
+// spinOpen 表示加塞面板是不是铺开着（由 SpinPad 的 open-change 通知）。
+//
+// 展开期间这一页要把瞄准停住：玩家点面板外面是为了关面板，手一路划到台面上
+// 会持续发悬停事件；不拦的话「关面板」就等于「重新瞄一次」。
+const spinOpen = ref(false)
 const shooting = ref(false)
 const notice = ref('')
 
@@ -1421,7 +1432,46 @@ function onHover(point: Point) {
   if (!canAim.value || aimLocked.value) {
     return
   }
+  if (!hoverResume(point)) {
+    return
+  }
   aimTowards(point)
+}
+
+// hoverResume 决定「刚关掉加塞面板」之后的悬停要不要跟随。
+//
+// 关面板那一下被吃掉了（见 SpinPad 的 onDocPointerDown），指针没有到达台面，
+// 但它此刻就停在台面某处；下一次 mousemove 会立刻把方向拽过去——观感正是
+// 「点一下外面，杆自己跳了一下」。所以先吞掉一次悬停，再要求指针真的走开
+// 一个球径以上才恢复跟随：手抖那几像素不算「要重新瞄准」。
+let hoverArmed = false
+let hoverAnchor: Point | null = null
+
+function hoverResume(point: Point): boolean {
+  if (!hoverArmed) {
+    return true
+  }
+  if (!hoverAnchor) {
+    hoverAnchor = point
+    return false
+  }
+  if (Math.hypot(point.x - hoverAnchor.x, point.y - hoverAnchor.y) < BALL_RADIUS * 1.5) {
+    return false
+  }
+  hoverArmed = false
+  hoverAnchor = null
+  return true
+}
+
+// onSpinOpenChange 接加塞面板的开合通知。
+function onSpinOpenChange(open: boolean) {
+  spinOpen.value = open
+  if (open) {
+    return
+  }
+  // 刚关掉：先把下一次悬停冻住，理由见 hoverResume。
+  hoverArmed = true
+  hoverAnchor = null
 }
 
 // aimTowards 把瞄准线指向台面上的某一点。
@@ -1430,6 +1480,11 @@ function onHover(point: Point) {
 // 球就往哪走。以前手机端按水平位移换算角度，斜着划或者在屏幕中间来回擦时
 // 方向会和手感对不上——有时反着走，有时干脆不动，因为竖直分量被丢掉了。
 function aimTowards(point: Point) {
+  // 加塞面板铺开时谁的指针位置都不算数：悬停、拖动两条路都在这里汇合，
+  // 拦一处就够。玩家这时盯着的是球面上的红点，指针只是路过台面。
+  if (spinOpen.value) {
+    return
+  }
   const cue = balls.value.find((b) => b.id === 'cue')
   if (!cue || !cue.on_table) {
     return
@@ -1443,12 +1498,12 @@ function aimTowards(point: Point) {
   phi.value = normalizePhi(Math.atan2(dy, dx))
 }
 
-// moveGhost 把手中球的虚影挪到指针处，并夹进台面内沿。
+// moveGhost 把手中球的虚影挪到指针处，并夹进台面内沿、避开别的球。
 //
 // 夹在本地做而不是等服务端拒绝：越界的虚影会画到库边木框外面，
 // 看起来像球穿进了桌子。真正落位时服务端仍会校验一次。
 function moveGhost(point: Point) {
-  ghost.value = clampIntoCueArea(point)
+  ghost.value = cueSpot(point)
 }
 
 // onDrag 处理画布拖动：拖动即瞄准，方向指向手指所在的位置。
@@ -1525,13 +1580,65 @@ function placeCue(point: Point) {
   if (placing.value) {
     return
   }
-  const spot = clampIntoCueArea(point)
+  const spot = cueSpot(point)
   const seq = socket?.placeCue(spot.x, spot.y) ?? 0
   if (seq === 0) {
     showNotice('连接已断开，正在重连')
     return
   }
   placing.value = true
+}
+
+// cueSpot 是最终落点：先收进可摆区域，再从别的球身上推开。
+//
+// 摆球时最难受的一件事是「松手之后白球跟另一颗球叠在一起」——虚影跟着手指走，
+// 手指落在一颗球上，那颗球就压住了。这里把落点沿球心连线推到相切的位置，
+// 玩家看到的是虚影被顶开，手一松就落在那里，不用再挪一次。
+//
+// 两轮「推开 + 收进区域」：推开有可能把球顶到开球线外，收回来又可能压上另一颗。
+// 两轮之后仍然压着（球贴着开球线排成一排这种极端摆位）就交给服务端拒，
+// 那时玩家看到的是「摆不上去」，而不是两颗球叠在一起。
+function cueSpot(point: Point): Point {
+  let spot = clampIntoCueArea(point)
+  for (let round = 0; round < 2; round += 1) {
+    const pushed = pushOutOfBalls(spot)
+    const clamped = clampIntoCueArea(pushed)
+    if (clamped.x === pushed.x && clamped.y === pushed.y) {
+      return clamped
+    }
+    spot = clamped
+  }
+  return spot
+}
+
+// pushOutOfBalls 把落点从每一颗挡路的球身上推到相切的位置。
+function pushOutOfBalls(point: Point): Point {
+  let x = point.x
+  let y = point.y
+  const contact = BALL_RADIUS * 2
+  for (const ball of balls.value) {
+    // 母球自己不算：它马上要挪到这个点上。
+    if (ball.id === 'cue' || !ball.on_table) {
+      continue
+    }
+    let dx = x - ball.x
+    let dy = y - ball.y
+    const distance = Math.hypot(dx, dy)
+    if (distance >= contact) {
+      continue
+    }
+    if (distance < 1e-6) {
+      // 正好点在球心上：没有方向可以推，往台面中线方向让开一个球径。
+      dx = 0
+      dy = 1
+    } else {
+      dx = dx / distance
+      dy = dy / distance
+    }
+    x = ball.x + dx * contact
+    y = ball.y + dy * contact
+  }
+  return { x, y }
 }
 
 // clampIntoCueArea 把落点收进允许摆放的区域。
@@ -2255,15 +2362,11 @@ onBeforeRouteLeave(() => {
    两种形态高度差 2px，切一次球台就跟着缩 2px——就是玩家说的
    「打完一杆画面动了一下」。这里把行高钉在 44，两种形态都在里面垂直居中。 */
 .pm__ctls {
-  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 10px;
   height: 44px;
-  /* 右边留出加塞入口的位置。不留的话那颗球就压在「+0.1°」上，
-     点微调会先点到球；摆球时压的是「不挪了」，直接卡住流程。 */
-  padding-right: 54px;
 }
 
 .pm__place {

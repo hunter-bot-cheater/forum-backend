@@ -1,5 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import SpinPad from './SpinPad.vue'
 
 // 加塞面板靠「指针落在球面哪个位置」换算塞量。jsdom 里元素尺寸一律是 0，
@@ -116,5 +116,39 @@ describe('加塞面板', () => {
   it('读数按参考图的格式显示百分点', async () => {
     const wrapper = await mountPad(-0.005, -0.286)
     expect(wrapper.find('.sp__value').text()).toBe('(-0.5,-28.6)')
+  })
+})
+
+// 点面板外面就收起，而且这一下不能再往下走。
+//
+// 玩家的动作是「瞄好 → 调塞 → 点旁边关掉」。这一下如果漏到球台上，
+// 球台会把它当成一次点按（锁定／解锁方向），刚瞄好的杆就白瞄了。
+// 所以这里既验面板收起，也验事件被 preventDefault 吃掉。
+describe('加塞面板的开合', () => {
+  it('点面板外面收起，并把这一下吃掉', async () => {
+    const wrapper = await mountPad(0, 0)
+    expect(wrapper.find('.sp__panel').exists()).toBe(true)
+
+    const outside = new Event('pointerdown', { bubbles: true, cancelable: true })
+    document.body.dispatchEvent(outside)
+    await flushPromises()
+
+    expect(wrapper.find('.sp__panel').exists()).toBe(false)
+    expect(wrapper.find('.sp__toggle').exists()).toBe(true)
+    expect(outside.defaultPrevented).toBe(true)
+    expect(wrapper.emitted('open-change')).toEqual([[true], [false]])
+  })
+
+  it('点面板里面不收起', async () => {
+    const wrapper = await mountPad(0, 0)
+    await press(wrapper, 250, 200)
+    expect(wrapper.find('.sp__panel').exists()).toBe(true)
+  })
+
+  it('不是自己回合时自动收起：面板不能一直盖在球台上', async () => {
+    const wrapper = await mountPad(0, 0)
+    await wrapper.setProps({ disabled: true })
+    await flushPromises()
+    expect(wrapper.find('.sp__panel').exists()).toBe(false)
   })
 })
