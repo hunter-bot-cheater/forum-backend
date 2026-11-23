@@ -207,9 +207,11 @@ function round2(value: number): number {
 <style scoped>
 /* 收起态：贴球台右下角，不高过 52px，不压住底部的微调尺。 */
 .sp {
+  /* 挂底栏的右端（父级 .pm__ctls 是 relative）。收起态与微调尺同高，
+     展开态向上长——面板盖球台，球不盖角袋。 */
   position: absolute;
-  right: 2px;
-  bottom: 2px;
+  right: 0;
+  bottom: -1px;
   z-index: 6;
 }
 
@@ -262,7 +264,7 @@ function round2(value: number): number {
 /* 角度标签挂在球的斜上方：球面上没有位置写字，又不能让字挡着球。 */
 .sp__badge {
   position: absolute;
-  top: -12px;
+  top: -15px;
   left: 50%;
   padding: 1px 7px;
   font-size: 12px;

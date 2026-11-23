@@ -99,10 +99,6 @@
           <PowerSlider v-model:value="power" :disabled="!canShoot" @shoot="shoot" />
         </div>
 
-        <!-- 加塞：收起时是右下角一颗小球，点开才铺开整块面板。
-             它必须盖在球台上而不是挤进底栏：调塞的时候眼睛要盯着红点在球面的
-             位置，底栏那一条 44px 高，放进去球只有三十几个像素，选不准。 -->
-        <SpinPad v-model:a="spinA" v-model:b="spinB" :disabled="!canAim" />
       </div>
     </main>
 
@@ -149,6 +145,11 @@
           </button>
           <FineTuneRail :phi="phi" :disabled="!canAim" @nudge="onNudge" />
         </template>
+        <!-- 加塞：收起时是底栏右侧一颗小球，点开才铺开整块面板。
+             入口放在底栏而不是球台四角——挂在球台里会正好压住角袋，
+             那一颗球是玩家判断走位的参照物，遮住它就等于遮住一半的台面。
+             面板向上展开，展开后盖住球台右下一块，和参考图一致。 -->
+        <SpinPad v-model:a="spinA" v-model:b="spinB" :disabled="!canAim" />
       </div>
     </footer>
 
@@ -2254,11 +2255,15 @@ onBeforeRouteLeave(() => {
    两种形态高度差 2px，切一次球台就跟着缩 2px——就是玩家说的
    「打完一杆画面动了一下」。这里把行高钉在 44，两种形态都在里面垂直居中。 */
 .pm__ctls {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 10px;
   height: 44px;
+  /* 右边留出加塞入口的位置。不留的话那颗球就压在「+0.1°」上，
+     点微调会先点到球；摆球时压的是「不挪了」，直接卡住流程。 */
+  padding-right: 54px;
 }
 
 .pm__place {
