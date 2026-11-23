@@ -105,9 +105,12 @@ const stubs = {
     emits: ['tap', 'drag'],
     template:
       '<div class="tbl-wrap" :data-ghost="ghost ? ghost.x + \',\' + ghost.y : \'\'"' +
-      ' :data-head="headString ? \'1\' : \'\'">' +
+      ' :data-head="headString ? \'1\' : \'\'"' +
+      ' :data-phi="aim ? aim.phi : \'\'">' +
       '<button class="tbl" @click="$emit(\'tap\', { x: 0.5, y: 0.6 })" />' +
       '<button class="tbl-drag" @click="$emit(\'drag\', { phase: \'end\', dx: 30, dy: 10, point: { x: 0.7, y: 0.8 } })" />' +
+      '<button class="tbl-aim-move" @click="$emit(\'drag\', { phase: \'move\', dx: 20, dy: 10, point: { x: 0.7, y: 0.8 } })" />' +
+      '<button class="tbl-aim-end" @click="$emit(\'drag\', { phase: \'end\', dx: 90, dy: 90, point: { x: 0.1, y: 0.1 } })" />' +
       '</div>',
   },
   // 力度条那一下要能真的出杆：出杆之后页面会在本地算整杆并开始播，
@@ -465,6 +468,28 @@ describe('对局页的自由球', () => {
     expect(wrapper.find('.pm__ballin').exists()).toBe(false)
     expect(wrapper.find('.pm__place').exists()).toBe(false)
     expect(wrapper.find('.pm__reopen').exists()).toBe(false)
+  })
+})
+
+describe('对局页的瞄准拖动', () => {
+  // 手机上瞄准是「按住 → 拖到目标 → 松手」。松手那一刻的坐标只是机械上的
+  // 落点，手指抬起时常带几像素侧向漂移（个别移动端浏览器在 pointercancel
+  // 时甚至给 0,0）。拿它再算一次角度，玩家看到的就是「瞄准好了，一松手跳一下」。
+  it('抬手不改变方向：方向停在最后一次拖动的位置', async () => {
+    const { wrapper, push } = await mountPage()
+    push({ type: 'state', ts: 0, data: snapshot() })
+    await flushPromises()
+
+    // 母球在 (0.5, 0.5)，拖到 (0.7, 0.8)：方向是 atan2(0.3, 0.2)。
+    await wrapper.find('.tbl-aim-move').trigger('click')
+    await flushPromises()
+    const moved = Number(wrapper.find('.tbl-wrap').attributes('data-phi'))
+    expect(moved).toBeCloseTo(Math.atan2(0.3, 0.2), 4)
+
+    // 抬手落在完全相反的方向（0.1, 0.1）。方向必须一点不动。
+    await wrapper.find('.tbl-aim-end').trigger('click')
+    await flushPromises()
+    expect(Number(wrapper.find('.tbl-wrap').attributes('data-phi'))).toBeCloseTo(moved, 4)
   })
 })
 

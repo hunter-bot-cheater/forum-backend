@@ -1444,6 +1444,13 @@ function moveGhost(point: Point) {
 //
 // 触摸屏上没有悬停，这是手机端唯一的瞄准方式；鼠标上它等同于按住跟手。
 // 锁定之后一律不理，理由同 onHover。
+//
+// 抬手（phase 为 end）不再重算角度。手指离开台面那一刻没有新的位置信息，
+// pointerup 的坐标只是机械上的最后落点，还常带几像素漂移（手指抬起时会
+// 侧向带一下；个别移动端浏览器在 pointercancel 时直接给 0,0）。
+// 拿它再 aimTowards 一次，玩家看到的就是「瞄准好了，一松手角度跳一下」。
+// 方向就停在最后一次 move 的位置，那才是玩家真正指过的地方。
+// 鼠标端不受影响：点击的位移小于 4px，走的是 tap 分支，本来就不会转角度。
 function onDrag(payload: PoolDrag) {
   // 摆球模式下拖动就是挪球，抬手那一下落位。
   // 不做「拖动中实时落位」：一帧一条请求没有意义，服务端只认最后那个点。
@@ -1463,6 +1470,9 @@ function onDrag(payload: PoolDrag) {
     return
   }
   if (!canAim.value || aimLocked.value || !payload.point) {
+    return
+  }
+  if (payload.phase === 'end') {
     return
   }
   aimTowards(payload.point)
