@@ -12,21 +12,21 @@ import type { ShotEvent } from './protocol'
 import { BALL_RADIUS, CUSHION_SEGMENTS, POCKETS } from './table'
 import type { BallState, ShotParams } from './types'
 
-// 重力与摩擦系数。u_s 是滑动摩擦、u_r 是纯滚动摩擦。
+// 重力与摩擦系数。u_s 是滑动摩擦、u_r 是纯滚动摩擦（台呢阻尼）。
 //
-// 六个系数全部取 pooltool 的默认值（objects/ball/params.py 的 BallParams），
-// 自己不再另调：u_s 0.2、u_r 0.01、e_b 0.95、e_c 0.85、f_c 0.2、g 9.81。
+// 除 u_r 之外全部取 pooltool 的默认值（objects/ball/params.py 的 BallParams）：
+// u_s 0.2、e_b 0.95、e_c 0.85、f_c 0.2、g 9.81。
 //
-// 用户 2026-11-23 要求「速度和阻尼改为和那个项目一致」。此前为了让球「走得慢
-// 一点」把出杆速度整条缩了 0.7、把 u_r 压到 0.009，那是拿系数去凑观感；
-// 现在回到参考值，手感调整只走「力度条给多少力」这一条路。
+// u_r 当前 0.1，是用户 2026-11-23 要求「阻尼调至 0.1 看看」的结果：比 pooltool
+// 的 0.01 大一个数量级，球心减速度 0.98 m/s²，满力一杆也只滚三四米就停。
+// 这是试手感的一次取值，不是新基准——真觉得刹得太狠，把它退回 0.01 即可，
+// 出杆速度映射（0.05–7 m/s）不用跟着动。
 //
-// u_r 从 0.009 回到 0.01，减速从 0.088 变成 0.098 m/s²：同样的初速滚得稍微
-// 短一点、停得干脆一点。滑动摩擦 u_s 只在出杆后那几十毫秒里起作用
-// （中心击球降到 5/7 v0 就转纯滚动），它与 u_r 是两件事，不要混着调。
+// 注意 u_r 必须小于 u_s：滑动阶段用的是 u_s，纯滚动之后换成 u_r，两者反过来的话
+// 「滚动比滑动还费劲」，物理上讲不通，手感上会变成球一落稳就急刹。
 const GRAVITY = 9.81
 const SLIDE_FRICTION = 0.2
-const ROLL_FRICTION = 0.01
+const ROLL_FRICTION = 0.1
 
 // 滑动阶段球心减速度，以及转动让它提前进入纯滚动的比例。
 // 球是实心球，转动惯量 2/5 mR²：滑动摩擦让球心减速 μg 的同时，
