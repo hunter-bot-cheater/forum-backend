@@ -991,14 +991,17 @@ func validateParams(params sim.CueParams) error {
 // 帧数或事件数量级不对时，广播出去的 shot 帧会把每个观战者的发件箱撑爆，
 // 最后表现成所有人一起掉线，而日志里只有一片「send buffer full」。
 const (
-	// maxShotFrames 按「20 秒 × 120 Hz」再加一倍余量。本地模型的关键帧是
+	// maxShotFrames 按「24 秒 × 120 Hz」再加一倍余量。本地模型的关键帧是
 	// 120Hz（为了在 120Hz 屏上播放顺滑，见 web/src/game/predict.ts 的 FRAME_DT），
-	// 时长上限 20 秒，正常一杆七八百帧，四千八已经宽得离谱。
+	// 时长上限 24 秒（阻尼减半后满力单球要滚近 18 秒），正常一杆七八百帧，
+	// 四千八对应 24 秒的 2880 帧仍宽出一截。
 	maxShotFrames = 4800
 	// maxShotEvents 是一杆里最多几条碰撞事件。开球实测一两百条。
 	maxShotEvents = 1200
-	// maxShotSeconds 是一杆允许的最长时长，比本地模型的 20 秒上限略宽一点。
-	maxShotSeconds = 25.0
+	// maxShotSeconds 是一杆允许的最长时长，比本地模型的 24 秒上限再宽 6 秒：
+	// 客户端按自己的时钟累加，与上行里的 duration 会有毫秒级出入，
+	// 贴着上限走的话合法长杆会被误拒。
+	maxShotSeconds = 30.0
 	// shotCoordSlack 是终局坐标允许越过台面内沿的距离。
 	// 球落袋时球心就停在袋口圆心上，而袋口圆心本来在台面外十几毫米，
 	// 所以不能按「必须落在台面内」判，否则每一杆有球进袋都会被拒。
