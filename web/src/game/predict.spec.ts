@@ -82,11 +82,13 @@ describe('本地预测', () => {
     const predicted = predictShot(toBalls(shot), shot.params)!
 
     // 这一条盯的是「像在玻璃上打球」那个毛病：摩擦调小、速度上限调高都会
-    // 让这一杆拖到四五秒，球一直在台上爬。区间取在 0.3~0.7 倍是给以后
-    // 微调手感留的余地，超出就说明参数被改回了原来的量级。
+    // 让这一杆拖到四五秒，球一直在台上爬。上界从 0.7 放到 0.8，是因为后来
+    // 碰撞改成「分离时带一半滚动」（predict.ts 的 COLLISION_SPIN_CARRY），
+    // 同一杆多滚一截，比例从 0.6 抬到 0.68。要留出微调的余地，
+    // 但也不能再往上——超过 0.8 就说明参数又回到 pooltool 那个量级了。
     const ratio = predicted.duration / shot.duration
     expect(ratio).toBeGreaterThan(0.3)
-    expect(ratio).toBeLessThan(0.7)
+    expect(ratio).toBeLessThan(0.8)
   })
 
   it('轻推：母球一路减速，最后一帧已经停下', () => {
@@ -105,7 +107,7 @@ describe('本地预测', () => {
       expect(Number.isFinite(cue[2])).toBe(true)
       if (previous) {
         const step = Math.hypot(cue[1] - previous.x, cue[2] - previous.y)
-        // 一帧 1/60 秒，出射速度上限 7 m/s，单帧位移不可能超过 0.12 米；
+        // 一帧 1/60 秒，出射速度上限 4.4 m/s，单帧位移不可能超过 0.08 米；
         // 卡到 0.2 米是留了撞库瞬间换向的余量。超过就说明积分炸了（位置发散），
         // 画面上是球在乱飞。
         expect(step).toBeLessThan(0.2)

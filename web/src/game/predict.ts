@@ -55,6 +55,26 @@ const BALL_RESTITUTION = 0.975
 const CUSHION_RESTITUTION = 0.928
 const CUSHION_FRICTION = 0.1
 
+// 碰撞分离时球带着多少滚动（0 到 1，按当时的速度算）。
+//
+// 刚性碰撞模型里接触是零时长、切向完全打滑，所以撞完 spin 归零，
+// 接下来球得靠滑动摩擦重新把自转带起来：速度要掉到 5/7（动能少一半）
+// 才回到纯滚动。刚体碰撞理论确实是这个结论，但手感上就是「撞完就泄气」，
+// 被撞的球蹿出去一下立刻软掉。
+//
+// 真实台球的接触有几百微秒，台呢在这段时间里已经在带动球，分离时并不是
+// 完全不打转。这里给一半的滚动：速度损失从 28.6% 收到 14.3%，
+// 恰好等于把这一段动能损耗也减半，和上一轮恢复系数的口径一致。
+const COLLISION_SPIN_CARRY = 0.5
+
+// spinAfterImpact 算碰撞后这颗球该带多少滚动速度。
+//
+// spin 是标量，语义是「沿当前运动方向已经建立起来的滚动线速度」，
+// 所以直接按合速度乘比例，不需要跟原来的方向扯上关系。
+function spinAfterImpact(vx: number, vy: number): number {
+  return Math.sqrt(vx * vx + vy * vy) * COLLISION_SPIN_CARRY
+}
+
 // 力度到母球出射速度的映射。上限按参考视频量的：开球那一杆母球在
 // 842→511px 的四帧里匀速走 63px/帧，29.97fps 下是 1900px/s，
 // 除以球直径 25px 得 76 D/s，换成我们 57.15mm 的球就是 4.34 m/s，取 4.4。
@@ -324,9 +344,9 @@ function separate(a: SimBall, b: SimBall): boolean {
   a.vy -= impulse * ny
   b.vx += impulse * nx
   b.vy += impulse * ny
-  // 撞击后接触点重新打滑，两颗球的滚动速度都要重算。
-  a.spin = 0
-  b.spin = 0
+  // 撞击后接触点重新打滑，但分离时已带着一部分滚动（见 COLLISION_SPIN_CARRY）。
+  a.spin = spinAfterImpact(a.vx, a.vy)
+  b.spin = spinAfterImpact(b.vx, b.vy)
   return true
 }
 
@@ -416,9 +436,11 @@ function cushionCheck(ball: SimBall, trace: SimTrace): void {
     hit = true
   }
 
-  // 撞库后滚动方向变了，原来的滚动速度不再沿着新方向，按重新打滑处理。
+  // 撞库后滚动方向变了，原来的滚动速度不再沿着新方向。这里与球球碰撞
+  // 同样按「分离时已带一部分滚动」处理，否则撞库回来的球要多滑掉一截速度，
+  // 翻袋和走位会比撞球明显更短，同一次碰撞在两种情形下手感不一致。
   if (hit) {
-    ball.spin = 0
+    ball.spin = spinAfterImpact(ball.vx, ball.vy)
     // 一条 event 就够：规则只关心「哪颗球碰过库」与「碰库发生在首碰之后」，
     // 同一颗球连撞两条库边不需要各记一条。
     emit(trace, 'cushion', ball.id, '')
@@ -447,7 +469,9 @@ function reflect(ball: SimBall, nx: number, ny: number): void {
 // applyFriction 按「滑动还是滚动」扣速度。
 //
 // 两档差二十倍，选错档的后果很直观：一直按滑动扣，球推两米就停；
-// 一直按滚动扣，球会绕着台子滚十几圈。真实情况是滑动到 5/7 初速后转滚动。
+// 一直按滚动扣，球会绕着台子滚十几圈。真实情况是滑动一段后转滚动：
+// 出杆瞬间完全不打转，要滑到 5/7 初速才滚起来；碰撞后已经带着一半滚动
+// （见 COLLISION_SPIN_CARRY），滑到 6/7 左右就接上了。
 function applyFriction(ball: SimBall, dt: number): void {
   const speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy)
   if (speed <= STOP_SPEED) {
