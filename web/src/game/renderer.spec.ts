@@ -112,17 +112,17 @@ describe('drawScene：球', () => {
     }
   })
 
-  it('球按物理直径画：球心距等于两个半径时，画面上的球正好相切', () => {
+  it('球按物理直径乘放大系数画：相切的球会按系数压掉一部分', () => {
     const ctx = createFakeCtx()
     drawScene(ctx, { width: 390, height: 844 }, { balls: rackState() }, 1)
     const draw = ctx.calls.find((c) => c.method === 'drawImage')!
     const t = fitTable({ width: 390, height: 844 }, TABLE_PADDING)
-    // 摆球是紧密相切的，球心屏距就是两个半径的像素长度。
-    // 画出来的直径一旦超过它，相邻两颗球就会互相压住——玩家看到的
-    // 是「球穿在一起」，只能怀疑碰撞体积算错了。
+    // 摆球是紧密相切的，球心屏距就是两个物理半径的像素长度；
+    // 画出来的直径是它乘 BALL_DRAW_SCALE。系数大于 1 时相邻球会互相压住，
+    // 这是为了手机上球够大而做的取舍，不是碰撞体积算错。
     const gap = metersToPx(t, BALL_RADIUS * 2)
-    expect(Number(draw.args[3])).toBeCloseTo(gap, 6)
-    expect(BALL_DRAW_SCALE).toBe(1)
+    expect(Number(draw.args[3])).toBeCloseTo(gap * BALL_DRAW_SCALE, 6)
+    expect(BALL_DRAW_SCALE).toBe(1.2)
   })
 
   it('球的绘制发生在影子之后：影子都在第一颗球之前', () => {
