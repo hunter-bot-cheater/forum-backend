@@ -991,10 +991,10 @@ func validateParams(params sim.CueParams) error {
 // 帧数或事件数量级不对时，广播出去的 shot 帧会把每个观战者的发件箱撑爆，
 // 最后表现成所有人一起掉线，而日志里只有一片「send buffer full」。
 const (
-	// maxShotFrames 按「20 秒 × 60 Hz」再加一倍余量。本地模型的关键帧是
-	// 60Hz（为了播放顺滑，见 web/src/game/predict.ts 的 FRAME_DT），
-	// 时长上限 20 秒，正常一杆三四百帧，两千四已经宽得离谱。
-	maxShotFrames = 2400
+	// maxShotFrames 按「20 秒 × 120 Hz」再加一倍余量。本地模型的关键帧是
+	// 120Hz（为了在 120Hz 屏上播放顺滑，见 web/src/game/predict.ts 的 FRAME_DT），
+	// 时长上限 20 秒，正常一杆七八百帧，四千八已经宽得离谱。
+	maxShotFrames = 4800
 	// maxShotEvents 是一杆里最多几条碰撞事件。开球实测一两百条。
 	maxShotEvents = 1200
 	// maxShotSeconds 是一杆允许的最长时长，比本地模型的 20 秒上限略宽一点。
@@ -1056,10 +1056,11 @@ func validShotCoord(x, y float64) bool {
 
 // insideTable 判断一个坐标是不是落在台面内。
 //
-// 台面内沿是 0.9906 × 1.9812，但母球半径 28.575mm，球心最多只能贴到离库边一个半径处。
+// 台面内沿是 0.9906 × 1.9812，但球心最多只能贴到离库边一个球半径处。
+// 半径与前端 table.ts 的 BALL_RADIUS 是同一个数（标准球的 1.2 倍），
 // 判定留 1mm 余量，避免玩家把球摆在恰好擦库的位置被拒。
 func insideTable(x, y float64) bool {
-	const radius = 0.028575
+	const radius = 0.03429
 	const margin = 0.001
 	return x >= radius-margin && x <= tableWidth-radius+margin &&
 		y >= radius-margin && y <= tableLength-radius+margin

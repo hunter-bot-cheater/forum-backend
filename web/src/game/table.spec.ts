@@ -64,11 +64,15 @@ describe('袋口', () => {
     }
   })
 
-  it('尺寸按参考图的比例：洞 2.17 球径，角袋 2.08、中袋 2.25', () => {
+  it('袋口开口按球径换算：洞 1.81 球径，角袋 1.73、中袋 1.88', () => {
+    // 袋口本身是按「标准球（直径 57.15mm）」的参考图定的：洞 2.17 球径、
+    // 角袋 2.08、中袋 2.25。后来为了让手机屏幕上看得清，球放大到 68.58mm
+    // （见 BALL_RADIUS），袋口尺寸没动，比例就降到下面这组。
+    // 这条断言锁的是「袋口尺寸别被顺手改掉」，不是「比例必须是 2.17」。
     const d = BALL_RADIUS * 2
-    expect((POCKETS[0].radius * 2) / d).toBeCloseTo(2.17, 1)
-    expect(CORNER_MOUTH / d).toBeCloseTo(2.08, 1)
-    expect(SIDE_MOUTH / d).toBeCloseTo(2.25, 1)
+    expect((POCKETS[0].radius * 2) / d).toBeCloseTo(1.81, 1)
+    expect(CORNER_MOUTH / d).toBeCloseTo(1.73, 1)
+    expect(SIDE_MOUTH / d).toBeCloseTo(1.88, 1)
   })
 })
 

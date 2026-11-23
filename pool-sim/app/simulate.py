@@ -13,12 +13,15 @@ import math
 import time
 
 import pooltool as pt
+import attrs
 from pooltool.evolution import continuize, simulate
 
 from .schemas import BallIn, BallOut, CueIn, EventOut, FrameOut, SimulateRequest, SimulateResponse
 
-# 球半径，与前端 web/src/game/table.ts 的 BALL_RADIUS 保持同一个数。
-BALL_RADIUS = 0.028575
+# 球半径，与前端 web/src/game/table.ts 的 BALL_RADIUS 保持同一个数：
+# 标准球（28.575mm）放大两成，为了让手机屏幕上的球看得清。
+# 它同时影响两处：z 的换算（球底 → 球心）与下面 RACK 的摆球间距。
+BALL_RADIUS = 0.03429
 
 # 落袋状态码，取自 pooltool 的 BallState.s（0 静止 / 1 旋转 / 2 滑动 / 3 滚动 / 4 落袋）。
 POCKETED = 4
@@ -39,21 +42,21 @@ _TABLE = pt.Table.default()
 # 一份真实的摆球比手工编的球位更能代表线上会遇到的情况。
 RACK_EIGHTBALL = [
     BallIn(id="cue", x=0.594371, y=0.455658),
-    BallIn(id="4", x=0.495301, y=1.485928),
-    BallIn(id="12", x=0.466705, y=1.535447),
-    BallIn(id="5", x=0.523904, y=1.535439),
-    BallIn(id="9", x=0.552501, y=1.584991),
-    BallIn(id="8", x=0.495308, y=1.585009),
-    BallIn(id="7", x=0.438092, y=1.584971),
-    BallIn(id="15", x=0.409471, y=1.634507),
-    BallIn(id="1", x=0.466716, y=1.634516),
-    BallIn(id="13", x=0.523894, y=1.634524),
-    BallIn(id="3", x=0.581132, y=1.634539),
-    BallIn(id="10", x=0.609732, y=1.684068),
-    BallIn(id="2", x=0.552511, y=1.684074),
-    BallIn(id="11", x=0.495296, y=1.684069),
-    BallIn(id="14", x=0.438113, y=1.684064),
-    BallIn(id="6", x=0.380883, y=1.68409),
+    BallIn(id="4", x=0.4953, y=1.4859),
+    BallIn(id="12", x=0.46101, y=1.545292),
+    BallIn(id="5", x=0.52959, y=1.545292),
+    BallIn(id="7", x=0.42672, y=1.604684),
+    BallIn(id="8", x=0.4953, y=1.604684),
+    BallIn(id="9", x=0.56388, y=1.604684),
+    BallIn(id="15", x=0.39243, y=1.664076),
+    BallIn(id="1", x=0.46101, y=1.664076),
+    BallIn(id="13", x=0.52959, y=1.664076),
+    BallIn(id="3", x=0.59817, y=1.664076),
+    BallIn(id="6", x=0.35814, y=1.723468),
+    BallIn(id="14", x=0.42672, y=1.723468),
+    BallIn(id="11", x=0.4953, y=1.723468),
+    BallIn(id="2", x=0.56388, y=1.723468),
+    BallIn(id="10", x=0.63246, y=1.723468),
 ]
 
 
@@ -131,6 +134,11 @@ def build_system(req: SimulateRequest) -> pt.System:
     system = pt.System(cue=pt.Cue.default(), table=_TABLE, balls=balls)
     # 球集合决定球的质量与半径参数。用默认的 pooltool_pocket 与前端画的球一致。
     system.set_ballset(pt.objects.ball.sets.BallSet("pooltool_pocket"))
+    # set_ballset 会把每颗球的参数重置成球集默认值（半径 28.575mm），
+    # 与线上放大两成的球对不上：半径不对，接触距离、摩擦都跟着偏。
+    # BallParams 是 frozen 的 attrs 类，只能整体换一个新的。
+    for ball in system.balls.values():
+        ball.params = attrs.evolve(ball.params, R=BALL_RADIUS)
     return system
 
 

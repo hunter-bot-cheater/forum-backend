@@ -20,11 +20,11 @@ const (
 	gamePongWait   = 40 * time.Second
 	gamePingPeriod = (gamePongWait * 5) / 8
 	// 上行已经不只是杆法参数：客户端会把整杆算好一起发上来（轨迹、事件、终局）。
-	// 开球最重，16 颗球 85 帧约 45 KiB，4 KiB 会让这一杆直接触发库的读上限、
-	// 整条连接被断开。512 KiB 是给「客户端算得比预想更细」留的余量，
+	// 开球最重：16 颗球、120Hz 关键帧、一杆六七秒，实测 JSON 约 130 KiB；
+	// 撞库多、球一直滚的长杆会到四百多 KiB。1 MiB 给这些留了一倍余量，
 	// 同时仍然挡得住异常大包（形状与量级在 actor 里另有校验）。
-	gameMaxMessage = 512 << 10
-	// 发件箱容量。一杆会连发 shot（60KB）、foul、turn 三条，
+	gameMaxMessage = 1024 << 10
+	// 发件箱容量。一杆会连发 shot（开球约 130KB）、foul、turn 三条，
 	// 对手的客户端偶尔读慢一点，32 条足够撑过一次出杆。
 	gameSendBuffer = 32
 )
