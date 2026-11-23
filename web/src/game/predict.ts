@@ -76,6 +76,25 @@ const CUSHION_FRICTION = 0.0487
 // 恰好等于把这一段动能损耗也减半，和上一轮恢复系数的口径一致。
 const COLLISION_SPIN_CARRY = 0.5
 
+// 加塞（杆法）三个系数。协议里的 a 是左右旋、b 是高低杆，都是 -1 到 1。
+//
+// 这是二维模型，只能表达「绕竖直轴的侧旋」与「沿行进方向的高低杆」两种效果，
+// 不画弧线（竖直轴的旋转本来也不产生弧线，弧线要靠抬杆的横轴旋转）。
+//
+// a 的物理意义是「库边把它往切线方向带多少」：出杆时按球速给一份切向速度，
+// 撞库时把这份速度的一部分加成到反弹后的切向分量上，于是顺塞放大反弹角、
+// 反塞收窄反弹角，同一副塞在相对的两条库上方向相反——真实球台就是这样。
+//
+// b 在母球第一次撞球时结算：正高低杆让母球跟着往前送，负高低杆把它拉回来。
+// 只给母球，且只用一次，用完清零——被撞的球不该继承母球的高低杆。
+//
+// 三个数都不碰目标球的出球方向。目标球永远沿球心连线走，引导线才画得准；
+// 真实台球还有「甩球」（侧旋把目标球推偏一点点），这里不建模。
+const SIDE_SPIN_GAIN = 0.5
+const CUSHION_SPIN_GRIP = 0.5
+const CUSHION_SPIN_DECAY = 0.55
+const FOLLOW_GAIN = 0.45
+
 // spinAfterImpact 算碰撞后这颗球该带多少滚动速度。
 //
 // spin 是标量，语义是「沿当前运动方向已经建立起来的滚动线速度」，
@@ -105,6 +124,22 @@ const SPEED_MAX = 4.4
 // 想更极致可以再往下收，但 1 mm/s 已经是「位移比像素还小」的量级，
 // 再小只会让球在最后半秒多积几百帧。
 const STOP_SPEED = 0.001
+
+// 收尾段的速度门槛（见 applyFriction）。3 cm/s 在手机上大约每秒十一像素，
+// 是「明显还看得出在动」的量级：从这儿开始往下收减速度，球就会有一段
+// 越走越慢的过渡，而不是匀速挪到某一帧忽然不动。再往上提意义不大——
+// 更高速就开始收，会让正常滚动也显得发飘。
+const CREEP_SPEED = 0.03
+
+// 收尾段的减速下限（相对正常滚动减速的比例）。
+//
+// 只按速度比例收而不设下限，减速度会一路趋近于零，球在最后几毫米上爬一秒
+// 多——观感从「撞墙」变成「粘住」，一样不对。压到 0.35 之后整条尾巴约 0.6 秒：
+// 前段明显在减速，后段干脆停下，中间没有可以指出来的转折点。
+const CREEP_FLOOR = 0.35
+
+// 侧旋的自然衰减率（每秒），见 applyFriction。
+const SIDE_DECAY = 0.8
 
 // 关键帧间隔。原来跟着 pool-sim 的 sample_hz=30，播放时靠 animator 线性
 // 插值补到屏幕刷新率；但插值是直线，球撞库换向的那一下仍然能看出折角，
@@ -150,13 +185,24 @@ const MAX_DURATION = 24
 
 // SimBall 是预测里的一颗球。spin 是「滚动线速度」，与速度同向。
 // 速度大于 spin 说明接触点在打滑，摩擦要用滑动的那一档。
+//
+// side 是侧旋（绕竖直轴），记成「库边能把它换成多少切向速度」，单位 m/s；
+// bias 是高低杆残留（-1 到 1），只在母球上非零，第一次撞球时用掉。
+// 这两个字段加起来才是玩家说的「加塞」，物理口径见上面那组常量的注释。
+//
+// px / py 是「本步开始前」的位置，只在一步之内有效：球球碰撞要用它解出
+// 这一步里真正碰上的那一刻（见 contactTime），碰完就重新记。
 interface SimBall {
   id: string
   x: number
   y: number
+  px: number
+  py: number
   vx: number
   vy: number
   spin: number
+  side: number
+  bias: number
   onTable: boolean
 }
 
@@ -195,7 +241,19 @@ export function predictShot(
     if (!ball.on_table) {
       continue
     }
-    sim.push({ id: ball.id, x: ball.x, y: ball.y, vx: 0, vy: 0, spin: 0, onTable: true })
+    sim.push({
+      id: ball.id,
+      x: ball.x,
+      y: ball.y,
+      px: ball.x,
+      py: ball.y,
+      vx: 0,
+      vy: 0,
+      spin: 0,
+      side: 0,
+      bias: 0,
+      onTable: true,
+    })
   }
   const cue = sim.find((ball) => ball.id === 'cue')
   if (!cue) {
@@ -204,10 +262,15 @@ export function predictShot(
 
   // 出杆：把这杆的速度直接给母球。中心击球时它先滑动再滚动，
   // 高低杆改变的是旋转，对二维轨迹影响很小，这里不建模。
+  //
+  // 现在建模了：b 不给初始速度（那一份要等撞球才体现），只挂在母球身上；
+  // a 直接按球速折算成侧旋。两者都在 ±1 里，服务端也按这个范围校验。
   const speed = SPEED_MIN + params.power * (SPEED_MAX - SPEED_MIN)
   cue.vx = Math.cos(params.phi) * speed
   cue.vy = Math.sin(params.phi) * speed
   cue.spin = 0
+  cue.side = params.a * speed * SIDE_SPIN_GAIN
+  cue.bias = params.b
 
   const trace: SimTrace = { events: [{ t: 0, type: 'stick_ball', a: 'cue', b: 'cue' }], t: 0 }
   const frames: ShotFrame[] = [snapshot(sim, 0)]
@@ -276,6 +339,9 @@ function step(sim: SimBall[], dt: number, trace: SimTrace): void {
     if (!ball.onTable) {
       continue
     }
+    // 记下这一步的起点，碰撞要按「起点 + 速度」解出真实接触时刻。
+    ball.px = ball.x
+    ball.py = ball.y
     ball.x += ball.vx * dt
     ball.y += ball.vy * dt
   }
@@ -301,15 +367,18 @@ function step(sim: SimBall[], dt: number, trace: SimTrace): void {
 // 留下的重叠，没有任何接触时它就是白跑一遍全量比较。
 // 开球那一瞬间六七个球同时接触，两轮能把球堆摆平；平时一颗球在台面中间
 // 滚，第二轮根本不会启动。
+//
+// 第二轮不解精确接触时刻（exact 为 false）：那时速度已经换过一次，
+// 再用「起点 + 新速度」去回推接触时刻，得到的是不存在的时间点。
 function resolveBallCollisions(sim: SimBall[], trace: SimTrace): void {
-  const touched = separateRound(sim, trace)
+  const touched = separateRound(sim, trace, true)
   if (touched) {
-    separateRound(sim, trace)
+    separateRound(sim, trace, false)
   }
 }
 
 // separateRound 跑一轮两两检测，返回这一轮是否发生过接触。
-function separateRound(sim: SimBall[], trace: SimTrace): boolean {
+function separateRound(sim: SimBall[], trace: SimTrace, exact: boolean): boolean {
   let touched = false
   for (let i = 0; i < sim.length; i += 1) {
     const a = sim[i]
@@ -327,7 +396,7 @@ function separateRound(sim: SimBall[], trace: SimTrace): boolean {
       if (aStill && b.vx === 0 && b.vy === 0) {
         continue
       }
-      if (separate(a, b)) {
+      if (separate(a, b, exact)) {
         touched = true
         emit(trace, 'ball_ball', a.id, b.id)
       }
@@ -337,39 +406,149 @@ function separateRound(sim: SimBall[], trace: SimTrace): boolean {
 }
 
 // separate 把一对相撞的球推开并交换法向速度，返回是否真的接触过。
-function separate(a: SimBall, b: SimBall): boolean {
+//
+// exact 为真时先解出这一步内真正相切的时刻，把两颗球退回那一刻再算冲量。
+// 不退回去的话，法向用的是「整步走完、已经互相陷进去」的球心连线，
+// 母球满速一步走 18.3 毫米，球心连线被这半个球半径的穿透量带偏，
+// 打薄球能偏出五到九度——玩家看到的就是「引导线指这里，球飞那边」。
+function separate(a: SimBall, b: SimBall, exact: boolean): boolean {
+  const contact = BALL_RADIUS * 2
+  const dxMove = b.x - a.x
+  const dyMove = b.y - a.y
+  // 先用平方比，绝大多数（没碰上的）球对在这里就返回，省一次开方。
+  if (dxMove * dxMove + dyMove * dyMove >= contact * contact) {
+    return false
+  }
+
+  // 本步内「还要走多久才真的碰上」。退回这段时间后，球心连线就是接触法向。
+  // 退回期间球还没交换速度，所以在冲量之后再按新速度把这段时间补走，
+  // 位置不会凭空少掉一截。
+  let rest = 0
+  if (exact) {
+    const toi = contactTime(a, b)
+    if (toi > 0) {
+      rest = STEP_DT - toi
+      a.x -= a.vx * rest
+      a.y -= a.vy * rest
+      b.x -= b.vx * rest
+      b.y -= b.vy * rest
+    }
+  }
+
   const dx = b.x - a.x
   const dy = b.y - a.y
   const distanceSq = dx * dx + dy * dy
-  const contact = BALL_RADIUS * 2
-  // 先用平方比，绝大多数（没碰上的）球对在这里就返回，省一次开方。
-  if (distanceSq >= contact * contact || distanceSq < 1e-18) {
-    return false
+  if (distanceSq < 1e-18) {
+    // 两颗球的圆心重合，没有可用的法向。这一步当作碰上但不动，
+    // 下一步它们按各自速度分开，再判一次。
+    return true
   }
   const distance = Math.sqrt(distanceSq)
   const nx = dx / distance
   const ny = dy / distance
+
+  // 走到接触时刻之后一般不再重叠；仍然重叠（起点就贴在一起、或者浮点误差）
+  // 才各退一半把它摆平。
   const overlap = contact - distance
-  a.x -= nx * overlap * 0.5
-  a.y -= ny * overlap * 0.5
-  b.x += nx * overlap * 0.5
-  b.y += ny * overlap * 0.5
+  if (overlap > 0) {
+    a.x -= nx * overlap * 0.5
+    a.y -= ny * overlap * 0.5
+    b.x += nx * overlap * 0.5
+    b.y += ny * overlap * 0.5
+  }
 
   // 只看接近速度：已经分开的两颗球不再交换一次速度，
   // 否则贴在一起的球会自己抖起来。
   const relative = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny
-  if (relative > 0) {
-    return true
+  if (relative < 0) {
+    // 母球的高杆／低杆要在换速度之前记下来：换完之后方向已经变成切线，
+    // 再想「沿来球方向往回拉」就没有依据了。
+    const aIn = { vx: a.vx, vy: a.vy }
+    const bIn = { vx: b.vx, vy: b.vy }
+
+    const impulse = (-(1 + BALL_RESTITUTION) * relative) / 2
+    a.vx -= impulse * nx
+    a.vy -= impulse * ny
+    b.vx += impulse * nx
+    b.vy += impulse * ny
+    // 撞击后接触点重新打滑，但分离时已带着一部分滚动（见 COLLISION_SPIN_CARRY）。
+    a.spin = spinAfterImpact(a.vx, a.vy)
+    b.spin = spinAfterImpact(b.vx, b.vy)
+
+    applyFollow(a, aIn.vx, aIn.vy)
+    applyFollow(b, bIn.vx, bIn.vy)
   }
-  const impulse = (-(1 + BALL_RESTITUTION) * relative) / 2
-  a.vx -= impulse * nx
-  a.vy -= impulse * ny
-  b.vx += impulse * nx
-  b.vy += impulse * ny
-  // 撞击后接触点重新打滑，但分离时已带着一部分滚动（见 COLLISION_SPIN_CARRY）。
-  a.spin = spinAfterImpact(a.vx, a.vy)
-  b.spin = spinAfterImpact(b.vx, b.vy)
+
+  // 补走「接触时刻 → 步末」的那段时间。
+  if (rest > 0) {
+    a.x += a.vx * rest
+    a.y += a.vy * rest
+    b.x += b.vx * rest
+    b.y += b.vy * rest
+  }
   return true
+}
+
+// applyFollow 结算母球的高低杆：撞完给一份沿「来球方向」的残留速度。
+//
+// bias 只能是母球上的非零值（其他球初始化时就是 0），所以这里不用另外判身份。
+// 正数（高杆）顺着来球方向送出去，负数（低杆）沿反方向拉回来；
+// 力度按撞前球速乘 FOLLOW_GAIN，不按出杆时的初速——母球滚到目标球时
+// 已经掉了一截速度，用初速算会让远距离的低杆夸张得像倒车。
+//
+// 用完之后立刻清零：一颗球只有一次「第一碰」，撞第二颗时已经没有杆法了。
+function applyFollow(ball: SimBall, inVx: number, inVy: number): void {
+  if (ball.bias === 0) {
+    return
+  }
+  const before = Math.sqrt(inVx * inVx + inVy * inVy)
+  const bias = ball.bias
+  ball.bias = 0
+  if (before <= 0) {
+    return
+  }
+  const kick = bias * FOLLOW_GAIN * before
+  ball.vx += (inVx / before) * kick
+  ball.vy += (inVy / before) * kick
+  // 低杆是「反着转」，进滑动档慢慢被台呢吃掉；高杆顺着滚，直接接上滚动。
+  const after = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy)
+  ball.spin = bias > 0 ? after * COLLISION_SPIN_CARRY : 0
+}
+
+// contactTime 解出本步内两球刚好相切（球心距 = 2R）的时刻，单位秒。
+//
+// 球心相对位置按 q(t) = q0 + w·t 走，令 |q(t)| = 2R 就是一个一元二次方程，
+// 取较小的那个根。返回 0 表示「这一刻没有可退的余量」：
+// 起点已经贴着、还在远离、或者这一步内根本擦不到——三种情况都按现行位置碰撞。
+//
+// 公式里 q 取「a 减 b」，所以 q·w > 0 是互相远离。
+function contactTime(a: SimBall, b: SimBall): number {
+  const contact = BALL_RADIUS * 2
+  const qx = a.px - b.px
+  const qy = a.py - b.py
+  const wx = a.vx - b.vx
+  const wy = a.vy - b.vy
+  const far = qx * qx + qy * qy - contact * contact
+  if (far <= 0) {
+    return 0
+  }
+  const ww = wx * wx + wy * wy
+  if (ww < 1e-18) {
+    return 0
+  }
+  const qw = qx * wx + qy * wy
+  if (qw >= 0) {
+    return 0
+  }
+  const disc = qw * qw - ww * far
+  if (disc < 0) {
+    return 0
+  }
+  const t = (-qw - Math.sqrt(disc)) / ww
+  if (t <= 0 || t >= STEP_DT) {
+    return 0
+  }
+  return t
 }
 
 // pocketCheck 判断球是否已经进袋，并记一条落袋事件。
@@ -469,23 +648,31 @@ function cushionCheck(ball: SimBall, trace: SimTrace): void {
   }
 }
 
-// reflect 让速度沿法向反弹，并扣掉一点切向速度。
+// reflect 让速度沿法向反弹，扣掉一点切向速度，并把侧旋的一部分换成切向速度。
 //
 // 切向那一项不是可选的：没有它，球撞库会原样弹出，手感像撞到橡皮墙，
 // 而不像撞在包着呢子的橡胶上。
+//
+// 侧旋（加塞）在库边才真正体现价值：库边摩擦往切向推一把，顺塞把反弹角放大、
+// 反塞把它收窄。写成「先把速度拆成法向／切向、再加塞、再扣摩擦、最后合成」，
+// 比原来那种边减边算的写法好读，也省得符号搞混。
 function reflect(ball: SimBall, nx: number, ny: number): void {
   const normal = ball.vx * nx + ball.vy * ny
   if (normal >= 0) {
     return
   }
-  ball.vx -= (1 + CUSHION_RESTITUTION) * normal * nx
-  ball.vy -= (1 + CUSHION_RESTITUTION) * normal * ny
-
+  // 切线方向固定取 (-ny, nx)，与哪一面库无关：同一副塞在相对的两条库上
+  // 方向相反，正是真实球台的表现。
   const tx = -ny
   const ty = nx
-  const tangent = ball.vx * tx + ball.vy * ty
-  ball.vx -= tangent * CUSHION_FRICTION * tx
-  ball.vy -= tangent * CUSHION_FRICTION * ty
+  let tangent = ball.vx * tx + ball.vy * ty
+  tangent += ball.side * CUSHION_SPIN_GRIP
+  tangent *= 1 - CUSHION_FRICTION
+  ball.side *= CUSHION_SPIN_DECAY
+
+  const bounce = -normal * CUSHION_RESTITUTION
+  ball.vx = nx * bounce + tx * tangent
+  ball.vy = ny * bounce + ty * tangent
 }
 
 // applyFriction 按「滑动还是滚动」扣速度。
@@ -494,33 +681,54 @@ function reflect(ball: SimBall, nx: number, ny: number): void {
 // 一直按滚动扣，球会绕着台子滚十几圈。真实情况是滑动一段后转滚动：
 // 出杆瞬间完全不打转，要滑到 5/7 初速才滚起来；碰撞后已经带着一半滚动
 // （见 COLLISION_SPIN_CARRY），滑到 6/7 左右就接上了。
+//
+// 末段还有一层「收尾」：速度掉到 CREEP_SPEED 以下时，减速度按速度比例往下收，
+// 于是最后那一段是渐隐而不是匀速撞墙。匀速减速在数学上没错，可玩家看到的是
+// 「球一直匀速挪，忽然没了」——真实球台上台呢的阻力在极低速时也会变小一点，
+// 视觉上就是球自己慢慢化掉。指数尾巴在 2 cm/s 到 1 mm/s 之间大约要 1 秒、
+// 多走 7 毫米，正好是「看得出来在减速、但看不出在哪一刻停住」的量。
 function applyFriction(ball: SimBall, dt: number): void {
   const speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy)
   if (speed <= STOP_SPEED) {
     ball.vx = 0
     ball.vy = 0
     ball.spin = 0
+    ball.side = 0
     return
+  }
+
+  // 低速时减速度按比例收缩，speed 越低收得越多（柔和的收尾），但不低于 CREEP_FLOOR。
+  let creep = 1
+  if (speed < CREEP_SPEED) {
+    creep = speed / CREEP_SPEED
+    if (creep < CREEP_FLOOR) {
+      creep = CREEP_FLOOR
+    }
   }
 
   let next = speed
   if (ball.spin < speed) {
     // 滑动：球心减速的同时，摩擦把球转起来，直到转动跟上平移。
-    const drop = SLIDE_DECEL * dt
+    const drop = SLIDE_DECEL * dt * creep
     next = speed - drop
     ball.spin += drop * SPIN_GAIN
     if (ball.spin > next) {
       ball.spin = next
     }
   } else {
-    next = speed - ROLL_DECEL * dt
+    next = speed - ROLL_DECEL * dt * creep
     ball.spin = next
   }
+
+  // 侧旋不参与滚动，按同一份阻力慢慢泄掉；完全不管的话，一颗撞了三次库
+  // 还在爬的球会一直带着初速那份塞，反弹角越滚越夸张。
+  ball.side *= 1 - SIDE_DECAY * dt * creep
 
   if (next <= STOP_SPEED) {
     ball.vx = 0
     ball.vy = 0
     ball.spin = 0
+    ball.side = 0
     return
   }
   const scale = next / speed

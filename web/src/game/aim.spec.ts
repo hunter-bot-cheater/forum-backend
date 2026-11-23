@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   adjustPhi,
   aimFromCue,
+  aimGuides,
   normalizePhi,
   phiFromScreenVector,
   rotateByDrag,
@@ -148,6 +149,24 @@ describe('aimFromCue：撞球', () => {
     expect(hit.kind).toBe('ball')
     expect(hit.targetId).toBe('7')
   })
+
+  // 母球贴着另一颗球是常见摆位（轻碰一杆之后就会这样）。
+  // 以前这里会滑到二次方程的远端根上，幽灵球被摆到目标球另一侧，
+  // 线穿过整颗球；照着那条线打，球其实当场就撞上去了。
+  it('母球已经贴着球时当场算命中，不把幽灵球摆到球后面', () => {
+    const touching = ball('3', cue.x + BALL_RADIUS * 2, cue.y)
+    const hit = aimFromCue([cue, touching], 0)
+    expect(hit.kind).toBe('ball')
+    expect(hit.targetId).toBe('3')
+    expect(hit.distance).toBe(0)
+  })
+
+  it('贴着球但朝反方向瞄时不算命中，退回库边', () => {
+    const touching = ball('3', cue.x + BALL_RADIUS * 2, cue.y)
+    const hit = aimFromCue([cue, touching], Math.PI)
+    expect(hit.kind).toBe('cushion')
+    expect(hit.targetId).toBeNull()
+  })
 })
 
 describe('aimFromCue：异常输入', () => {
@@ -225,5 +244,45 @@ describe('screenDirectionOf', () => {
       const d = screenDirectionOf(phi)
       expect(phiFromScreenVector(d.x, d.y)).toBeCloseTo(phi, 9)
     }
+  })
+})
+
+// 引导线的长度必须诚实：画到哪，球就能走到哪。
+// 以前不管前面有没有球，一律画到长度上限或库边，目标球的去路上
+// 五厘米外杵着一颗球时，线会径直穿过去——玩家照着线判断走位，自然对不上。
+describe('aimGuides：被挡住的去路', () => {
+  it('目标球去路上有球时，线止在相切的位置', () => {
+    const target = ball('3', cue.x + 0.15, cue.y)
+    const blocker = ball('4', cue.x + 0.35, cue.y)
+    const phi = 0
+    const hit = aimFromCue([cue, target, blocker], phi)
+    const guides = aimGuides([cue, target, blocker], phi, hit)
+    expect(guides.object).not.toBeNull()
+    if (!guides.object) {
+      return
+    }
+    // 目标球球心到挡路球球心的距离是 0.2 米，相切时球心走 0.2 - 2R。
+    // 线段从目标球前缘画起，长度就等于球心走的这段距离。
+    const length = Math.hypot(
+      guides.object.to.x - guides.object.from.x,
+      guides.object.to.y - guides.object.from.y,
+    )
+    expect(length).toBeCloseTo(0.2 - BALL_RADIUS * 2, 6)
+  })
+
+  it('没有遮挡时不会被截短（仍按厚度与上限走）', () => {
+    const target = ball('3', cue.x + 0.15, cue.y)
+    const phi = 0
+    const hit = aimFromCue([cue, target], phi)
+    const guides = aimGuides([cue, target], phi, hit)
+    expect(guides.object).not.toBeNull()
+    if (!guides.object) {
+      return
+    }
+    const length = Math.hypot(
+      guides.object.to.x - guides.object.from.x,
+      guides.object.to.y - guides.object.from.y,
+    )
+    expect(length).toBeGreaterThan(0.3)
   })
 })

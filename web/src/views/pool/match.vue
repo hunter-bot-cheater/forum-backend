@@ -98,6 +98,11 @@
         <div class="pm__power">
           <PowerSlider v-model:value="power" :disabled="!canShoot" @shoot="shoot" />
         </div>
+
+        <!-- 加塞：收起时是右下角一颗小球，点开才铺开整块面板。
+             它必须盖在球台上而不是挤进底栏：调塞的时候眼睛要盯着红点在球面的
+             位置，底栏那一条 44px 高，放进去球只有三十几个像素，选不准。 -->
+        <SpinPad v-model:a="spinA" v-model:b="spinB" :disabled="!canAim" />
       </div>
     </main>
 
@@ -198,6 +203,7 @@ import PoolTable from '@/components/pool/PoolTable.vue'
 import PowerSlider from '@/components/pool/PowerSlider.vue'
 import ResultSheet from '@/components/pool/ResultSheet.vue'
 import SeatCard from '@/components/pool/SeatCard.vue'
+import SpinPad from '@/components/pool/SpinPad.vue'
 import TurnBanner from '@/components/pool/TurnBanner.vue'
 import { adjustPhi, aimFromCue, aimGuides, normalizePhi } from '@/game/aim'
 import { applySample, playShot, type PlayHandle } from '@/game/animator'
@@ -260,6 +266,10 @@ const fatalText = ref('')
 
 const power = ref(0)
 const phi = ref(0)
+// spinA 左右塞、spinB 高低杆，都是 -1 到 1。物理口径见 predict.ts 的那组常量：
+// a 只影响撞库后的反弹角，b 在母球第一次撞球时结算成跟进／拉回。
+const spinA = ref(0)
+const spinB = ref(0)
 const shooting = ref(false)
 const notice = ref('')
 
@@ -1561,11 +1571,10 @@ function shoot() {
   const params: ShotParams = {
     phi: phi.value,
     power: power.value,
-    // 抬杆与侧旋暂不开放：交互只做角度与力度两个维度，
-    // 服务端字段留着，接 UI 时不用改协议。
+    // 抬杆仍然不开放：二维模型画不出腾空，predictShot 遇到 theta > 0.12 直接返回 null。
     theta: 0,
-    a: 0,
-    b: 0,
+    a: spinA.value,
+    b: spinB.value,
   }
   const shot = predictShot(balls.value, params)
   if (!shot) {
@@ -1603,9 +1612,13 @@ function shoot() {
     restoreShotOrigin()
     showNotice('这一杆没有收到结果，可以重新出杆')
   }, SHOT_TIMEOUT_MS)
-  // 出杆之后力度归零、方向解锁：下一杆从「自由瞄准」开始。
+  // 出杆之后力度归零、方向解锁、加塞回中：下一杆从「自由瞄准 + 中杆」开始。
+  // 塞不回中是最容易出错的一件事——上一杆拉低杆，下一杆照着打出去，
+  // 明明瞄得一模一样，球却往回缩，玩家会怀疑是瞄准坏了。
   power.value = 0
   aimLocked.value = false
+  spinA.value = 0
+  spinB.value = 0
   // 连击标记跟着这一杆一起结束：进球之后接着打，是下一次判定的结果，
   // 不是一直挂着的状态。不在这里清掉，出杆动画期间卡片上还写着「继续击打」。
   continuing.value = false

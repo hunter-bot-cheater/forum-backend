@@ -172,6 +172,7 @@ export function aimGuides(
   balls: ReadonlyArray<BallState>,
   phi: number,
   hit: AimHit,
+  cueId = 'cue',
 ): AimGuides {
   if (hit.kind !== 'ball' || !hit.targetId) {
     return { object: null, cue: null }
@@ -197,13 +198,17 @@ export function aimGuides(
   const cosTheta = Math.max(0, vx * nx + vy * ny)
   const sinTheta = Math.abs(vx * ny - vy * nx)
 
-  // 目标球从自己的表面出发，走到库边或长度上限为止；长度按 cosθ 打折。
+  // 目标球从自己的表面出发，走到库边、长度上限或第一颗挡路的球为止；长度按 cosθ 打折。
+  //
+  // 三个距离量的都是「球心还要走多远」：球心走这么多，球的前缘正好压到库边／
+  // 别的球身上，而线段正是从前缘画起的，所以长度可以直接用，不要再扣半径。
   let object: GuideSegment | null = null
   if (cosTheta > MIN_OBJECT_RATIO) {
     const objectFrom = { x: target.x + nx * BALL_RADIUS, y: target.y + ny * BALL_RADIUS }
     const objectReach = Math.min(
       OBJECT_GUIDE_LENGTH * cosTheta,
       cushionHit(target.x, target.y, nx, ny).distance,
+      firstBallAlong(balls, target.x, target.y, nx, ny, target.id, cueId),
     )
     object = {
       from: objectFrom,
@@ -221,20 +226,58 @@ export function aimGuides(
       px = -px
       py = -py
     }
-    const cueReach = Math.min(CUE_GUIDE_LENGTH * sinTheta, cushionHit(hit.x, hit.y, px, py).distance)
+    const cueReach = Math.min(
+      CUE_GUIDE_LENGTH * sinTheta,
+      cushionHit(hit.x, hit.y, px, py).distance,
+      firstBallAlong(balls, hit.x, hit.y, px, py, target.id, cueId),
+    )
     cue = {
       from: { x: hit.x + px * BALL_RADIUS, y: hit.y + py * BALL_RADIUS },
-      to: { x: hit.x + px * cueReach, y: hit.y + py * cueReach },
+      to: { x: hit.x + px * BALL_RADIUS + px * cueReach, y: hit.y + py * BALL_RADIUS + py * cueReach },
     }
   }
 
   return { object, cue }
 }
 
+// firstBallAlong 求一条射线最先碰到哪颗球，返回母球球心要走的距离。
+//
+// 引导线原来不管前面有没有球，一律画到长度上限或库边。目标球的去路上
+// 五厘米外就杵着一颗球时，画出来的线会径直穿过它——玩家以为能走到那里，
+// 实际上一碰就改向。现在线到第一个障碍就断，长度就是真的能走的长度。
+//
+// 一个都没有时返回 Infinity：没有障碍，交给库边与长度上限去截。
+// skipA / skipB 是「这次别算进去」的两颗球：射线的起点球自己，
+// 以及母球（目标球那条线的起点就在母球旁边，不排掉会算出 0 长度）。
+function firstBallAlong(
+  balls: ReadonlyArray<BallState>,
+  ox: number,
+  oy: number,
+  dx: number,
+  dy: number,
+  skipA: string | null,
+  skipB: string,
+): number {
+  let best = Number.POSITIVE_INFINITY
+  for (const ball of balls) {
+    if (!ball.on_table || ball.id === skipA || ball.id === skipB) {
+      continue
+    }
+    const t = rayCircleDistance(ox, oy, dx, dy, ball.x, ball.y, CONTACT_DISTANCE)
+    if (t !== null && t < best) {
+      best = t
+    }
+  }
+  return best
+}
+
 // rayCircleDistance 求射线与圆的首个交点距离。
 //
-// 射线从圆心内部出发（母球和别的球不该重叠，但快照错位时可能发生）没有正根，
-// 这时返回 null 而不是负数，调用方会自然地退回到库边。
+// 起点已经在圆内或圆上（母球贴着另一颗球，这是很常见的摆位）时要单独处理：
+// 这时二次方程的两个根里有一个接近 0，按「取正根」的写法会滑到远端那个根上，
+// 幽灵球被摆到目标球的另一侧，画出来的线穿过整颗球——玩家照着这条线打，
+// 球却是当场就撞上去的，看起来就是「线在骗人」。
+// 已经贴上就算立刻接触，返回 0；朝外打则不算碰到，返回 null。
 function rayCircleDistance(
   ox: number,
   oy: number,
@@ -248,12 +291,17 @@ function rayCircleDistance(
   const fy = oy - cy
   const b = 2 * (fx * dx + fy * dy)
   const c = fx * fx + fy * fy - radius * radius
+  // 预算是平方量（米²），1e-9 相当于离球面 0.015 毫米，够容下浮点舍入。
+  if (c <= 1e-9) {
+    // (cx - ox, cy - oy)·d > 0 说明射线指向球心，即「已经碰上了」。
+    return (cx - ox) * dx + (cy - oy) * dy > 0 ? 0 : null
+  }
   const disc = b * b - 4 * c
   if (disc < 0) {
     return null
   }
   const root = Math.sqrt(disc)
-  // 两个根里先到的那个：(-b - root) / 2。
+  // 两个根里先到的那个：(-b - root) / 2。c > 0 保证它是正的。
   const near = (-b - root) / 2
   if (near > 1e-9) {
     return near
