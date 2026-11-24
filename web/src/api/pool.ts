@@ -95,11 +95,14 @@ export function getMyRoom() {
 
 // 按房号进别人的房间。房号不对 / 房间已开局 / 座位被占各有各的文案，
 // 服务端直接给中文说明，前端原样弹出来即可。
-export function joinRoom(roomCode: string) {
+//
+// ready 只由分享链接传：点链接进来的人显然是想打的，让服务端顺手替他
+// 按下准备，房主点一下就能开局。手动输房号的入口不传它。
+export function joinRoom(roomCode: string, ready = false) {
   return request<PoolRoom>({
     url: '/pool/rooms/join',
     method: 'post',
-    data: { room_code: roomCode },
+    data: { room_code: roomCode, ready },
   })
 }
 
@@ -107,6 +110,19 @@ export function joinRoom(roomCode: string) {
 export function leaveRoom() {
   return request<{ left: boolean }>({
     url: '/pool/rooms/leave',
+    method: 'post',
+  })
+}
+
+// 开一局人机对战。
+//
+// 服务端直接开打，不经过房间与准备那两步：人机局不需要房号，也不需要等谁点准备。
+// 返回的是房间快照，status 已经是 playing，拿到 match_id 就能直接进对局页。
+//
+// 不静默失败：这是「点了一下什么都没有发生」的典型场景，必须让拦截器弹出来。
+export function startBotMatch() {
+  return request<PoolRoom>({
+    url: '/pool/rooms/bot',
     method: 'post',
   })
 }

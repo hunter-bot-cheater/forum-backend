@@ -44,6 +44,11 @@ const (
 	ErrCodeFloorNotActive   = "floor_not_active"
 	ErrCodeFloorTaken       = "floor_taken"
 	ErrCodeRateLimited      = "rate_limited"
+	// ErrCodeRoomFull 表示球桌的两个座位都坐上了。
+	//
+	// 与普通 conflict 分开是因为前端的处理不一样：分享链接被一群人点开时，
+	// 来晚的人要看到「人满」这层说明，而不是一句泛泛的「冲突/已存在」。
+	ErrCodeRoomFull = "room_full"
 	// ErrCodeBanned 表示账号被封禁中。与普通 forbidden 分开：
 	// 前端看到它要把「发布」按钮置灰并显示解除时间，而不是弹一句「没有权限」。
 	ErrCodeBanned   = "banned"

@@ -116,6 +116,8 @@ func main() {
 		Sim:         sim.NewClient(cfg.Pool.SimURL),
 		TurnTimeout: time.Duration(cfg.Pool.TurnTimeoutSeconds) * time.Second,
 		Recorder:    poolStore,
+		// 连续对局的大比分账本，进程内一份。
+		Series: pool.NewSeries(),
 	})
 	if err != nil {
 		exitOnError("对局服务初始化失败", err)

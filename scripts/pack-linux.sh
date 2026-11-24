@@ -143,8 +143,14 @@ echo
 echo "然后在服务器上执行"
 echo "  tar -xzf /tmp/forum-linux-amd64.tar.gz -C /opt/forum"
 echo "  cd /opt/forum && sed -i '/^IMAGE_TAG=/d' .env && echo \"IMAGE_TAG=\$(cat .build/IMAGE_TAG)\" >> .env"
-echo "  cd /opt/forum && COMPOSE_FILE=/opt/forum/docker-compose.yml:/opt/forum/deploy/prod/docker-compose.prod.yml:/opt/forum/deploy/prod/docker-compose.artifact.yml \\"
-echo "    docker compose build api web && docker compose up -d --no-deps api"
+# export 必须单独一行：写成 `COMPOSE_FILE=... docker compose build && docker compose up`
+# 的话，环境变量只作用在第一条命令上，up 会退回只读根 compose——2026-11-24
+# 就是这样在一台 2C2G 的机器上把整机拖死的。服务器 .env 里现在也写了一份，
+# 这里显式 export 一遍是为了兼容还没升级 .env 的机器。
+echo "  cd /opt/forum && export COMPOSE_FILE=/opt/forum/docker-compose.yml:/opt/forum/deploy/prod/docker-compose.prod.yml:/opt/forum/deploy/prod/docker-compose.artifact.yml"
+echo "  docker compose build api web"
+echo "  docker compose up -d --no-deps --no-build api"
+echo "  docker compose up -d --no-deps --force-recreate --no-build web"
 echo
 # 台球物理服务是 Python，不在这份产物里，第一次部署（或 pool-sim/ 有改动）时单独构建。
 # 不提示的话，up -d --no-build 会去找一个根本不存在的镜像，报 pull access denied。

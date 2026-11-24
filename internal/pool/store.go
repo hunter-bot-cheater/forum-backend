@@ -44,6 +44,29 @@ func (s *Store) CreateMatch(ctx context.Context, p0 uint, p1 *uint, roomCode str
 	return match, nil
 }
 
+// CreateBotMatch 建一条直接开打的人机对局。
+//
+// 与 CreateMatch 的差别只有两处：状态一开始就是 playing（人机局没有
+// 「等对方准备」这一步），以及顺手记下开始时间——StartedAt 为 NULL 的行
+// 在战绩列表里会显示成一场没有时间的对局。
+//
+// p1 仍然留空。机器人不是用户，随便填一个 id 会让结算时的 Elo 计算
+// 把败绩记到一个真人头上；Store.FinishMatch 正是靠「对手 id 为 0」
+// 跳过算分的。
+func (s *Store) CreateBotMatch(ctx context.Context, p0 uint, roomCode string) (*model.PoolMatch, error) {
+	now := time.Now()
+	match := &model.PoolMatch{
+		RoomCode:  roomCode,
+		P0ID:      p0,
+		Status:    model.PoolStatusPlaying,
+		StartedAt: &now,
+	}
+	if err := s.db.WithContext(ctx).Create(match).Error; err != nil {
+		return nil, err
+	}
+	return match, nil
+}
+
 // CurrentMatchFor 找这个人当前所在的房间或对局：还没开打的房间优先，其次正在打的那一局。
 //
 // 必须把 playing 也找出来，否则「开局之后大厅每两秒轮询一次」会在第一轮就发现

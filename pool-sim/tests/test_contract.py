@@ -5,7 +5,8 @@
 改一个而没同步改另外两端，表现是「数据收到了但读不到」，一路没有报错。
 """
 
-from app.simulate import RACK_AIM, RACK_EIGHTBALL
+from app.schemas import FrameOut
+from app.simulate import RACK_AIM, RACK_EIGHTBALL, trim_still_tail
 
 
 def payload(balls, phi=0.0, power=0.5, sample_hz=30):
@@ -164,3 +165,40 @@ def test_sample_hz_out_of_range_is_rejected(client):
     """采样率有上下限：太低会看到球瞬移，太高响应体撑爆带宽。"""
     body = payload([{"id": "cue", "x": 0.3, "y": 0.6}], sample_hz=5)
     assert client.post("/simulate", json=body).status_code == 422
+
+
+def test_trim_tail_judges_by_speed_not_displacement():
+    """帧尾截断按球速判，不按每帧位移判。
+
+    这个判据曾经写成「每帧位移 2mm 就算停了」。2mm 里藏着帧率：30Hz 下它等于
+    66mm/s，球还在明显滚动却被判成静止，被砍掉的那一段有两厘米。前端为了让
+    画面接上又补了一段补间，玩家看到的就是「球慢慢滚着，忽然加速滑到某个
+    位置停下」。所以这里钉住三件事：同一份位移放慢之后必须照旧算「在动」，
+    放快也算「在动」，只有真的低于阈值才允许砍。
+    """
+    def frames(step: float, hz: int, count: int = 30) -> list[FrameOut]:
+        result = []
+        for index in range(count):
+            result.append(
+                FrameOut(t=round(index / hz, 4), balls=[["1", 1.0 + index * step, 1.0, 0.0]])
+            )
+        return result
+
+    # 1mm / 帧：30Hz 是 30mm/s、120Hz 是 120mm/s，两种都远高于 10mm/s 阈值。
+    # 旧判据（位移 > 2mm）会把这两条都砍成 1 帧，等于球没动。
+    assert len(trim_still_tail(frames(0.001, 30))) == 30
+    assert len(trim_still_tail(frames(0.001, 120))) == 30
+    # 0.1mm / 帧 @30Hz 只有 3mm/s，才是真的可以砍。
+    assert len(trim_still_tail(frames(0.0001, 30))) == 1
+
+
+def test_trim_tail_keeps_the_pocket_frame():
+    """球落袋的那一帧算「动过」，不能被当成静止砍掉。"""
+    frames = [
+        FrameOut(t=0.0, balls=[["cue", 1.0, 1.0, 0.0], ["1", 1.2, 1.0, 0.0]]),
+        FrameOut(t=0.1, balls=[["cue", 1.0, 1.0, 0.0], ["1", 1.2, 1.0, 0.0]]),
+        # 1 号球进袋：位置没变，但少了一颗球
+        FrameOut(t=0.2, balls=[["cue", 1.0, 1.0, 0.0]]),
+        FrameOut(t=0.3, balls=[["cue", 1.0, 1.0, 0.0]]),
+    ]
+    assert len(trim_still_tail(frames)) == 3

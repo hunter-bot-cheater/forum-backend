@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -178,6 +179,8 @@ func (h *WSHandler) dispatch(match *Match, seat Seat, conn *wsConn, msg ClientMe
 		var payload struct {
 			Phi   float64 `json:"phi"`
 			Power float64 `json:"power"`
+			A     float64 `json:"a"`
+			B     float64 `json:"b"`
 		}
 		if err := json.Unmarshal(msg.Data, &payload); err != nil {
 			return
@@ -185,7 +188,29 @@ func (h *WSHandler) dispatch(match *Match, seat Seat, conn *wsConn, msg ClientMe
 		if payload.Power < 0 || payload.Power > 1 {
 			return
 		}
-		match.RelayAim(seat, payload.Phi, payload.Power)
+		// 加塞量越界就夹到边上，不整帧丢弃：角度和力度还是对的，
+		// 为了一个点位的溢出把整帧扔掉，对面看到的是杆子突然跳回上一帧。
+		match.RelayAim(seat, payload.Phi, payload.Power, clampSpin(payload.A), clampSpin(payload.B))
+
+	case CmdChat:
+		// 聊天只转发，不回应：发不出去（空串、限流）时静默丢弃即可。
+		var payload struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(msg.Data, &payload); err != nil {
+			return
+		}
+		text := strings.TrimSpace(payload.Text)
+		if text == "" {
+			return
+		}
+		// 超长按字符截断而不是整条丢弃：发长文的多半是手滑粘贴，
+		// 前面 120 字通常就是他想说的那句话，截断比不发有用。
+		runes := []rune(text)
+		if len(runes) > chatMaxRunes {
+			text = string(runes[:chatMaxRunes])
+		}
+		match.RelayChat(seat, text)
 
 	case CmdResume:
 		// 重连就是重新进房：快照会重发一遍，客户端按快照对齐即可。
@@ -270,4 +295,15 @@ func errorMessage(seq int, code, text string) Message {
 		TS:   time.Now().UnixMilli(),
 		Data: ErrorData{Code: code, Message: text},
 	}
+}
+
+// clampSpin 把加塞量收进 [-1, 1]，与 Shoot 那边的口径一致。
+func clampSpin(v float64) float64 {
+	if v < -1 {
+		return -1
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }

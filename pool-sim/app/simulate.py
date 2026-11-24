@@ -80,7 +80,13 @@ RACK_AIM = _apex_aim()
 
 
 def power_to_speed(power: float) -> float:
-    """把 0 到 1 的力度换成母球的出射速度，单位 m/s。"""
+    """把 0 到 1 的力度换成母球的出射速度，单位 m/s。
+
+    注意：线上跑的是**客户端算好的那一杆**（见 internal/pool/match.go 的
+    handleShoot），这条换算只在客户端没有随请求带结果时用作兜底，实际不会被
+    走到。两边必须同一条曲线：前端 web/src/game/predict.ts 的 speedOfPower 是
+    线性的（力度一半＝球速一半，距离也就大约一半，实测表在那边），这里照抄。
+    """
     return MIN_BALL_SPEED + power * (MAX_BALL_SPEED - MIN_BALL_SPEED)
 
 
@@ -261,19 +267,29 @@ def _frame_balls(system: pt.System, t: float) -> list[list]:
     return balls
 
 
-# 判断「这一帧之后球还在动」的位移阈值，单位米。
-# 2mm 在手机上是 0.4 个像素，看不出差别，再小没有意义。
-MOVE_EPS = 0.002
+# 判断「这一帧之后球还在动」的球速阈值，单位 m/s。
+#
+# 这里必须按**速度**判，不能按「每帧走多少毫米」判：每帧位移里藏着帧率，
+# 30Hz 下 2mm/帧 就是 66mm/s，球明明还在肉眼可见地滚，却被判成静止。
+# 曾被砍掉的那一段有两厘米，前端为了让画面接得上，又在动画结束后补了一段
+# 补间把球「搬」过去——玩家看到的就是「球慢慢滚着，忽然加速滑到一个位置停下」。
+#
+# 10mm/s 在手机屏上约 0.1 像素/帧，看着就是停了；此时离真正静止还剩不到
+# 1mm，接上去不会有可见的跳变。
+STOP_SPEED = 0.01
 
 
 def trim_still_tail(frames: list[FrameOut]) -> list[FrameOut]:
-    """砍掉末尾那段所有球都不动的帧。
+    """砍掉末尾那段所有球都停下的帧。
 
-    pooltool 不把「速度低于阈值」的球直接停住，而是让它以毫米级速度继续爬，
-    一杆轻推能爬五秒多。不截断的话，前端的播放时长要按 duration 走，
-    玩家会盯着一个静止的画面等四五秒。
+    pooltool 的球不会在某一刻「啪」地停住：速度降到很低之后它还会继续爬，
+    一杆轻推能爬五秒多。不截断的话，前端要按 duration 播满，
+    玩家会盯着一个几乎不动的画面等四五秒。
 
-    保留「最后一次有位移的帧」的下一帧作为收尾：落袋的那一刻也要算位移
+    判据是帧间的**速度**（位移 / 这一帧的时长），不是位移本身：帧率一变，
+    同一个位移阈值代表的球速就跟着变一倍，那会让截断点随采样率漂移。
+
+    保留「最后一次有位移的帧」作为收尾：落袋的那一刻也要算位移
     （球从帧里消失），否则有球的最后一次动作会被当成静止而砍掉。
     """
     if len(frames) <= 1:
@@ -281,16 +297,21 @@ def trim_still_tail(frames: list[FrameOut]) -> list[FrameOut]:
 
     last_moved = 0
     for index in range(1, len(frames)):
-        if _frame_moved(frames[index - 1], frames[index]):
+        span = frames[index].t - frames[index - 1].t
+        if _frame_moved(frames[index - 1], frames[index], span):
             last_moved = index
     return frames[: last_moved + 1]
 
 
-def _frame_moved(prev: FrameOut, cur: FrameOut) -> bool:
-    """两帧之间是否有任何一颗球动了超过 MOVE_EPS。
+def _frame_moved(prev: FrameOut, cur: FrameOut, span: float) -> bool:
+    """两帧之间是否有任何一颗球动得比 STOP_SPEED 快。
+
+    span 是两帧的时长（秒）。位移超过「阈值速度 × 时长」就算动过，
+    这样 30Hz 与 120Hz 的采样得到的是同一个物理判据。
 
     球在某帧消失（落袋）或出现都算动过：这是画面上看得见的变化。
     """
+    eps = STOP_SPEED * span
     before = {}
     for item in prev.balls:
         before[item[0]] = (item[1], item[2])
@@ -298,7 +319,7 @@ def _frame_moved(prev: FrameOut, cur: FrameOut) -> bool:
         start = before.pop(item[0], None)
         if start is None:
             return True
-        if abs(item[1] - start[0]) > MOVE_EPS or abs(item[2] - start[1]) > MOVE_EPS:
+        if abs(item[1] - start[0]) > eps or abs(item[2] - start[1]) > eps:
             return True
     # 还有球留在 before 里说明它这一帧不见了，即落袋。
     return len(before) > 0

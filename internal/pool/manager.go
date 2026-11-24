@@ -33,6 +33,11 @@ func NewManager(opts Options) (*Manager, error) {
 	if opts.TurnTimeout <= 0 {
 		opts.TurnTimeout = DefaultTurnTimeout
 	}
+	// 比分账本缺省补一份：它是进程内的内存结构，不是外部依赖，
+	// 没必要逼着每个测试与调用方都显式传一份。
+	if opts.Series == nil {
+		opts.Series = NewSeries()
+	}
 	return &Manager{
 		matches: make(map[uint]*Match),
 		opts:    opts,
@@ -41,6 +46,11 @@ func NewManager(opts Options) (*Manager, error) {
 
 // Create 用给定状态开一局并启动 actor。同一个 match id 重复创建会顶掉旧的。
 func (m *Manager) Create(state MatchState) *Match {
+	// 再约开出来的新局一创建就是「进行中」，不经过房间的双方准备，
+	// 所以初始比分在这里补一次：两个人此刻是谁已经确定，查得到账本。
+	if state.Status == model.PoolStatusPlaying {
+		state.Series = m.opts.Series.SeatScores(state.Players[0].UserID, state.Players[1].UserID)
+	}
 	match := NewMatch(state, m.opts)
 
 	m.mu.Lock()

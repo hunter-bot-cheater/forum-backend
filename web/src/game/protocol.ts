@@ -73,6 +73,9 @@ export interface FoulData {
 export interface ResultData {
   winner: Seat
   reason: string
+  // series 是这一轮连续对局结算后的比分（含刚打完这一局），按座位排。
+  // 判负与离场这两条路径之后不会再补快照，所以比分必须跟着结果帧一起来。
+  series: [number, number]
   // 服务端仍会带这两个积分增量（库里的 rating 还在算），界面已经不显示了。
   // 留着字段是因为它属于线上协议：删掉类型不会让服务端少发这两个键。
   elo_delta_0: number
@@ -86,17 +89,32 @@ export interface PeerData {
 
 // AimData 是某一方此刻的瞄准姿态。
 //
-// 只带角度与力度：杆子画在哪、拉多远由本端算，服务端不掺和外观。
+// 只带角度、力度与击球点：杆子画在哪、拉多远由本端算，服务端不掺和外观。
+// a / b 是加塞（左右、高低，-1 到 1），对面要看到同一颗球面上的点位。
 // 这条消息不进快照、不留历史，丢了下一帧立刻补上。
 export interface AimData {
   seat: Seat
   phi: number
   power: number
+  a: number
+  b: number
 }
 
 export interface ErrorData {
   code: string
   message: string
+}
+
+// ChatData 是对局内的一条聊天（文字或表情）。
+//
+// 服务端只做实时转发，不进快照、不留历史：重连之后聊天列表是空的，
+// 这是有意的——对局内的闲聊没有回看价值，存下来还要处理一堆清理的事。
+// id 由服务端发号，拿它当列表 key；本地自己发的那条用负数 id 区分。
+export interface ChatData {
+  seat: Seat
+  text: string
+  id: number
+  ts: number
 }
 
 // DownMessage 是下行信封的联合类型，按 type 收窄。
@@ -111,6 +129,7 @@ export type DownMessage =
   | { type: 'result'; seq?: number; ts: number; data: ResultData }
   | { type: 'peer'; seq?: number; ts: number; data: PeerData }
   | { type: 'aim'; seq?: number; ts: number; data: AimData }
+  | { type: 'chat'; seq?: number; ts: number; data: ChatData }
   | { type: 'error'; seq?: number; ts: number; data: ErrorData }
 
 // ConnectionState 是连接状态，页面据此渲染顶部提示条。
@@ -252,9 +271,20 @@ export class GameSocket {
 
   // aim 上报自己的瞄准姿态，服务端转给对面与观战者。
   //
+  // 加塞（a、b）跟着一起发：对面看到的力度条与击球点必须是同一时刻的，
+  // 分成两条消息就会有「力度已经变了、点位还是上一帧」的错位。
   // 不需要 seq：这是一条只播不答的帧，调用方也不该去等它的回执。
-  sendAim(phi: number, power: number): void {
-    this.send('aim', { phi, power })
+  sendAim(phi: number, power: number, a: number, b: number): void {
+    this.send('aim', { phi, power, a, b })
+  }
+
+  // chat 发一条聊天。服务端只转给对方与观战者，不回显给发送方，
+  // 所以调用方要把这条消息自己落进列表（本地回显），否则自己看不到。
+  //
+  // 不带 seq 的用途与 aim 相同：这是一条「播完就算」的消息，
+  // 被限流丢掉时服务端也不回错误，本地已经显示了，不影响对话。
+  sendChat(text: string): void {
+    this.send('chat', { text })
   }
 
   // leave 告知服务端自己退出。服务端据此判负并结算。
@@ -431,6 +461,7 @@ export function decode(raw: unknown): DownMessage | null {
     case 'result':
     case 'peer':
     case 'aim':
+    case 'chat':
     case 'error':
       return parsed as DownMessage
     default:

@@ -2,11 +2,26 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover：iPhone 上让页面铺到刘海与底部指示条下面，
+         全屏（添加到主屏幕）时那两条留白才能用上，配合 CSS 的
+         env(safe-area-inset-*) 把内容避开。 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <!-- 标签页图标用 SVG：一个文件覆盖 16 到 512 所有尺寸，不用准备多套 PNG。
          图形是纯路径，不依赖中文字体，任何系统渲染结果一致。 -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="theme-color" content="#FF5A2B" />
+    <!-- 「添加到主屏幕」用的两套声明：
+         manifest 管 Android/Chrome，apple-* 管 iOS Safari。
+         iOS 没有全屏 API，网页自己调不起全屏，唯一的办法是从主屏图标启动——
+         那种模式下没有地址栏与工具栏，对局页能多出一整条工具栏的高度。
+         状态栏用 black-translucent：页面自己的深色背景铺到状态栏下面，
+         比默认的白条更像一个游戏。 -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="楼顶" />
     <meta
       name="description"
       content="楼顶社区：支持 WebSocket 实时通知与私信、限时抢楼、时间衰减热榜的讨论社区。"

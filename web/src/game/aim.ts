@@ -6,6 +6,7 @@
 // phi 的约定沿用 pooltool：速度方向 = (cos phi, sin phi)，phi=0 指向 +x，
 // phi=π/2 指向 +y（台面远端）。屏幕的 y 轴朝下，所以由屏幕位移反推 phi 时要取负。
 import type { Point } from './geometry'
+import { spinThrowDeg } from './predict'
 import { BALL_RADIUS, TABLE_LENGTH, TABLE_WIDTH } from './table'
 import type { BallState } from './types'
 
@@ -154,6 +155,17 @@ export interface AimGuides {
   cue: GuideSegment | null
 }
 
+// AimSpin 是画引导线要用的杆法：塞两侧与这一杆的球速。
+//
+// 引导线的目标球那一段要按甩球角一起偏——真实台球里加了塞，目标球就不走
+// 球心连线了（见 predict.ts 的 THROW_MAX_DEG）。不偏的话，玩家会看到
+// 「线指着袋口，球却擦着袋角过去」，那比不画线更让人不信任。
+export interface AimSpin {
+  a: number
+  b: number
+  speed: number
+}
+
 // aimGuides 按一次瞄准结果算出两段引导线。
 //
 // 两条线的方向与长度都由「打得多厚」决定。设 n 是球心连线方向（幽灵球心
@@ -172,6 +184,7 @@ export function aimGuides(
   balls: ReadonlyArray<BallState>,
   phi: number,
   hit: AimHit,
+  spin: AimSpin | null = null,
   cueId = 'cue',
 ): AimGuides {
   if (hit.kind !== 'ball' || !hit.targetId) {
@@ -189,8 +202,21 @@ export function aimGuides(
   if (gap < 1e-9) {
     return { object: null, cue: null }
   }
-  const nx = gapX / gap
-  const ny = gapY / gap
+  let nx = gapX / gap
+  let ny = gapY / gap
+
+  // 加了塞，目标球被甩偏几度，引导线跟着偏同一个角度。
+  // 旋转公式与 predict.ts 的 applyEnglish 完全一致——两边差一点点，
+  // 玩家都能在袋口看出来。
+  if (spin && spin.a !== 0) {
+    const rad = (spinThrowDeg(spin.a, spin.speed, spin.b) * Math.PI) / 180
+    const cos = Math.cos(rad)
+    const sin = Math.sin(rad)
+    const rx = nx * cos - ny * sin
+    const ry = nx * sin + ny * cos
+    nx = rx
+    ny = ry
+  }
 
   // 来球方向与球心连线的夹角：cos 决定目标球拿多少速度，sin 决定母球剩多少。
   const vx = Math.cos(phi)

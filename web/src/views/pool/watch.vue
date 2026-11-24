@@ -79,8 +79,9 @@ import { useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import PoolTable from '@/components/pool/PoolTable.vue'
 import SeatCard from '@/components/pool/SeatCard.vue'
-import { applySample, playShot, type PlayHandle } from '@/game/animator'
+import { applySample, playShot, SHOT_PLAY_RATE, type PlayHandle } from '@/game/animator'
 import { aimFromCue, aimGuides } from '@/game/aim'
+import { speedOfPower } from '@/game/predict'
 import {
   CLOSE_SPECTATOR_FULL,
   GameSocket,
@@ -120,7 +121,14 @@ const notice = ref('')
 //
 // 观战者看不到操作，但能看到杆子在转——这也是观战本身好看的地方：
 // 能跟着一方的瞄准看清他打算怎么打。
-const aimState = ref<{ seat: Seat; phi: number; power: number; at: number } | null>(null)
+const aimState = ref<{
+  seat: Seat
+  phi: number
+  power: number
+  a: number
+  b: number
+  at: number
+} | null>(null)
 
 // AIM_STALE_MS 之后不再画那根杆。正常瞄准每 60ms 一帧，四秒没有新帧
 // 说明对方停手了，继续挂着会让人以为画面卡住。
@@ -132,6 +140,15 @@ const now = ref(Date.now())
 
 let socket: GameSocket | null = null
 let animating: PlayHandle | null = null
+// rolling 表示这一屏正在播一杆。
+//
+// 必须是个 ref 而不是直接用 animating：aimLayer 是 computed，普通变量变了
+// 它不会重算，动画结束那一刻杆要出现，得有个响应式的开关把它叫醒。
+//
+// 为什么要这一道闸：两位选手的动画不是同时开始的，出杆那一侧松手就播，
+// 观战这边要等服务端把帧转过来。先播完的人如果继续打，他的瞄准帧会在
+// 这一边球还滚着的时候到达——照画就是「球没停，杆先出来了」。
+const rolling = ref(false)
 let tickTimer: ReturnType<typeof setInterval> | null = null
 let noticeTimer: ReturnType<typeof setTimeout> | null = null
 // pendingState 存动画期间到达的快照。
@@ -169,6 +186,10 @@ const rightCard = computed(() => seats.value[1] ?? null)
 // 与对局页算的是同一套东西：服务端只给角度和力度，撞到哪颗球、引导线多长
 // 都是几何问题，本端用同一份球位现算，两端看到的画面才对得上。
 const aimLayer = computed<AimLayer | null>(() => {
+  // 球还在滚就先不画杆：这时候出现的杆只可能是「下一杆的姿势提前到了」。
+  if (rolling.value) {
+    return null
+  }
   const state = aimState.value
   if (!state || !snapshot.value || snapshot.value.status !== 'playing') {
     return null
@@ -187,7 +208,11 @@ const aimLayer = computed<AimLayer | null>(() => {
     phi: state.phi,
     power: state.power,
     locked: false,
-    guides: aimGuides(balls.value, state.phi, hit),
+    guides: aimGuides(balls.value, state.phi, hit, {
+      a: state.a,
+      b: state.b,
+      speed: speedOfPower(state.power),
+    }),
   }
 })
 
@@ -279,14 +304,17 @@ function playShotFrame(data: ShotData) {
     animating = null
     flushQueued()
   }
+  rolling.value = true
   animating = playShot(
     { frames: data.frames, duration: data.duration },
     {
+      speed: SHOT_PLAY_RATE,
       onSample: (sample) => {
         applySample(balls.value, sample)
       },
       onDone: () => {
         animating = null
+        rolling.value = false
         if (disposed) {
           return
         }
@@ -387,7 +415,14 @@ function onMessage(msg: DownMessage) {
 // 观战者会先后看到两边的杆：回合归谁就只会有谁的帧，服务端按轮次过滤，
 // 这里不必自己判断，最后收到的那一条就是当前的。
 function onAim(data: AimData) {
-  aimState.value = { seat: data.seat, phi: data.phi, power: data.power, at: Date.now() }
+  aimState.value = {
+    seat: data.seat,
+    phi: data.phi,
+    power: data.power,
+    a: data.a,
+    b: data.b,
+    at: Date.now(),
+  }
 }
 
 // finishWith 记下结算结果，名字从快照里取。

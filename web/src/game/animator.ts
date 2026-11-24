@@ -133,6 +133,18 @@ export function applySample(balls: BallState[], sample: ReadonlyArray<SampledBal
   return balls
 }
 
+// SHOT_PLAY_RATE 是一杆的回放倍速：物理按真实时间算，画面按这个倍数放。
+//
+// 0.8 是慢放一档。台呢阻尼很小、球滚得久，按 1 倍放时末段收得太利落，
+// 玩家反馈「停得突然」；慢到 0.8 之后尾巴摊开，同一条轨迹看起来是
+// 「越滚越慢地化掉」。改这个数要知道三件事：
+//   - 别低于 0.6：一杆 12 秒的球会放到 20 秒，等球停下会变得很磨人；
+//   - 音效不用跟着调：playShot 回调出来的 elapsed 已经是物理时间
+//     （见下面 step 里的换算），倍速只影响墙上时间；
+//   - 服务端没有「等动画放完」的假设：它只广播帧，两端各放各的，
+//     真赶上了由 match.vue 的排队逻辑兜住。
+export const SHOT_PLAY_RATE = 0.8
+
 // PlayOptions 是播放一杆的参数。
 export interface PlayOptions {
   // onSample 每帧回调一次，参数是该时刻的球位与相对这一杆开始的秒数。

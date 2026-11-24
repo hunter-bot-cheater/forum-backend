@@ -62,15 +62,41 @@ let pressing = false
 let originX = 0
 let originY = 0
 
-// dprOf 读当前像素比并封顶到 3。
-// 4K 屏上 devicePixelRatio 能到 4，位图面积翻倍但肉眼已经看不出差别，
-// 反而让每帧的贴图缩放更慢。
-function dprOf(): number {
-  const raw = window.devicePixelRatio || 1
-  return Math.min(Math.max(raw, 1), 3)
+// 位图倍率的两个约束：设备像素比是下限、像素预算是上限。
+//
+// 下限：一个 CSS 像素至少要落到整数倍的物理像素上，否则整张台子都会被
+// 插值糊掉——1x 屏上球缘的锯齿、3x 屏上细线的灰边都是这么来的。
+//
+// 上限：位图按「CSS 面积 × 倍率²」膨胀，超了就是每帧多拷几兆像素。
+// 4.8M 像素差不多是这颗星球上主流手机还能稳 60fps 的一帧上限，
+// 台子在全屏竖屏时最接近它。
+const PIXEL_BUDGET = 4800000
+
+// 超采样系数：在设备像素比之上再画大一点，让浏览器缩回来。
+//
+// 为什么要超：球缘、袋口圆弧、瞄准线与球杆都是矢量绘制的，画布自己的抗锯齿
+// 只有一像素，缩回来之后就多了一像素的过渡余地，边缘看起来才是「圆滑」而不是
+// 「台阶」。低倍率屏幕上收益最大——1x 显示器不超采样时，球缘的锯齿一眼可见。
+//
+// 高倍率屏幕上只加两成：3 倍设备像素已经用掉了大半预算，再加就要么超预算、
+// 要么把每帧的静态层拷贝拖慢。
+function renderScale(cssWidth: number, cssHeight: number): number {
+  const device = Math.min(Math.max(window.devicePixelRatio || 1, 1), 4)
+  let extra = 1.75
+  if (device >= 2.5) {
+    extra = 1.2
+  } else if (device >= 1.5) {
+    extra = 1.4
+  }
+  const wanted = device * extra
+  const area = Math.max(1, cssWidth * cssHeight)
+  const afford = Math.sqrt(PIXEL_BUDGET / area)
+  const scale = Math.min(wanted, Math.max(device, afford))
+  // 取到 1/8 档：容器拖大拖小时倍率会连续变化，不取整的话静态层每帧都要重建。
+  return Math.round(scale * 8) / 8
 }
 
-// syncSize 把位图尺寸对齐到「CSS 尺寸 × DPR」，返回当前的 CSS 尺寸。
+// syncSize 把位图尺寸对齐到「CSS 尺寸 × 倍率」，返回 CSS 尺寸与所用倍率。
 //
 // canvas 有两套尺寸：style 上的 CSS 尺寸与 width/height 属性上的位图尺寸。
 // 只设 CSS 会让位图按默认 300×150 拉伸，画面糊成一片；
@@ -78,22 +104,24 @@ function dprOf(): number {
 //
 // 容器在 display:none 或路由切换的瞬间尺寸是 0，这时返回 null 跳过这一帧，
 // 而不是把位图设成 0：0 宽的画布之后再往上画会被静默丢弃，且不报错。
-function syncSize(el: HTMLCanvasElement): { width: number; height: number } | null {
+function syncSize(
+  el: HTMLCanvasElement,
+): { width: number; height: number; scale: number } | null {
   const cssWidth = el.clientWidth
   const cssHeight = el.clientHeight
   if (cssWidth <= 0 || cssHeight <= 0) {
     return null
   }
 
-  const dpr = dprOf()
-  const bufWidth = Math.round(cssWidth * dpr)
-  const bufHeight = Math.round(cssHeight * dpr)
+  const scale = renderScale(cssWidth, cssHeight)
+  const bufWidth = Math.round(cssWidth * scale)
+  const bufHeight = Math.round(cssHeight * scale)
 
   if (el.width !== bufWidth || el.height !== bufHeight) {
     el.width = bufWidth
     el.height = bufHeight
   }
-  return { width: cssWidth, height: cssHeight }
+  return { width: cssWidth, height: cssHeight, scale }
 }
 
 // staticLayer 是台面的静态层：木框、库边、台呢、六个袋口。
@@ -130,7 +158,7 @@ function ensureStaticLayer(
   return layer
 }
 
-// paint 画一帧。ctx 先按 DPR 缩放，之后绘制代码全程按 CSS 像素算，
+// paint 画一帧。ctx 先按倍率缩放，之后绘制代码全程按 CSS 像素算，
 // 不用再关心屏幕是几倍图。
 function paint(): void {
   const el = canvas.value
@@ -145,12 +173,16 @@ function paint(): void {
   if (!ctx) {
     return
   }
-  const dpr = dprOf()
+  const dpr = size.scale
   const layer = ensureStaticLayer(el.width, el.height, dpr, size)
 
   // 先复位变换再贴静态层：位图已经是物理像素，带着 dpr 缩放贴会被再放一倍。
   ctx.setTransform(1, 0, 0, 1, 0, 0)
   ctx.clearRect(0, 0, el.width, el.height)
+  ctx.imageSmoothingEnabled = true
+  // 静态层与画布同尺寸，这是一次 1:1 的拷贝；但超采样时两者都按物理像素画，
+  // 这里的质量设置只影响最后那次合成，设高一点不吃亏。
+  ctx.imageSmoothingQuality = 'high'
   ctx.drawImage(layer, 0, 0)
 
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)

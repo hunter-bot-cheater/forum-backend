@@ -7,14 +7,21 @@
       <p class="rs__reason">{{ reasonText }}</p>
 
       <!-- 再约的三个状态共用一个位置：等待对方、对方已经点了、什么都没发生。
-           同一件事（要不要再来一局）不该在卡片上出现两种说法。 -->
-      <p v-if="waiting" class="rs__note">已经告诉对方了，等他也点一下</p>
+           同一件事（要不要再来一局）不该在卡片上出现两种说法。
+           人机局是第四种：那边没有第二个人可以等，所以这一行不出现。 -->
+      <p v-if="bot" class="rs__note">再打一局还是这台机器，它不会累</p>
+      <p v-else-if="waiting" class="rs__note">已经告诉对方了，等他也点一下</p>
       <p v-else-if="peerName" class="rs__note is-peer">{{ peerName }} 想再打一局</p>
 
       <div class="rs__actions">
         <button class="rs__btn rs__btn--ghost" type="button" @click="emit('lobby')">回大厅</button>
-        <button class="rs__btn rs__btn--primary" type="button" :disabled="waiting" @click="emit('again')">
-          {{ waiting ? '等对方回应…' : peerName ? '开局' : '再约一局' }}
+        <button
+          class="rs__btn rs__btn--primary"
+          type="button"
+          :disabled="waiting && !bot"
+          @click="emit('again')"
+        >
+          {{ againLabel }}
         </button>
       </div>
     </div>
@@ -41,6 +48,8 @@ const props = defineProps<{
   waiting?: boolean
   // peerName 是「对方先点了再约」时对方的昵称，空串表示对方还没点。
   peerName?: string
+  // bot 表示这一局是打人机：按钮变成「再打一局」，也不需要等任何人回应。
+  bot?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -49,6 +58,21 @@ const emit = defineEmits<{
 }>()
 
 const reasonText = computed(() => reasonLabel(props.reason, props.won))
+
+// againLabel 是主按钮上的字。四种情况里只有「等对方回应」是一种进行中的状态，
+// 其余三种都是「再开一局」这个动作本身，只是对象不同。
+const againLabel = computed(() => {
+  if (props.bot) {
+    return '再打一局'
+  }
+  if (props.waiting) {
+    return '等对方回应…'
+  }
+  if (props.peerName) {
+    return '开局'
+  }
+  return '再约一局'
+})
 </script>
 
 <style scoped>

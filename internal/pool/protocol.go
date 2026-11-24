@@ -2,6 +2,7 @@ package pool
 
 import (
 	"encoding/json"
+	"time"
 
 	"forum-backend/internal/pool/sim"
 )
@@ -11,6 +12,16 @@ import (
 // 统一信封：type 定路由，seq 用于「请求—应答」配对，ts 让客户端算延迟。
 // 不用裸结构体是因为将来加观战、加表情、加聊天都是同一个连接，
 // 每加一种消息就多一个顶层字段的话，解析逻辑会变成一堆 if。
+
+// 聊天的两条硬约束：正文字符上限，与同一座位两次发言的最小间隔。
+//
+// 上限按**字符**算而不是字节：一句中文 20 个字是 60 字节，按字节限长
+// 会把正常中文截成半句。120 字够说清一件事，也不至于把面板撑成小作文。
+// 间隔取 700ms 是「手快连发两句没问题、按住回车刷不了屏」的量级。
+const (
+	chatMaxRunes = 120
+	chatInterval = 700 * time.Millisecond
+)
 
 // 下行消息类型。
 const (
@@ -22,6 +33,7 @@ const (
 	MsgResult = "result" // 结算
 	MsgPeer   = "peer"   // 对手状态：joined / left / offline / declined
 	MsgAim    = "aim"    // 一方正在瞄准：角度与力度，实时转给对面与观战者
+	MsgChat   = "chat"   // 对局内的一条聊天（文字或表情）
 	MsgError  = "error"  // 业务错误，seq 与请求配对
 )
 
@@ -31,6 +43,7 @@ const (
 	CmdShoot    = "shoot"
 	CmdPlaceCue = "place_cue"
 	CmdAim      = "aim"
+	CmdChat     = "chat"
 	CmdLeave    = "leave"
 	CmdResume   = "resume"
 )
@@ -116,8 +129,13 @@ type FoulData struct {
 
 // ResultData 是结算。
 type ResultData struct {
-	Winner    Seat   `json:"winner"`
-	Reason    string `json:"reason"`
+	Winner Seat   `json:"winner"`
+	Reason string `json:"reason"`
+	// Series 是结算之后这一轮连续对局的比分，按座位排（含刚打完这一局）。
+	//
+	// 单独带一份而不是等下一次快照：判负与离场这两条路径不会再补快照，
+	// 只靠快照的话，顶上的比分要等到下一局开始才会跳。
+	Series    [2]int `json:"series"`
 	EloDelta0 int    `json:"elo_delta_0"`
 	EloDelta1 int    `json:"elo_delta_1"`
 }
@@ -130,18 +148,38 @@ type PeerData struct {
 
 // AimData 是某个人此刻的瞄准姿态，转给对面与观战者用。
 //
-// 只带角度与力度：球杆画在哪、拉多远都由客户端自己算，服务端不掺和外观。
+// 带角度、力度与击球点：对面要看到的不只是杆子朝哪，还有力度条推到了哪、
+// 这一杆加了什么塞。三者都由客户端自己算外观，服务端只负责搬运。
 // 这条消息不进状态机，丢了也无所谓——下一帧马上就到。
+//
+// A 是左右塞、B 是高低杆，都在 -1 到 1 之间，口径与 Shoot 的上行参数一致。
 type AimData struct {
 	Seat  Seat    `json:"seat"`
 	Phi   float64 `json:"phi"`
 	Power float64 `json:"power"`
+	A     float64 `json:"a"`
+	B     float64 `json:"b"`
 }
 
 // ErrorData 是业务错误。Code 是稳定标识，Message 是给玩家看的中文。
 type ErrorData struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+// ChatData 是对局内的一条聊天。
+//
+// 只做实时转发，不落库：对局内的聊天是「打这一局时说的话」，
+// 局散了就没有回看的意义，存下来反而要处理一堆隐私与清理的事。
+// 观战者收得到（他们看的是同一块屏），但发不了。
+//
+// ID 由服务端单调发号（actor 里自增），客户端拿它当列表的 key：
+// 重连时快照不带历史消息，只有在线那几条，用序号做 key 不会错位。
+type ChatData struct {
+	Seat Seat   `json:"seat"`
+	Text string `json:"text"`
+	ID   int64  `json:"id"`
+	TS   int64  `json:"ts"`
 }
 
 // 错误码。前端按码决定是提示、回滚到上一次快照，还是直接断开重连。

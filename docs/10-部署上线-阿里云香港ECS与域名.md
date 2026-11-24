@@ -443,7 +443,14 @@ docker compose exec -T \
 其余配置保持默认即可。几个值得知道的：
 
 - `server.trusted_proxies: ["172.28.0.0/16"]` 与 compose 里写的子网对应，让后端能从 `X-Forwarded-For` 里取真实客户端 IP。改子网就要同步改这里，否则按 IP 限流会把所有访客算成同一个 IP，十个人就能把限流打满。
-- `rate_limit.capacity: 10`、`rate: 2` 表示每个 IP 每秒补充 2 个令牌、最多攒 10 个。这是给小站点的保守值。
+- `rate_limit.capacity: 40`、`rate: 8` 表示每个 IP 每秒补充 8 个令牌、最多攒 40 个。
+  原来是 10 / 2：大厅进去就是三发并发（在线名单、我的房间、进行中的对局），
+  房间页每 2 秒再轮询一次，同一台手机开两个标签页就能把桶打空，页面上一排
+  「刷新失败」。改成 40 / 8 之后正常使用碰不到上限。
+  注意这一条**不在打包产物里**：`config/config.yaml` 是宿主机挂进 api 容器的
+  （见第 9 节），`scripts/pack-linux.sh` 只传 `.build/{api,web}`。所以本地改了
+  开发用的 `config/config.yaml` 并不会同步到线上，必须在服务器上再改一次，
+  改完 `docker compose restart api`（不用重建镜像）。
 - `log.format: json`：生产用 JSON，方便以后接日志系统检索；本机开发用 `text` 更好读。
 
 ### 7.3 收紧文件权限
@@ -491,6 +498,14 @@ source ~/.bashrc
 注意这里写的是绝对路径。相对路径是相对「当前目录」解析的，你在别的目录执行 `docker compose` 就会找不到文件，报 `no configuration file provided`。
 
 如果你打算按 13.5 的方式部署（本机编译、服务器只打镜像），`COMPOSE_FILE` 还要再加第三份 `deploy/prod/docker-compose.artifact.yml`。13.5 第四步有完整命令，这里的写法不用推翻，只是末尾多一段路径。
+
+**更稳的做法是写进 `/opt/forum/.env`**：compose 启动时会先读 `.env`，里面设了 `COMPOSE_FILE` 就按它叠加，不依赖登录 shell 有没有 source 过 `.bashrc`——非交互 ssh、cron 都能读到。三份叠满之后，`cd /opt/forum && docker compose ps` 在任何情况下都是对的：
+
+```bash
+COMPOSE_FILE=/opt/forum/docker-compose.yml:/opt/forum/deploy/prod/docker-compose.prod.yml:/opt/forum/deploy/prod/docker-compose.artifact.yml
+```
+
+验证方法是看 `docker compose config` 的 `context` 是不是 `.build/api`：还是 `/opt/forum` 就说明某份没读到。2026-11-24 那次事故的起因就是只在命令行前缀给了 `COMPOSE_FILE`：同一条 ssh 里第一条 `build` 带了、第二条 `up` 没带，叠加层退回根 compose，在一台 2C2G 的机器上把整机拖到连 ssh 都登不上。
 
 还要记住一件事：**`~/.bashrc` 只对交互式登录的 shell 生效，cron 不读它**。所以写进 crontab 的命令必须自己带上 `COMPOSE_FILE`（见 13.2 的例子），否则定时任务会报找不到配置文件，而且你收不到任何提示。
 
@@ -1397,8 +1412,8 @@ tar -xzf /tmp/forum-linux-amd64.tar.gz -C /opt/forum
 sed -i '/^IMAGE_TAG=/d' .env && echo "IMAGE_TAG=$(cat .build/IMAGE_TAG)" >> .env
 rm -f /tmp/forum-linux-amd64.tar.gz
 docker compose build api web
-docker compose up -d --no-deps api
-docker compose up -d --no-deps --force-recreate web
+docker compose up -d --no-deps --no-build api
+docker compose up -d --no-deps --force-recreate --no-build web
 ```
 
 `--api-only` 让脚本跳过 `npm run build`，几十秒就能打包完。
@@ -1419,7 +1434,7 @@ tar -xzf /tmp/forum-linux-amd64.tar.gz -C /opt/forum
 sed -i '/^IMAGE_TAG=/d' .env && echo "IMAGE_TAG=$(cat .build/IMAGE_TAG)" >> .env
 rm -f /tmp/forum-linux-amd64.tar.gz
 docker compose build api web
-docker compose up -d --no-deps --force-recreate web
+docker compose up -d --no-deps --force-recreate --no-build web
 ```
 
 改了表结构的话，在 `up -d api` 之前加一步 `docker compose run --rm migrate`。
@@ -1462,8 +1477,8 @@ forum-api   1117-2310-3f91ab2   9f8e7d6c5b4a   3 hours ago     62MB
 
 ```bash
 sed -i '/^IMAGE_TAG=/d' .env && echo "IMAGE_TAG=1117-2310-3f91ab2" >> .env
-docker compose up -d --no-deps api
-docker compose up -d --no-deps --force-recreate web
+docker compose up -d --no-deps --no-build api
+docker compose up -d --no-deps --force-recreate --no-build web
 ```
 
 镜像还在本地，不用重新构建，几秒就切回去。这也是每次换标签最实际的好处。

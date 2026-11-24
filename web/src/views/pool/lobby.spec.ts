@@ -21,8 +21,16 @@ const mocks = vi.hoisted(() => ({
   reopen: vi.fn(),
   ready: vi.fn(),
   invite: vi.fn(),
+  // 人机对战：空房卡片下面那行「先和机器人练一杆」走它。
+  bot: vi.fn(),
   replace: vi.fn(),
 }))
+
+// routeState 是 useRoute() 返回的东西。
+//
+// 单独放一份而不是塞进 mocks：beforeEach 会对 mocks 里的每一项调 mockReset，
+// 把普通对象放进去会直接炸。分享链接那几条用例改 params 来模拟 /pool/join/:code。
+const routeState = vi.hoisted(() => ({ params: {} as Record<string, string> }))
 
 vi.mock('@/api/pool', () => ({
   getLiveMatches: (...args: unknown[]) => mocks.live(...args),
@@ -32,6 +40,7 @@ vi.mock('@/api/pool', () => ({
   leaveRoom: (...args: unknown[]) => mocks.leave(...args),
   reopenRoom: (...args: unknown[]) => mocks.reopen(...args),
   setReady: (...args: unknown[]) => mocks.ready(...args),
+  startBotMatch: (...args: unknown[]) => mocks.bot(...args),
   listPendingInvites: vi.fn(() => Promise.resolve([])),
   createInvite: (...args: unknown[]) => mocks.invite(...args),
   acceptInvite: vi.fn(),
@@ -55,16 +64,18 @@ vi.mock('element-plus', async (importOriginal) => {
   return {
     ...actual,
     ElMessage: { success: vi.fn(), info: vi.fn(), error: vi.fn() },
+    // 剪贴板拿不到时挂的那个「手动复制」弹窗，同样只验调用。
+    ElMessageBox: { alert: vi.fn(() => Promise.resolve()) },
   }
 })
 
 vi.mock('vue-router', async (importOriginal) => {
-  // 只替换 useRouter：整体替换会让 vue-router 的其它导出消失，
-  // 以后加一行 useRoute 就炸。
+  // 只替换 useRouter / useRoute：整体替换会让 vue-router 的其它导出消失。
   const actual = await importOriginal<typeof import('vue-router')>()
   return {
     ...actual,
     useRouter: () => ({ replace: mocks.replace, push: mocks.replace }),
+    useRoute: () => ({ params: routeState.params }),
   }
 })
 
@@ -144,6 +155,19 @@ async function mountPage(loaded = true) {
   return { wrapper, user }
 }
 
+// toolButton 按文案找页头的次要按钮。
+//
+// 不能写 findAll('.pl__tool')[0]：那一排会随着入口增减而变（曾经有过
+// 第三颗「人机对战」，撤掉之后「输入房号」的位置就变了），
+// 用例会挂在一个与它要测的东西无关的位置上。
+function toolButton(wrapper: ReturnType<typeof mount>, text: string) {
+  const found = wrapper.findAll('.pl__tool').find((item) => item.text().includes(text))
+  if (!found) {
+    throw new Error('页头没有「' + text + '」按钮')
+  }
+  return found
+}
+
 // me 造一份自己的资料。userId 是 profile 的派生值（computed），
 // 所以「我是谁」只能通过 profile 设置，不能直接改 userId。
 function me(id: number): MeResp {
@@ -166,6 +190,7 @@ beforeEach(() => {
   for (const fn of Object.values(mocks)) {
     fn.mockReset()
   }
+  routeState.params = {}
   mocks.live.mockResolvedValue([])
   mocks.myRoom.mockResolvedValue(room())
   mocks.online.mockResolvedValue([])
@@ -350,6 +375,217 @@ describe('大厅的房间', () => {
   })
 })
 
+describe('人机对战', () => {
+  // 人机局不需要房号、也不需要等谁点准备：点一下就该直接进对局页。
+  // 入口在空房那张卡片的「等对手进来」下面——页头那颗同名按钮已经撤掉，
+  // 两个入口说的是同一件事，只留更贴近场景的那一个。
+  it('点「先和机器人练一杆」直接开局并跳到对局页', async () => {
+    mocks.bot.mockResolvedValue(room({ match_id: 66, status: 'playing' }))
+    const { wrapper } = await mountPage()
+
+    const also = wrapper.find('.pl__also-btn')
+    expect(also.exists()).toBe(true)
+    await also.trigger('click')
+    await flushPromises()
+
+    expect(mocks.bot).toHaveBeenCalledTimes(1)
+    expect(mocks.replace).toHaveBeenCalledWith('/pool/match/66')
+    // 页头那一排只剩「输入房号」与「我的战绩」。
+    const tools = wrapper.findAll('.pl__tool').map((item) => item.text())
+    expect(tools).not.toContain('人机对战')
+  })
+
+  // 对面已经坐了人时不该再出现这一行：那会儿想打球就是跟他打。
+  it('座位有人时不显示这一行', async () => {
+    mocks.myRoom.mockResolvedValue(occupied())
+    const { wrapper } = await mountPage()
+
+    expect(wrapper.find('.pl__also-btn').exists()).toBe(false)
+  })
+
+  // 开局失败时按钮要能再点：一直灰着等于让人重启页面。
+  it('开局失败后按钮解锁', async () => {
+    mocks.bot.mockRejectedValue(new Error('boom'))
+    const { wrapper } = await mountPage()
+
+    const button = wrapper.find('.pl__also-btn')
+    await button.trigger('click')
+    await flushPromises()
+
+    expect(button.attributes('disabled')).toBeUndefined()
+    expect(button.text()).toBe('先和机器人练一杆')
+    expect(mocks.replace).not.toHaveBeenCalled()
+  })
+})
+
+describe('分享链接', () => {
+  // 点链接进来就直接坐进对面那个座位，不用再手抄六位房号。
+  it('带房号进来直接进房，并替他按下准备', async () => {
+    routeState.params = { code: '654321' }
+    mocks.join.mockResolvedValue(
+      room({
+        match_id: 31,
+        room_code: '654321',
+        seat: 1,
+        ready: [false, true],
+        players: [
+          { user_id: 12, nickname: '房主甲', avatar: '' },
+          { user_id: 9, nickname: '我', avatar: '' },
+        ],
+      }),
+    )
+    const { wrapper } = await mountPage()
+
+    // 第二个参数是「顺手替我准备」：点链接这个动作已经表达了我要打。
+    expect(mocks.join).toHaveBeenCalledWith('654321', true)
+    // 不能先给自己开一间：那会让房间卡闪一下「我的房间」再换成对方的。
+    expect(mocks.myRoom).not.toHaveBeenCalled()
+    // 地址换回 /pool，留在 join 链接上刷新一次会再进一次房。
+    expect(mocks.replace).toHaveBeenCalledWith('/pool')
+    expect(wrapper.find('.pl__code-value').text()).toBe('654321')
+    expect(wrapper.find('.pl__room-title').text()).toContain('对方的房间')
+  })
+
+  // 房间过期、链接被改过：不能把人卡在一个坏链接上。
+  it('链接失效时退回大厅，并给自己开一间房', async () => {
+    routeState.params = { code: '111111' }
+    mocks.join.mockRejectedValue(new Error('房间不在了'))
+    const { wrapper } = await mountPage()
+    await flushPromises()
+
+    expect(mocks.replace).toHaveBeenCalledWith('/pool')
+    expect(mocks.myRoom).toHaveBeenCalled()
+    expect(wrapper.find('.pl__code-value').text()).toBe('123456')
+    // 不是人满，就不该出现那条提示。
+    expect(wrapper.find('.pl__full').exists()).toBe(false)
+  })
+
+  // 分享链接是发给一群人的：第一个点开的坐进来，后面的人要看到「人满」。
+  it('链接那间房坐满了，页面上要说清人满并把自己那间开出来', async () => {
+    routeState.params = { code: '222222' }
+    // 拦截器把 409 的 error_code 挂在错误对象上，页面按它分支。
+    const refused = Object.assign(new Error('房间人满，这张球桌已经坐满了'), {
+      errorCode: 'room_full',
+    })
+    mocks.join.mockRejectedValue(refused)
+    const { wrapper } = await mountPage()
+    await flushPromises()
+
+    expect(mocks.replace).toHaveBeenCalledWith('/pool')
+    // 不能停在别人的满桌上：自己的桌子照样要开出来。
+    expect(mocks.myRoom).toHaveBeenCalled()
+    const notice = wrapper.find('.pl__full')
+    expect(notice.exists()).toBe(true)
+    expect(notice.text()).toContain('人满')
+    // 说明要留在页面上，不能只弹一条会自己消失的 toast。
+    expect(wrapper.find('.pl__code-value').text()).toBe('123456')
+  })
+
+  // 分享发的是链接而不是房号：对方点开就进来，不用再手动输。
+  it('点分享复制一条能直接进房的链接', async () => {
+    const writeText = vi.fn((text: string) => Promise.resolve(text))
+    // jsdom 没有 navigator.share，正好走剪贴板那条路。
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    })
+
+    const { wrapper } = await mountPage()
+    const button = wrapper.find('.pl__share')
+    expect(button.exists()).toBe(true)
+    await button.trigger('click')
+    await flushPromises()
+
+    const copied = String(writeText.mock.calls[0][0])
+    expect(copied).toContain(window.location.origin + '/pool/join/123456')
+    // 光一条网址看不出是打球：说明里要有台球，收链接的人才认得出。
+    expect(copied).toContain('台球')
+    expect(copied).toContain('先到先得')
+    // 撤掉这份假 clipboard，别让它漏到下一条用例里。
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+  })
+
+  // 电脑上的 navigator.share 接的是 Windows 系统分享，点下去只会弹「共享失败」。
+  // 桌面一律走剪贴板：点一下就复制，用户自己粘给对方。
+  it('桌面不调系统分享，点一下就复制到剪贴板', async () => {
+    const writeText = vi.fn((text: string) => Promise.resolve(text))
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    // jsdom 的 UA 是桌面版，这里把 share 也塞进去：有也不能用。
+    const share = vi.fn(() => Promise.resolve())
+    Object.defineProperty(navigator, 'share', { value: share, configurable: true })
+
+    const { wrapper } = await mountPage()
+    await wrapper.find('.pl__share').trigger('click')
+    await flushPromises()
+
+    expect(share).not.toHaveBeenCalled()
+    expect(writeText).toHaveBeenCalledTimes(1)
+    // 桌面上的动作是「复制」，按钮文案要跟着说实话。
+    expect(wrapper.find('.pl__share-go').text()).toBe('复制链接')
+
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+    Object.defineProperty(navigator, 'share', { value: undefined, configurable: true })
+  })
+
+  // 剪贴板被禁（非 https、浏览器不给权限）时，得让人看得见链接、手动选中。
+  it('复制失败时把链接摆出来让人手动复制', async () => {
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText: vi.fn(() => Promise.reject(new Error('denied'))) },
+      configurable: true,
+    })
+    const { ElMessageBox } = await import('element-plus')
+
+    const { wrapper } = await mountPage()
+    await wrapper.find('.pl__share').trigger('click')
+    await flushPromises()
+
+    expect(vi.mocked(ElMessageBox.alert)).toHaveBeenCalledTimes(1)
+    expect(String(vi.mocked(ElMessageBox.alert).mock.calls[0][0])).toBe(
+      window.location.origin + '/pool/join/123456',
+    )
+
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+  })
+
+  // 手机上的 share 走的是微信、QQ 那套系统面板，能用就继续用。
+  it('手机点分享走系统分享面板，不走剪贴板', async () => {
+    const uaDesc = Object.getOwnPropertyDescriptor(navigator, 'userAgent')
+    Object.defineProperty(navigator, 'userAgent', {
+      value:
+        'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148',
+      configurable: true,
+    })
+    const share = vi.fn(() => Promise.resolve())
+    Object.defineProperty(navigator, 'share', { value: share, configurable: true })
+    const writeText = vi.fn((text: string) => Promise.resolve(text))
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+
+    const { wrapper } = await mountPage()
+    await wrapper.find('.pl__share').trigger('click')
+    await flushPromises()
+
+    expect(share).toHaveBeenCalledTimes(1)
+    expect(writeText).not.toHaveBeenCalled()
+    expect(wrapper.find('.pl__share-go').text()).toBe('发链接')
+
+    if (uaDesc) {
+      Object.defineProperty(navigator, 'userAgent', uaDesc)
+    } else {
+      delete (navigator as { userAgent?: string }).userAgent
+    }
+    Object.defineProperty(navigator, 'share', { value: undefined, configurable: true })
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+  })
+
+  // 对面有人之后再分享只会让对方点进来吃一句「人满」。
+  it('对面有人时不给分享入口', async () => {
+    mocks.myRoom.mockResolvedValue(occupied())
+    const { wrapper } = await mountPage()
+
+    expect(wrapper.find('.pl__share').exists()).toBe(false)
+  })
+})
+
 describe('输房号进房', () => {
   it('输入条平时收着，点「输入房号」才展开，满六位就把房号发出去', async () => {
     mocks.join.mockResolvedValue(
@@ -365,7 +601,7 @@ describe('输房号进房', () => {
 
     // 不常驻：页面最显眼的位置留给房间卡。
     expect(wrapper.find('.pl__join').exists()).toBe(false)
-    await wrapper.findAll('.pl__tool')[0].trigger('click')
+    await toolButton(wrapper, '输入房号').trigger('click')
 
     const input = wrapper.find('.pl__join-input')
     await input.setValue('12345')
@@ -383,7 +619,7 @@ describe('输房号进房', () => {
 
   it('输入里的非数字被过滤掉，长度也只留六位', async () => {
     const { wrapper } = await mountPage()
-    await wrapper.findAll('.pl__tool')[0].trigger('click')
+    await toolButton(wrapper, '输入房号').trigger('click')
 
     const input = wrapper.find('.pl__join-input')
     await input.setValue('12 34-56 78')

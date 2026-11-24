@@ -36,7 +36,12 @@ var roomCodePattern = regexp.MustCompile(`^[0-9]{6}$`)
 // 「房号输错了」与「房间已经开始了」对用户来说是完全不同的两件事。
 const (
 	msgRoomNotFound = "房号不对，或者这个房间已经开始了"
-	msgRoomTaken    = "这个房间已经有人了"
+	// msgRoomFull 是「空位已经被人坐了」。
+	//
+	// 分享链接是发给一群人的（群里、朋友圈都行），第一个点开的坐上，
+	// 后面的人都会撞到这句。所以文案说的是「人满」而不是「有人了」：
+	// 后者听着像是自己走错了房间，前者才说得清是「同一张球桌，你来晚了」。
+	msgRoomFull = "房间人满，这张球桌已经坐满了"
 )
 
 // MyRoom godoc
@@ -316,7 +321,7 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 		return
 	}
 	if !joined {
-		response.Error(c, http.StatusConflict, msgRoomTaken)
+		response.ErrorWithCode(c, http.StatusConflict, response.ErrCodeRoomFull, msgRoomFull)
 		return
 	}
 
@@ -345,7 +350,39 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 	// 还有另一种「另一间房」：我曾以客人身份坐在别人房里，那一行也记着我。
 	h.vacateGuestSeats(ctx, userID, row.ID)
 
+	// 分享链接进来的客人由服务端替他按下准备：点链接这一步已经表达了「我要打」，
+	// 再让人去点一次准备是多余的一步，很多人进来了还在那儿等房主点。
+	// 失败不回滚座位——人已经坐进来了，自己点一下照样能开局。
+	if req.Ready {
+		h.autoReadyGuest(ctx, match, row.ID)
+	}
+
 	h.writeRoom(c, match, Seat1)
+}
+
+// autoReadyGuest 替「点分享链接进来」的客人按一次准备。
+//
+// 不做重试：失败的后果只是他要自己点一下，而重试会在一局可能已经开打的
+// 状态上多按几次——那比少按一次更难看。只按一次，按上了再补一件 Ready
+// 接口里同样要做的事：双方都准备好时把库里那行推到进行中。
+func (h *Handler) autoReadyGuest(ctx context.Context, match *Match, matchID uint) {
+	if err := match.SetReady(Seat1, true); err != nil {
+		slog.WarnContext(ctx, "auto ready guest", "match_id", matchID, "error", err)
+		return
+	}
+
+	snapshot, err := match.Snapshot(Seat1)
+	if err != nil {
+		slog.WarnContext(ctx, "snapshot after auto ready", "match_id", matchID, "error", err)
+		return
+	}
+	if snapshot.Status != model.PoolStatusPlaying {
+		return
+	}
+	// 落库失败不回滚内存状态：对局已经在跑了，让它停下来的代价更大。
+	if err := h.store.MarkPlaying(ctx, snapshot.MatchID); err != nil {
+		slog.ErrorContext(ctx, "mark pool match playing", "match_id", snapshot.MatchID, "error", err)
+	}
 }
 
 // retireOwnRooms 把「我自己开的那几间房」标成过期，并摘掉内存里的 actor。

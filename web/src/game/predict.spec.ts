@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import fixtureRaw from './__fixtures__/pooltool-shots.json?raw'
 import { aimFromCue, aimGuides } from './aim'
-import { predictShot } from './predict'
-import { BALL_RADIUS } from './table'
+import { fitTable, worldToScreen } from './geometry'
+import { predictShot, speedOfPower, spinThrowDeg } from './predict'
+import { TABLE_PADDING } from './renderer'
+import { BALL_RADIUS, TABLE_LENGTH } from './table'
 import type { BallState, ShotParams } from './types'
 
 // 对照数据由 pool-sim 真实跑出来的轨迹（见测试末尾的生成方式说明）。
@@ -183,6 +185,30 @@ describe('本地预测', () => {
 // 根因是碰撞解算按「整步走完」的位置取法向，母球满速一步走 18.3 毫米，
 // 球心连线被穿透量带偏，打薄球时偏出五到九度。改了精确接触时刻之后，
 // 这里锁住 1 度以内——再松就又能被肉眼看出「线在骗人」。
+// powerForSpeed 反查「要多少力度才有这个出速」。
+//
+// 这些用例关心的是物理（甩球角、低杆回拉、引导线精度），不该被力度曲线
+// 牵着走：曲线从线性改成平方之后，同一个力度对应的球速掉了一大半，
+// 直接写 0.55 的用例会莫名其妙地失败——而它想说的其实一直是「中速的一杆」。
+// 所以这里按 m/s 反查力度：以后无论曲线怎么改，用例说的还是同一件事。
+function powerForSpeed(target: number): number {
+  let lo = 0
+  let hi = 1
+  for (let i = 0; i < 40; i += 1) {
+    const mid = (lo + hi) / 2
+    if (speedOfPower(mid) < target) {
+      lo = mid
+    } else {
+      hi = mid
+    }
+  }
+  return (lo + hi) / 2
+}
+
+// MEDIUM_SPEED 是这批用例默认的「中速一杆」：2.44 m/s，
+// 也就是改曲线之前 0.55 那个力度对应的速度。
+const MEDIUM_SPEED = 2.44
+
 describe('引导线精度', () => {
   // 母球沿 +x 直走，目标球横向偏移出击球厚度 b（b = 0 正碰，b = 2R 擦边）。
   function cutShot(ratio: number): { balls: BallState[]; phi: number } {
@@ -217,7 +243,9 @@ describe('引导线精度', () => {
 
   it('各种厚度、各种力度下，出球方向与引导线相差不到 1 度', () => {
     const ratios = [0.2, 0.4, 0.6, 0.8, 0.9, 0.95]
-    const powers = [0.2, 0.5, 0.9]
+    // 慢、中、快三档，按速度给。低于 0.8 m/s 时 0.4 米的距离根本打不到目标球，
+    // 而这组用例要的是「撞上之后方向准不准」。
+    const powers = [powerForSpeed(0.9), powerForSpeed(MEDIUM_SPEED), powerForSpeed(3.8)]
     for (const power of powers) {
       for (const ratio of ratios) {
         const { balls, phi } = cutShot(ratio)
@@ -271,7 +299,7 @@ describe('加塞', () => {
       { id: 'cue', x: 0.3, y: 0.99, z: 0, on_table: true },
       { id: '1', x: 0.6, y: 0.99, z: 0, on_table: true },
     ]
-    const params: ShotParams = { phi: 0, power: 0.55, theta: 0, a, b }
+    const params: ShotParams = { phi: 0, power: powerForSpeed(MEDIUM_SPEED), theta: 0, a, b }
     return predictShot(balls, params)!
   }
 
@@ -294,26 +322,97 @@ describe('加塞', () => {
     expect(Math.abs(cue.x - (0.6 - BALL_RADIUS * 2))).toBeLessThan(0.02)
   })
 
-  it('加塞不改变目标球的出球方向（引导线才能画准）', () => {
-    const plain = straightHit(0, 0)
-    const spinned = straightHit(0, 1)
-    const dirOf = (shot: { frames: Array<{ t: number; balls: Array<[string, number, number, number]> }> }) => {
-      let prev: [string, number, number, number] | null = null
-      for (const frame of shot.frames) {
-        const item = frame.balls.find((ball) => ball[0] === '1')
-        if (!item) {
-          return null
-        }
-        if (prev && Math.hypot(item[1] - prev[1], item[2] - prev[2]) > 1e-6) {
-          return Math.atan2(item[2] - prev[2], item[1] - prev[1])
-        }
-        prev = item
+  // dirOf 取目标球被撞之后那一段的方向（弧度）。
+  //
+  // 起点是「它开始动的那一帧」，终点隔 10 帧（约 0.08 秒，十来厘米）：
+  // 只隔一帧的话位移只有几毫米，而关键帧坐标只保留 0.1 毫米，
+  // 侧向那一点点位移会被量化噪声盖住（实测能把 1° 量成 1.7°）。
+  // 10 帧之内它还没走到库边，方向仍是碰撞刚给的那个。
+  function dirOf(shot: {
+    frames: Array<{ t: number; balls: Array<[string, number, number, number]> }>
+  }): number | null {
+    for (let i = 1; i < shot.frames.length; i += 1) {
+      const prev = shot.frames[i - 1].balls.find((ball) => ball[0] === '1')
+      const cur = shot.frames[i].balls.find((ball) => ball[0] === '1')
+      if (!prev || !cur) {
+        return null
       }
-      return null
+      if (Math.hypot(cur[1] - prev[1], cur[2] - prev[2]) <= 1e-6) {
+        continue
+      }
+      const end = shot.frames[Math.min(i + 10, shot.frames.length - 1)].balls.find(
+        (ball) => ball[0] === '1',
+      )
+      if (!end) {
+        return null
+      }
+      return Math.atan2(end[2] - cur[2], end[1] - cur[1])
     }
-    expect(dirOf(plain)).not.toBeNull()
-    expect(dirOf(spinned)).not.toBeNull()
-    expect(dirOf(spinned)!).toBeCloseTo(dirOf(plain)!, 9)
+    return null
+  }
+
+  // 加塞撞正碰的球：目标球会被甩离球心连线，右塞一边、左塞另一边。
+  //
+  // 这是真实台球的「甩球」（throw）。以前的模型让目标球永远走球心连线，
+  // 满塞打出去和空杆一模一样，玩家会发现塞在撞球时毫无作用。
+  it('加塞把目标球甩偏，左右塞方向相反', () => {
+    const plain = (dirOf(straightHit(0, 0))! * 180) / Math.PI
+    const right = (dirOf(straightHit(0, 1))! * 180) / Math.PI
+    const left = (dirOf(straightHit(0, -1))! * 180) / Math.PI
+
+    // 不加塞时就是球心连线。
+    expect(plain).toBeCloseTo(0, 6)
+    // 满塞在 2.4 m/s 的球速下应当偏出零点几度：太小看不见，超过 5° 就不真实了。
+    expect(Math.abs(right)).toBeGreaterThan(0.3)
+    expect(Math.abs(right)).toBeLessThan(5)
+    // 左右镜像。
+    expect(right).toBeCloseTo(-left, 6)
+  })
+
+  // 甩球曲线本身：资料里那几个特征点必须成立。
+  //
+  // 最大甩球出现在「慢速、中杆、约一半塞」，不是满塞；高杆低杆各压掉四分之三；
+  // 球速越快甩得越少。这三条是 Dr. Dave 的实测结论，也是玩家能感觉到的差别。
+  it('甩球角：半颗塞最大、满塞更小、高杆低杆压掉大半', () => {
+    const half = Math.abs(spinThrowDeg(0.5, 1, 0))
+    const full = Math.abs(spinThrowDeg(1, 1, 0))
+    const quarter = Math.abs(spinThrowDeg(0.25, 1, 0))
+    expect(half).toBeGreaterThan(quarter)
+    expect(half).toBeGreaterThan(full)
+
+    // 高低杆把甩球压到四分之一上下。
+    const withFollow = Math.abs(spinThrowDeg(0.5, 1, 1))
+    expect(withFollow).toBeLessThan(half * 0.3)
+
+    // 快速球几乎不甩。
+    const fast = Math.abs(spinThrowDeg(0.5, 4, 0))
+    expect(fast).toBeLessThan(half * 0.25)
+
+    // 中杆零塞一定不甩，方向随塞号反过来。
+    expect(spinThrowDeg(0, 1, 0)).toBe(0)
+    expect(spinThrowDeg(0.5, 1, 0)).toBe(-spinThrowDeg(-0.5, 1, 0))
+  })
+
+  // 引导线要跟着甩球角一起偏，否则「线指着袋口、球擦着袋角走」。
+  it('引导线的目标球段与预测的甩出方向一致', () => {
+    const balls: BallState[] = [
+      { id: 'cue', x: 0.3, y: 0.99, z: 0, on_table: true },
+      { id: '1', x: 0.6, y: 0.99, z: 0, on_table: true },
+    ]
+    const hit = aimFromCue(balls, 0)
+    const guides = aimGuides(balls, 0, hit, {
+      a: 1,
+      b: 0,
+      speed: speedOfPower(powerForSpeed(MEDIUM_SPEED)),
+    })
+    expect(guides.object).not.toBeNull()
+
+    const from = guides.object!
+    const guideDeg =
+      (Math.atan2(from.to.y - from.from.y, from.to.x - from.from.x) * 180) / Math.PI
+    const realDeg = (dirOf(straightHit(0, 1))! * 180) / Math.PI
+    // 引导线用的是出杆初速，实际撞上时球已经掉了几 % 速度，差 0.2° 以内算对上。
+    expect(Math.abs(guideDeg - realDeg)).toBeLessThan(0.2)
   })
 
   // 库边是侧旋唯一的作用点：同一副塞在上下两条库上把球带向相反的方向，
@@ -334,35 +433,155 @@ describe('加塞', () => {
   })
 })
 
-// 停球那一段只有一种减速：台呢的阻尼。
+// 停球那一段：球要停在「肉眼能看见它一点点慢下来」的那个过程里。
 //
-// 曾经在最末段叠过一层「速度越低、减速度越小」的柔化，想做出「越走越慢」的
-// 观感，实际看到的是球滚到一半忽然减速、再爬半秒才不动——那一顿比直接停
-// 更显眼。现在从出杆到静止减速度是同一个值，速度线性归零。
+// 收尾试过三种做法，观感差别很大：
+//   纯指数（只有 u_r 与粘性项）——最后三秒只走一两厘米，屏幕上不到 2 个像素，
+//     看着像「滚到某处忽然定住」；
+//   阻尼随速度增大（v 越小刹得越狠）——末段位移是有了，但全堆在最后半秒：
+//     前 1 秒几乎匀速，最后 0.4 秒从 57 px/s 塌到 6 px/s，观感是「匀速滚完
+//     啪一下刹住」；
+//   现在（predict.ts 的 tailDecel）——进末段后在 TAIL_RAMP 这段速度区间里
+//     平滑升到恒定减速度，速度因此线性趋零，每 0.1 秒的位移稳定地少一点点。
+//
+// 判据也跟着换成两个：最后 0.6 秒还得看得见在动，且这段位移要均匀递减——
+// 不能出现「前一段 6 像素、后一段 0.5 像素」的塌陷，那正是「突然停下」的来源。
 describe('停球', () => {
-  it('从 3 cm/s 到静止只走完匀速减速那半秒，没有额外的爬行段', () => {
-    // 母球贴着左库往右推，力度压到最小档：全程约 0.27 米，
-    // 到不了右库，速度曲线就是纯粹的摩擦减速（撞库那一下位移会反向，
-    // 用位移量出来的「速度」会误判成已经停了）。
-    const balls: BallState[] = [{ id: 'cue', x: 0.15, y: 0.5, z: 0, on_table: true }]
-    const shot = predictShot(balls, { phi: 0, power: 0.03, theta: 0, a: 0, b: 0 })!
-    // 关键帧的坐标只保留到 0.1 毫米，低速时单帧差值的噪声比信号还大，
-    // 所以隔 WINDOW 帧量一次平均速度（0.07 秒），噪声压到 1 mm/s 以内。
-    const WINDOW = 8
-    let start = -1
-    for (let i = 0; i + WINDOW < shot.frames.length; i += 1) {
-      const a = shot.frames[i]
-      const b = shot.frames[i + WINDOW]
-      const step = Math.hypot(b.balls[0][1] - a.balls[0][1], b.balls[0][2] - a.balls[0][2])
-      if (step / (b.t - a.t) < 0.03) {
-        start = i
+  const view = fitTable({ width: 390, height: 844 }, TABLE_PADDING)
+
+  // tailSteps 把「停球前 seconds 秒」按 0.1 秒切片，返回每段母球在屏幕上走过
+  // 的像素数，最后一项是结尾那 0.1 秒。
+  //
+  // 用 50% 力度、单球沿长边滚：这一段没有别的球、也没有库边折返，
+  // 位移就是纯粹的摩擦减速，量出来是什么就是什么。
+  function tailSteps(seconds: number): number[] {
+    const balls: BallState[] = [{ id: 'cue', x: 0.4953, y: 0.3, z: 0, on_table: true }]
+    const shot = predictShot(balls, { phi: Math.PI / 2, power: 0.5, theta: 0, a: 0, b: 0 })!
+    const frames = shot.frames
+    const end = frames[frames.length - 1].t
+    // 关键帧固定 120Hz，按时间反查下标就够了，不必线性扫。
+    const at = (time: number) => {
+      const i = Math.round(time * 120)
+      if (i < 0) {
+        return frames[0]
+      }
+      if (i > frames.length - 1) {
+        return frames[frames.length - 1]
+      }
+      return frames[i]
+    }
+    const steps: number[] = []
+    const count = Math.round(seconds / 0.1)
+    for (let k = count; k >= 1; k -= 1) {
+      const from = at(end - k * 0.1)
+      const to = at(end - (k - 1) * 0.1)
+      const a = worldToScreen(view, from.balls[0][1], from.balls[0][2])
+      const b = worldToScreen(view, to.balls[0][1], to.balls[0][2])
+      steps.push(Math.hypot(b.x - a.x, b.y - a.y))
+    }
+    return steps
+  }
+
+  it('最后 0.6 秒仍然看得出在滚，不是一下子定住', () => {
+    let px = 0
+    for (const step of tailSteps(0.6)) {
+      px += step
+    }
+    // 390×844 下 1 米约 304 像素，球直径才 12 像素。低于 8 像素就是
+    // 「看着已经停了」；高过 40 像素说明末段还在猛冲，收尾会显得被掐断。
+    expect(px).toBeGreaterThan(8)
+    expect(px).toBeLessThan(40)
+  })
+
+  it('越到后面走得越少，没有哪一段骤降', () => {
+    const steps = tailSteps(1.2)
+    for (let i = 1; i < steps.length; i += 1) {
+      const prev = steps[i - 1]
+      const cur = steps[i]
+      // 后一段不能比前一段还大（留 0.2 像素给坐标量化噪声）。
+      expect(cur).toBeLessThan(prev + 0.2)
+      // 也不能突然塌掉。旧实现最后几段是 5.0 → 4.2 → 3.2 → 2.1 → 0.9 → 0.2，
+      // 相邻比值最低到 0.2，看着就是「啪」；现在的最低比值在 0.4 以上。
+      expect(cur).toBeGreaterThan(prev * 0.3)
+    }
+    // 最后 0.4 秒合起来还得有位移，否则「一点点停」只是纸面上的说法。
+    let last = 0
+    for (let i = steps.length - 4; i < steps.length; i += 1) {
+      last += steps[i]
+    }
+    expect(last).toBeGreaterThan(2)
+  })
+})
+
+// 力度到球速的曲线。
+//
+// 这条曲线决定「拉一半是多大力」，是手感里最容易被忽略、又最影响成绩的一层。
+// 它必须按**距离**来验，不能按 m/s：玩家心里的力度就是球能跑多远，
+// 而距离与初速几乎成正比（阻尼里那份跟速度成正比的项占主导），
+// 所以「线性球速」恰好等于「线性距离」。曾经改成平方去「照顾低端精度」，
+// 结果一半力度只滚 3.2 米、下半条等于没有，实机被否掉。
+describe('力度曲线', () => {
+  // rollDistance 量一颗母球沿长边自由滚的总路程。
+  //
+  // 母球放在长边中线上，phi 指向长边，只算这一颗球：
+  // 把 120Hz 关键帧之间的位移累加起来，库边反弹的损耗也在里面。
+  // 起点避开中袋口，免得一杆打进去。
+  function rollDistance(power: number): number {
+    const balls: BallState[] = [{ id: 'cue', x: 0.4953, y: 0.3, z: 0, on_table: true }]
+    const shot = predictShot(balls, { phi: Math.PI / 2, power, theta: 0, a: 0, b: 0 })
+    if (shot === null) {
+      return 0
+    }
+    let total = 0
+    let prev: [number, number] | null = null
+    for (const frame of shot.frames) {
+      const cue = frame.balls.find((b) => b[0] === 'cue')
+      if (cue === undefined) {
         break
       }
+      if (prev !== null) {
+        total += Math.hypot(cue[1] - prev[0], cue[2] - prev[1])
+      }
+      prev = [cue[1], cue[2]]
     }
-    expect(start).toBeGreaterThan(0)
-    const tail = shot.frames[shot.frames.length - 1].t - shot.frames[start].t
-    // 匀速减速下 3 cm/s 掉到零要 0.03 / 0.059 ≈ 0.51 秒（窗口本身再占 0.07 秒）。
-    // 加过柔化收尾时这一段实测在 1.2 秒以上，0.8 秒的窗口能把两种做法分开。
-    expect(tail).toBeLessThan(0.8)
+    return total
+  }
+
+  it('两端是 0.05 与 4.4，中点是半速', () => {
+    // 满力必须还是 4.4：开球靠它。
+    expect(speedOfPower(1)).toBeCloseTo(4.4, 6)
+    expect(speedOfPower(0)).toBeCloseTo(0.05, 6)
+    // 一半力度就是一半速度，开根号或平方都不对。
+    expect(speedOfPower(0.5)).toBeCloseTo(2.225, 2)
+  })
+
+  it('单调：加力一定更快', () => {
+    let prev = -1
+    for (let i = 0; i <= 20; i += 1) {
+      const next = speedOfPower(i / 20)
+      expect(next).toBeGreaterThan(prev)
+      prev = next
+    }
+  })
+
+  it('距离与力度近乎成正比：一半力度能滚一半路程', () => {
+    const half = rollDistance(0.5)
+    const full = rollDistance(1)
+    // 实测 6.23 / 12.0 = 0.52。放宽到 0.45~0.6 只挡住「拐得太狠」的曲线，
+    // 不锁死摩擦参数——u_r 与 ROLL_VISCOUS 调整会让这个比小幅漂移。
+    expect(half / full).toBeGreaterThan(0.45)
+    expect(half / full).toBeLessThan(0.6)
+    // 一半力度至少要能滚过两张台长（3.96 米），否则中距离球全得靠满力。
+    expect(half).toBeGreaterThan(2 * TABLE_LENGTH)
+  })
+
+  it('下半条不是死区：两成力度就能滚过大半张台', () => {
+    // 平方曲线时这里是 0.33 米，台面都过不去，玩家反馈「一半以下没意义」。
+    // 现在 0.2 是 1.84 米、0.3 是 3.22 米。
+    // 注意 0.1 力度只有 0.4 米（纯指数收尾时是 1.10 米）：那 1.1 米里有七成是
+    // 「最后三秒只走一两厘米」的爬行，收尾一压缩就没了。轻推本来就只用来
+    // 贴球、解斯诺克，0.4 米仍在可用范围里；真要更远就推到 0.15 以上。
+    expect(rollDistance(0.2)).toBeGreaterThan(1.7)
+    expect(rollDistance(0.3)).toBeGreaterThan(1.55 * TABLE_LENGTH)
   })
 })

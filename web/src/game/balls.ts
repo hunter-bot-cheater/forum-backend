@@ -96,23 +96,21 @@ export function ballTexture(ballId: string, size: number): HTMLCanvasElement {
 // 再宽又回到「整颗都是彩」——那就又和全色球分不出来了。
 const STRIPE_HALF = 0.58
 
-// 母球上的红点，照练习球（measle ball）的样子点六颗。
+// 母球上的红点：六颗，落在球面三根正交轴的六个极点上（±x、±y、±z），
+// 与练习球（measle ball）的分布一致。
 //
-// 白球是全白的，滚动时看不出它在转还是整车平移——球杆一推，白球像块
-// 圆形贴纸在台呢上滑过去。点六颗红点就有了参照物：转过多少、朝哪边转，
-// 一眼就能看出来。
+// 白球全白的时候，滚动和整块平移在屏幕上看不出区别——球杆一推，白球像块
+// 圆形贴纸滑过去。点六颗红点就有了参照物：转过多少、朝哪边转，一眼可见。
 //
-// 六颗点落在球面三根正交轴的六个极点上（±x、±y、±z），这也是真练习球的
-// 分布。贴图是从极点看过去的正投影，于是：
-//   前后两个极点都落在画布正中心（正投影下它们重合），画一个圆就都有了；
-//   另外四颗在赤道上，落在画布四条边的中点，只画朝内的那一半——正投影下
-//   赤道点的另一半被球体自己挡住，真球也是只看得到一半。
+// 红点**不画在贴图里**：贴图是极点正投影（坐标就是球面法线，u = sinθ），
+// 一颗落在赤道附近的圆点会被压成贴着球缘的一道弧，四颗赤道点连起来就是
+// 「白球镶了一圈红边」。现在由渲染层按球面朝向逐颗画正圆，
+// 见 renderer.ts 的 drawCueDots。
 //
-// 0.19 是点的半径（相对球面半径的比例），对应球心角约 11°。再小就只剩
-// 两三个像素，滚起来还是一团白；再大就成了「白底红点球」，号码球里
-// 一眼分不出哪个是母球。
-const CUE_DOT_SCALE = 0.19
-const CUE_DOT_COLOR = '#c8332a'
+// 0.16 是点的半径（相对球半径）。再小只剩两三个像素，滚起来还是一团白；
+// 再大就成了「白底红点球」，在号码球里一眼分不出哪个是母球。
+export const CUE_DOT_SCALE = 0.16
+export const CUE_DOT_COLOR = '#c8332a'
 
 // paintBall 把一颗球的反照率画进正方形画布：底色、花色带、号码。
 //
@@ -147,7 +145,8 @@ function paintBall(ctx: CanvasRenderingContext2D, side: number, look: BallLook):
     ctx.fillRect(0, 0, side, side)
   }
 
-  // 号码：白圆垫底再写黑字。母球（number 为 0）跳过这一层，换成红点。
+  // 号码：白圆垫底再写黑字。母球（number 为 0）没有号码，
+  // 它的六颗红点在渲染层按球面朝向画（见 CUE_DOT_SCALE 的注释）。
   if (look.number > 0) {
     const badge = r * 0.47
     ctx.beginPath()
@@ -166,35 +165,5 @@ function paintBall(ctx: CanvasRenderingContext2D, side: number, look: BallLook):
     ctx.fillStyle = '#1d2129'
     ctx.strokeText(String(look.number), c, c + badge * 0.04)
     ctx.fillText(String(look.number), c, c + badge * 0.04)
-  } else {
-    paintCueDots(ctx, c)
-  }
-}
-
-// paintCueDots 在母球贴图上点六颗红点。c 是画布中心，也是贴图内切圆的半径。
-//
-// 贴图坐标等于球面法线，所以画布中心是球的一个极点，内切圆是赤道。
-// 赤道上的四颗点圆心就落在内切圆上，画完整圆之后画布只留下朝内的半边，
-// 正好是「赤道点只看得到一半」——不需要额外裁剪。
-function paintCueDots(ctx: CanvasRenderingContext2D, c: number): void {
-  const dot = c * CUE_DOT_SCALE
-  ctx.fillStyle = CUE_DOT_COLOR
-
-  // 前后两个极点（正投影下重合在画布中心）。
-  ctx.beginPath()
-  ctx.arc(c, c, dot, 0, Math.PI * 2)
-  ctx.fill()
-
-  // 赤道上四颗：左右上下，各自只有朝内的半圆留在画布内。
-  const offsets = [
-    [-c, 0],
-    [c, 0],
-    [0, -c],
-    [0, c],
-  ]
-  for (const offset of offsets) {
-    ctx.beginPath()
-    ctx.arc(c + offset[0], c + offset[1], dot, 0, Math.PI * 2)
-    ctx.fill()
   }
 }

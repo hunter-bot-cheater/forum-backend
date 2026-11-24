@@ -270,7 +270,8 @@ func (h *Handler) AcceptInvite(c *gin.Context) {
 			return
 		}
 		h.invites.SetStatus(invite.ID, InviteExpired)
-		response.Error(c, http.StatusConflict, msgRoomTaken)
+		// 和按房号进房走同一个错误码：前端对「人满」的处理只写一处。
+		response.ErrorWithCode(c, http.StatusConflict, response.ErrCodeRoomFull, msgRoomFull)
 		return
 	}
 

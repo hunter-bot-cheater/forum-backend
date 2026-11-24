@@ -108,6 +108,8 @@ function snapshot(patch: Partial<MatchSnapshot> = {}): MatchSnapshot {
     ],
     group: ['solids', 'stripes'],
     ready: [true, true],
+    bot: -1,
+    series: [0, 0],
     ball_in_hand: false,
     place_zone: 'anywhere',
     cue_placed: false,
@@ -170,7 +172,7 @@ describe('观战页', () => {
     const { wrapper, push } = await mountPage()
     push({ type: 'state', ts: 0, data: snapshot() })
     push({ type: 'shot', ts: 0, data: shotFrame() })
-    push({ type: 'result', ts: 0, data: { winner: 0, reason: 'eight_legal', elo_delta_0: 0, elo_delta_1: 0 } })
+    push({ type: 'result', ts: 0, data: { winner: 0, reason: 'eight_legal', elo_delta_0: 0, elo_delta_1: 0, series: [1, 0] } })
     await flushPromises()
 
     expect(mocks.uplinks).toEqual([])
@@ -193,7 +195,7 @@ describe('观战页', () => {
   it('结算帧说明是谁赢的，不说「你赢了」', async () => {
     const { wrapper, push } = await mountPage()
     push({ type: 'state', ts: 0, data: snapshot() })
-    push({ type: 'result', ts: 0, data: { winner: 1, reason: 'leave', elo_delta_0: 0, elo_delta_1: 0 } })
+    push({ type: 'result', ts: 0, data: { winner: 1, reason: 'leave', elo_delta_0: 0, elo_delta_1: 0, series: [1, 0] } })
     await flushPromises()
 
     const end = wrapper.find('.wt__end')
@@ -209,7 +211,7 @@ describe('观战页', () => {
     await flushPromises()
 
     push({ type: 'shot', ts: 0, data: shotFrame() })
-    push({ type: 'result', ts: 0, data: { winner: 1, reason: 'leave', elo_delta_0: 0, elo_delta_1: 0 } })
+    push({ type: 'result', ts: 0, data: { winner: 1, reason: 'leave', elo_delta_0: 0, elo_delta_1: 0, series: [1, 0] } })
     await flushPromises()
 
     expect(wrapper.find('.wt__end').exists()).toBe(false)
@@ -247,7 +249,7 @@ describe('观战页', () => {
   it('结算之后断线不再叠提示', async () => {
     const { wrapper, push, setState } = await mountPage()
     push({ type: 'state', ts: 0, data: snapshot() })
-    push({ type: 'result', ts: 0, data: { winner: 1, reason: 'leave', elo_delta_0: 0, elo_delta_1: 0 } })
+    push({ type: 'result', ts: 0, data: { winner: 1, reason: 'leave', elo_delta_0: 0, elo_delta_1: 0, series: [1, 0] } })
     await flushPromises()
     expect(wrapper.find('.wt__end').exists()).toBe(true)
 

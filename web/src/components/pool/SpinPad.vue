@@ -9,12 +9,12 @@
       v-if="!open"
       class="sp__toggle"
       type="button"
-      :disabled="disabled"
-      :aria-label="'打开加塞，当前 ' + angleText"
+      :disabled="disabled && !readonly"
+      :aria-label="readonly ? '对家的击球点' : '打开加塞，当前 ' + angleText"
       @click="toggle"
     >
       <span class="sp__badge">{{ angleText }}</span>
-      <span class="sp__mini">
+      <span class="sp__mini" :class="{ 'is-peer': readonly }">
         <span class="sp__mini-dot" :style="dotStyle"></span>
       </span>
     </button>
@@ -30,6 +30,7 @@
       <div
         ref="stage"
         class="sp__stage"
+        :class="{ 'is-peer': readonly }"
         @pointerdown="onPointerDown"
         @pointermove="onPointerMove"
         @pointerup="onPointerUp"
@@ -82,6 +83,11 @@ const props = defineProps<{
   b: number
   // 不是自己的回合、或者正在摆球时不可调。
   disabled?: boolean
+  // 只读镜像：显示的是对家的击球点，能看不能点，也不压暗。
+  //
+  // 与 disabled 分开是为了外观：自己回合之外这颗球被压暗是对的，
+  // 但对家正在调塞时压暗一颗正在动的红点，看起来像对方掉线了。
+  readonly?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -139,7 +145,7 @@ function setOpen(next: boolean) {
 
 // toggle 切换展开／收起。收起时不动已经设好的塞：打完一杆还会想接着用。
 function toggle() {
-  if (props.disabled && !open.value) {
+  if ((props.disabled && !open.value) || (props.readonly && !open.value)) {
     return
   }
   setOpen(!open.value)
@@ -196,7 +202,7 @@ function reset() {
 // 捕获指针是为了手指移出面板之后仍然跟手——球面只有两百来像素，
 // 拖到边缘时手指多半已经出了球，不捕获就会断在中间。
 function onPointerDown(e: PointerEvent) {
-  if (props.disabled) {
+  if (props.disabled || props.readonly) {
     return
   }
   dragging = true
@@ -317,11 +323,14 @@ function round2(value: number): number {
   box-shadow: 0 0 4px rgba(211, 58, 44, 0.75);
 }
 
-/* 角度标签挂在球的左边：球的上方就是力度条，标签压上去会和滑轨粘成一块。 */
+/* 角度标签挂在球的下方。
+   原来挂在球的左边（right: calc(100% + 7px)），桌面看着没问题，但在手机上
+   那块位置已经是球台的右边缘，标签会直接压进台面里。球的上方是力度条、
+   下方是这块控件自己的留白，只有下面不会跟别的东西抢地方。 */
 .sp__badge {
   position: absolute;
-  top: 50%;
-  right: calc(100% + 7px);
+  top: calc(100% - 5px);
+  left: 50%;
   padding: 1px 7px;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
@@ -330,7 +339,7 @@ function round2(value: number): number {
   white-space: nowrap;
   background: rgba(12, 18, 24, 0.82);
   border-radius: 8px;
-  transform: translateY(-50%);
+  transform: translateX(-50%);
 }
 
 /* 展开面板：从球往上长，整体往左让 15px——右缘挂着的收起箭头是 -14px 出去的，
@@ -467,6 +476,15 @@ function round2(value: number): number {
   border-radius: 50%;
   transform: translate(-50%, -50%);
   pointer-events: none;
+}
+
+/* 远端每 60ms 一帧，补一点过渡才不会一格一格跳。自己拖的时候不加：
+   过渡会让红点追不上手指。 */
+.sp__mini.is-peer .sp__mini-dot,
+.sp__stage.is-peer .sp__dot {
+  transition:
+    left 90ms linear,
+    top 90ms linear;
 }
 
 /* 红点：击球点。带一圈发光，在浅色球面上才抓得住眼睛。 */

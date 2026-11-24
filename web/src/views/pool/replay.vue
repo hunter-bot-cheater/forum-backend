@@ -51,7 +51,7 @@ import { useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import PoolTable from '@/components/pool/PoolTable.vue'
 import { getReplay, type ReplayResp } from '@/api/pool'
-import { applySample, playShot, sampleAt, type PlayHandle } from '@/game/animator'
+import { applySample, playShot, sampleAt, SHOT_PLAY_RATE, type PlayHandle } from '@/game/animator'
 import { reasonNeutral } from '@/game/reasons'
 import { RACK_EIGHTBALL } from '@/game/table'
 import type { BallState, Seat } from '@/game/types'
@@ -174,6 +174,7 @@ function playFrom(k: number) {
   handle = playShot(
     { frames: shot.frames, duration: shot.duration },
     {
+      speed: SHOT_PLAY_RATE,
       onSample: (sample) => {
         applySample(balls.value, sample)
       },

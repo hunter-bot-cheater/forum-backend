@@ -11,16 +11,16 @@ function mountRail(phi: number, disabled = false) {
 }
 
 describe('FineTuneRail：两个步长按钮', () => {
-  it('按左边往负方向走 0.1 度', async () => {
+  it('按左边往负方向走 0.05 度', async () => {
     const wrapper = mountRail(1)
     await wrapper.findAll('.ft__step')[0].trigger('pointerdown')
-    expect(wrapper.emitted('nudge')![0]).toEqual([-0.1])
+    expect(wrapper.emitted('nudge')![0]).toEqual([-0.05])
   })
 
-  it('按右边往正方向走 0.1 度', async () => {
+  it('按右边往正方向走 0.05 度', async () => {
     const wrapper = mountRail(1)
     await wrapper.findAll('.ft__step')[1].trigger('pointerdown')
-    expect(wrapper.emitted('nudge')![0]).toEqual([0.1])
+    expect(wrapper.emitted('nudge')![0]).toEqual([0.05])
   })
 
   it('禁用时按钮不发事件', async () => {
@@ -32,7 +32,7 @@ describe('FineTuneRail：两个步长按钮', () => {
   it('键盘的 Enter 与空格同样能走一格', async () => {
     const wrapper = mountRail(1)
     await wrapper.findAll('.ft__step')[1].trigger('keydown', { key: 'Enter' })
-    expect(wrapper.emitted('nudge')![0]).toEqual([0.1])
+    expect(wrapper.emitted('nudge')![0]).toEqual([0.05])
   })
 })
 
@@ -48,7 +48,7 @@ describe('FineTuneRail：连发', () => {
       expect(wrapper.emitted('nudge')!).toHaveLength(1)
 
       // 350ms 之后开始连发：再等 210ms 应当多出三格。
-      vi.advanceTimersByTime(350 + 70 * 3)
+      vi.advanceTimersByTime(350 + 55 * 3)
       expect(wrapper.emitted('nudge')!.length).toBeGreaterThanOrEqual(4)
 
       // 抬手之后不再增长。
@@ -79,16 +79,16 @@ describe('FineTuneRail：连发', () => {
 describe('FineTuneRail：角度显示', () => {
   it('90 度显示 90.0', () => {
     const wrapper = mountRail(Math.PI / 2)
-    expect(wrapper.find('.ft__angle').text()).toBe('90.0°')
+    expect(wrapper.find('.ft__angle').text()).toBe('90.00°')
   })
 
   it('负角度折回 0 到 360 之间', () => {
     const wrapper = mountRail(-0.1)
-    expect(wrapper.find('.ft__angle').text()).toBe('354.3°')
+    expect(wrapper.find('.ft__angle').text()).toBe('354.27°')
   })
 
   it('超过一圈也落在 0 到 360 之间', () => {
     const wrapper = mountRail(Math.PI * 2 + Math.PI)
-    expect(wrapper.find('.ft__angle').text()).toBe('180.0°')
+    expect(wrapper.find('.ft__angle').text()).toBe('180.00°')
   })
 })

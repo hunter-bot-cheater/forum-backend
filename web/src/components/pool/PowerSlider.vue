@@ -1,7 +1,7 @@
 <template>
   <div
     class="pw"
-    :class="{ 'is-off': disabled }"
+    :class="{ 'is-off': disabled && !readonly, 'is-peer': readonly }"
     role="slider"
     :aria-valuenow="Math.round(value * 100)"
     aria-valuemin="0"
@@ -31,7 +31,14 @@ import { computed, onBeforeUnmount, ref } from 'vue'
 const props = defineProps<{
   // 0 到 1 的力度。
   value: number
+  // 不能拖（还没轮到你）。仍然按满亮度画，因为那是自己上一手留在台上的力度。
   disabled?: boolean
+  // 只读镜像：显示的是对面的力度，能看不能拖，也不该压暗。
+  //
+  // 与 disabled 分开是因为外观要求不一样：自己回合之外这条被压暗是对的
+  // （它在提醒「现在轮不到你」），而对手推力度时压暗一条正在动的滑轨，
+  // 看起来像掉线了。
+  readonly?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -96,7 +103,7 @@ function valueAt(clientY: number): number {
 
 // onDown 按下即取值并开始跟踪，拖出轨道也能继续调。
 function onDown(e: PointerEvent) {
-  if (props.disabled || (e.pointerType === 'mouse' && e.button !== 0)) {
+  if (props.disabled || props.readonly || (e.pointerType === 'mouse' && e.button !== 0)) {
     return
   }
   pressing = true
@@ -181,6 +188,14 @@ onBeforeUnmount(() => {
   background: linear-gradient(to bottom, #3ea675 0%, #d7c447 62%, #e0613f 100%);
   border-radius: 6px;
   transition: none;
+}
+
+/* 只读时远端每 60ms 才来一帧，不补过渡的话填充是「一格一格跳」的。 */
+.pw.is-peer .pw__fill,
+.pw.is-peer .pw__knob {
+  transition:
+    height 90ms linear,
+    top 90ms linear;
 }
 
 /* 手柄：一颗奶油色的圆，位置与填充底端一致。

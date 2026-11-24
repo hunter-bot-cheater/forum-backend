@@ -4,7 +4,7 @@
       class="ft__step"
       type="button"
       :disabled="disabled"
-      aria-label="向左微调 0.1 度"
+      aria-label="向左微调 0.05 度"
       @pointerdown.prevent="onStepDown(-STEP_DEG)"
       @pointerup="stopRepeat"
       @pointerleave="stopRepeat"
@@ -12,7 +12,7 @@
       @keydown.enter.prevent="nudge(-STEP_DEG)"
       @keydown.space.prevent="nudge(-STEP_DEG)"
     >
-      −0.1°
+      −0.05°
     </button>
 
     <span class="ft__angle" :title="disabled ? '还没轮到你' : '当前瞄准角度'">
@@ -23,7 +23,7 @@
       class="ft__step"
       type="button"
       :disabled="disabled"
-      aria-label="向右微调 0.1 度"
+      aria-label="向右微调 0.05 度"
       @pointerdown.prevent="onStepDown(STEP_DEG)"
       @pointerup="stopRepeat"
       @pointerleave="stopRepeat"
@@ -31,28 +31,33 @@
       @keydown.enter.prevent="nudge(STEP_DEG)"
       @keydown.space.prevent="nudge(STEP_DEG)"
     >
-      +0.1°
+      +0.05°
     </button>
   </div>
 </template>
 
 <script setup lang="ts">
-// 底部微调：两个按钮各走 0.1°，中间那串数字是当前角度。
+// 底部微调：两个按钮各走 0.05°，中间那串数字是当前角度。
 //
 // 以前这里是一条「刻度尺」，按住横向拖动才转度数。问题在于它没有零点，
 // 拖一下不知道转了多少，松手也没有停在哪一格的手感——玩家只能凭感觉试。
 // 换成两个明确步长的按钮之后，按几下就是几格，角度数字一直在眼前。
 //
-// 按住不放会连发（350ms 之后每 70ms 一格）：差 1 度时不用真点十下。
+// 按住不放会连发（350ms 之后每 55ms 一格）：差 1 度时不用真点二十下。
 // 只上报「转多少度」，不自己算 phi：角度的唯一来源在页面里。
 import { computed, onBeforeUnmount } from 'vue'
 
-// 一格的度数。台球瞄准差 0.1° 在 1.5 米外就是 2.6 毫米，够用了。
-const STEP_DEG = 0.1
+// 一格的度数。0.1° 时在 1.5 米外差 2.6 毫米，打厚打薄都调不到那么细，
+// 于是收到 0.02°；0.02 又被反馈「按十下才挪一点、太磨人」，回到 0.05°
+// （1.5 米外 1.3 毫米，比一个球皮还细）。读数保留两位小数，按一下能看见变化。
+const STEP_DEG = 0.05
 
 // 按住多久开始连发，以及连发的间隔。
+//
+// 步长是 0.05 之后，55ms 一格等于 0.9°/秒：长按两秒能转过小两度，
+// 又不会快到一下冲过头。
 const REPEAT_DELAY_MS = 350
-const REPEAT_EVERY_MS = 70
+const REPEAT_EVERY_MS = 55
 
 const props = defineProps<{
   // 当前方位角，弧度。
@@ -64,12 +69,14 @@ const emit = defineEmits<{
   nudge: [deltaDeg: number]
 }>()
 
-// angleText 把弧度换成 0 到 360 的度数，保留一位小数。
+// angleText 把弧度换成 0 到 360 的度数，保留两位小数。
 // 不做归一化的话会出现「-37.4°」这种负数，读起来要心算。
+// 两位小数是跟着 0.05° 的步长走的：一位小数时按一下读数会从 12.3 跳到 12.4 再跳回，
+// 看起来像没生效（0.05 的一半就进位了）。
 const angleText = computed(() => {
   const deg = (props.phi * 180) / Math.PI
   const wrapped = ((deg % 360) + 360) % 360
-  return wrapped.toFixed(1)
+  return wrapped.toFixed(2)
 })
 
 let delayTimer: ReturnType<typeof setTimeout> | null = null
@@ -120,17 +127,19 @@ onBeforeUnmount(stopRepeat)
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  height: 42px;
+  gap: 10px;
+  /* 34px 是「够点、又不占地方」的那一档：手机竖屏每一像素底部高度
+     都能换成球台宽度（0.55 倍），这一行原来 42px，收掉 8px。 */
+  height: 34px;
 }
 
 .ft__step {
   flex: none;
-  min-width: 68px;
-  height: 34px;
-  padding: 0 12px;
-  /* 底栏这一行是出杆前一直在用的东西，12px 的按钮字在深色底上偏小。 */
-  font-size: 14px;
+  min-width: 62px;
+  height: 30px;
+  padding: 0 10px;
+  /* 底栏这一行是出杆前一直在用的东西，13px 在深色底上仍然看得清。 */
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
   color: rgba(255, 255, 255, 0.86);
   background: rgba(255, 255, 255, 0.09);
@@ -149,10 +158,12 @@ onBeforeUnmount(stopRepeat)
   cursor: default;
 }
 
-/* 角度数字用等宽字，调的时候数字不会左右跳。 */
+/* 角度数字用等宽字，调的时候数字不会左右跳。
+   15px 比正文略大一号：它是这一行里唯一在变的读数，
+   但也不该大到把两边按钮推开（两位小数 + 度号，84px 刚好）。 */
 .ft__angle {
   min-width: 84px;
-  font-size: 17px;
+  font-size: 15px;
   font-variant-numeric: tabular-nums;
   color: rgba(255, 255, 255, 0.9);
   text-align: center;

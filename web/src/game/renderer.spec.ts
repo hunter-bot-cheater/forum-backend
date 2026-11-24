@@ -14,6 +14,9 @@ import type { BallState } from './types'
 // 这里的用例只关心「画了几颗球、坐标算得对不对」，贴图换成一个空对象就够。
 vi.mock('./balls', () => ({
   ballTexture: () => ({}) as unknown as HTMLCanvasElement,
+  // 母球红点的两个常量由渲染层自己算位置，这里给真值即可（纯数值，不影响断言）。
+  CUE_DOT_SCALE: 0.16,
+  CUE_DOT_COLOR: '#c8332a',
 }))
 
 // 记录每次绘制调用的方法名与参数。
@@ -123,6 +126,37 @@ describe('drawScene：球', () => {
     const gap = metersToPx(t, BALL_RADIUS * 2)
     expect(Number(draw.args[3])).toBeCloseTo(gap, 6)
     expect(BALL_DRAW_SCALE).toBe(1)
+  })
+
+  it('母球的红点是圆点，不压在球缘上', () => {
+    const ctx = createFakeCtx()
+    drawScene(ctx, { width: 390, height: 844 }, { balls: [{ id: 'cue', x: 0.5, y: 0.5, z: 0, on_table: true }] }, 2)
+
+    const t = fitTable({ width: 390, height: 844 }, TABLE_PADDING)
+    const radiusPx = metersToPx(t, BALL_RADIUS) * BALL_DRAW_SCALE
+    const center = worldToScreen(t, 0.5, 0.5)
+    // 红点的半径是球半径的一成多。按半径与位置一起挑：库边那排小菱形点
+    // 也是同样大小的 arc，只按半径筛会把它算进来。
+    const dots = ctx.calls.filter((c) => {
+      if (c.method !== 'arc') {
+        return false
+      }
+      const ratio = Number(c.args[2]) / radiusPx
+      if (ratio < 0.1 || ratio > 0.25) {
+        return false
+      }
+      const d = Math.hypot(Number(c.args[0]) - center.x, Number(c.args[1]) - center.y)
+      return d < radiusPx
+    })
+    // 六点分布、局部坐标轴与视线成 54.7°：正面正好看到三颗。
+    expect(dots).toHaveLength(3)
+    for (const dot of dots) {
+      // 圆心离球心 0.82 个半径。再往外就贴住轮廓，红点会被裁成一道弧——
+      // 那正是玩家反馈的「白球四周的长条红」。
+      const d = Math.hypot(Number(dot.args[0]) - center.x, Number(dot.args[1]) - center.y)
+      expect(d / radiusPx).toBeGreaterThan(0.6)
+      expect(d / radiusPx).toBeLessThan(0.9)
+    }
   })
 
   it('球的绘制发生在影子之后：影子都在第一颗球之前', () => {
@@ -411,16 +445,27 @@ describe('drawScene：瞄准层', () => {
     const t = fitTable({ width: 390, height: 844 }, TABLE_PADDING)
     const radiusPx = metersToPx(t, BALL_RADIUS) * BALL_DRAW_SCALE
     const arcs = ctx.calls.filter((c) => c.method === 'arc')
-    // 幽灵球是一倍球半径的圆，禁止符号是 1.5 倍。出现一倍半径的圆就说明
-    // 该被压掉的幽灵球又画出来了。
+    // 幽灵球是一倍球半径的圆，禁止符号是 1.5 倍。出现落在命中点上的一倍圆
+    // 就说明该被压掉的幽灵球又画出来了。
+    //
+    // 不能只看半径：母球红点也有一个一倍半径的圆（画点之前裁在球内那一下），
+    // 它在母球球心上，与命中点差着大半个台面。
+    const ghostAt = worldToScreen(t, blocked.hit.x, blocked.hit.y)
     for (const arc of arcs) {
-      expect(Math.abs(Number(arc.args[2]) - radiusPx)).toBeGreaterThan(0.5)
+      if (Math.abs(Number(arc.args[2]) - radiusPx) > 0.5) {
+        continue
+      }
+      const dx = Number(arc.args[0]) - ghostAt.x
+      const dy = Number(arc.args[1]) - ghostAt.y
+      expect(Math.hypot(dx, dy)).toBeGreaterThan(1)
     }
-    const sign = arcs[arcs.length - 1]
-    expect(Number(sign.args[2])).toBeCloseTo(radiusPx * 1.5, 3)
+    // 禁止符号是唯一一个 1.5 倍半径的圆。它在球的图层之前画（球会压住杆与线），
+    // 所以不能按「最后一次 arc」取——母球红点比它晚画。
+    const sign = arcs.find((c) => Math.abs(Number(c.args[2]) - radiusPx * 1.5) < 0.5)
+    expect(sign).toBeDefined()
     // 圆心 = 幽灵球心沿击球方向再走一个直径，屏幕 y 与 world y 反向。
     const hit = worldToScreen(t, blocked.hit.x, blocked.hit.y)
-    expect(Number(sign.args[0])).toBeCloseTo(hit.x + Math.cos(blocked.phi) * radiusPx * 2, 2)
+    expect(Number(sign!.args[0])).toBeCloseTo(hit.x + Math.cos(blocked.phi) * radiusPx * 2, 2)
 
     // 斜杠两端必须是有限数：NaN 传进 canvas 不报错，只是静默不画。
     const moves = ctx.calls.filter((c) => c.method === 'moveTo')
@@ -432,8 +477,12 @@ describe('drawScene：瞄准层', () => {
 
 describe('drawScene：球杆', () => {
   // translate 的参数就是杆头位置（屏幕坐标）。用它来验证「杆在母球后面」。
+  //
+  // 取最后一次：台呢的受光椭圆也要 translate+scale 一次（正圆压成横椭圆），
+  // 它排在球杆之前，取第一次会拿到台面中心而不是杆头。
   function tipOf(ctx: FakeCtx): { x: number; y: number } {
-    const call = ctx.calls.find((c) => c.method === 'translate')
+    const calls = ctx.calls.filter((c) => c.method === 'translate')
+    const call = calls[calls.length - 1]
     if (!call) {
       throw new Error('没有画杆')
     }

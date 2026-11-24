@@ -39,6 +39,18 @@
       </div>
     </section>
 
+    <!-- 分享链接是一条「先到先得」的邀请：同一张桌子发给了好几个人，
+         第一个点开的坐上，后面的人都会落到这里。
+         说明必须留在页面上而不是一条 toast——一秒钟后飘走，人只会以为链接坏了。 -->
+    <section v-if="linkFull" class="pl__full" role="status">
+      <span class="pl__full-ball" aria-hidden="true">8</span>
+      <div class="pl__full-text">
+        <strong>这间房人满了</strong>
+        <span>你点开的这张球桌已经坐上人了，一张桌子只坐两个人。想打的话，自己开一间再叫人也一样。</span>
+      </div>
+      <button class="pl__full-close" type="button" @click="linkFull = false">知道了</button>
+    </section>
+
     <!-- 在别人的房间里没有名单（也不该从这里邀请第三个人），
          右栏整块收起，房间卡占满整行。 -->
     <div class="pl__body" :class="{ 'is-solo': !isOwner }">
@@ -75,10 +87,37 @@
             </div>
           </div>
 
+          <!-- 分享条。对方坐进来之后就没有分享的意义了：链接点开只会得到「人满」，
+               所以只有空位还在时才出现。
+               做成桌布绿的一整条而不是一颗小按钮，是因为它要发到群里去：
+               收链接的人得一眼看出这是一条台球邀请，而不是一串来路不明的网址。 -->
+          <button
+            v-if="roomCode && otherEmpty"
+            class="pl__share"
+            type="button"
+            title="复制一条链接，谁先点开谁坐上这个空位"
+            @click="onShare"
+          >
+            <span class="pl__share-ball" aria-hidden="true">8</span>
+            <span class="pl__share-text">
+              <strong>把这张球桌发给朋友</strong>
+              <span>发到群里，谁先点开谁上桌</span>
+            </span>
+            <span class="pl__share-go">{{ mobileClient ? '发链接' : '复制链接' }}</span>
+          </button>
+
           <!-- 开房失败与「房间还没回来」要分开：前者要有重试入口，
-               后者只是慢一拍，弹个错误反而更慌。 -->
+               后者只是慢一拍，弹个错误反而更慌。
+               页头那颗人机按钮撤掉之后，开房失败就成了唯一没有任何
+               打球入口的状态，所以这里补一条——房间开不出来也能练两杆。 -->
           <p v-if="roomFailed" class="pl__empty">
             房间没开出来。<button class="pl__retry" type="button" @click="retryRoom">重试</button>
+          </p>
+          <p v-if="roomFailed" class="pl__also">
+            不想等？
+            <button class="pl__also-btn" type="button" :disabled="botBusy" @click="onPlayBot">
+              {{ botBusy ? '开局中…' : '先和机器人练一杆' }}
+            </button>
           </p>
 
           <div v-else-if="!room" class="pl__room-skeleton">
@@ -148,6 +187,18 @@
                 {{ reopening ? '换房中…' : '换一间' }}
               </button>
             </div>
+
+            <!-- 空房时最容易误会的一条：那颗大按钮写着「等对手进来」，
+                 不少人以为不等人就开不了球，在页面上干等。
+                 人机对战根本不需要这间房（服务端会顺手把这间空房收掉），
+                 所以把入口直接摆在这颗按钮下面。页头那颗同款按钮已经撤掉：
+                 两个入口说的是同一件事，还都要占最显眼的位置。 -->
+            <p v-if="otherEmpty" class="pl__also">
+              自己也想打？
+              <button class="pl__also-btn" type="button" :disabled="botBusy" @click="onPlayBot">
+                {{ botBusy ? '开局中…' : '先和机器人练一杆' }}
+              </button>
+            </p>
           </template>
         </section>
 
@@ -256,8 +307,8 @@
 // 准备状态与开局都在这一页完成：双方都点准备，状态翻成 playing，直接跳对局页。
 // 中间不再有单独的「房间页」——多一层跳转只会让人找不到自己的房号。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   getLiveMatches,
   getMyRoom,
@@ -266,6 +317,7 @@ import {
   leaveRoom,
   reopenRoom,
   setReady,
+  startBotMatch,
   type LiveMatch,
   type OnlineUser,
   type PoolRoom,
@@ -278,6 +330,172 @@ import { initials } from '@/utils/format'
 const pool = usePoolStore()
 const user = useUserStore()
 const router = useRouter()
+const route = useRoute()
+
+// ── 分享链接 ─────────────────────────────────────────────
+
+// shareCode 是地址栏里的 /pool/join/:code。
+//
+// 只认六位数字：链接可能被人手改过，也可能是别的杂物链接。
+// 带 code 进来时挂载那一刻就直接进房，不先给自己开一间。
+const shareCode = computed(() => {
+  const raw = route.params.code
+  const code = Array.isArray(raw) ? (raw[0] ?? '') : (raw ?? '')
+  if (/^\d{6}$/.test(code)) {
+    return code
+  }
+  return ''
+})
+
+// shareLink 是发给别人的那条地址。
+//
+// origin 用当前页面的，不走配置：本地是 5173、线上是域名，两边都能直接点开。
+const shareLink = computed(() => {
+  if (!roomCode.value) {
+    return ''
+  }
+  return window.location.origin + '/pool/join/' + roomCode.value
+})
+
+// shareIntro 是随链接一起发出去的那句话。
+//
+// 链接本身只有一串房号，落到群里看不出是什么东西；带上「台球」和一张桌子
+// 坐两个人的说明，收链接的人才知道点开是去打球，也才明白为什么慢一步就进不去。
+const SHARE_INTRO = '🎱 我在打台球，点开这条链接就能坐进我的球桌（一张桌子只坐两个人，先到先得）：'
+
+// joinByLink 按链接里的房号直接坐进对面那个座位。
+//
+// ready 传 true：点链接这个动作本身就是「我要打」，服务端顺手替他按下准备，
+// 房主那边点一次就能开局。失败时退回大厅——不能让一个人卡在一个坏链接上。
+async function joinByLink() {
+  const code = shareCode.value
+  if (!code) {
+    return
+  }
+  try {
+    const next = await joinRoom(code, true)
+    // 已经开打的对局由 applyRoom 自己跳到球台，这里不要再动地址，
+    // 否则两次导航会互相顶掉。
+    applyRoom(next)
+    if (next.status !== 'playing') {
+      void router.replace('/pool')
+    }
+  } catch (error) {
+    void router.replace('/pool')
+    // 人满与「房间不在了」要分开处理：前者是正常的并发结果（链接发给了好几个人），
+    // 后者说明链接过期或被改过。人满时留一条看得懂的说明在页面上，
+    // toast 一闪就没了，来晚的人只会以为链接坏了。
+    if (errorCodeOf(error) === 'room_full') {
+      linkFull.value = true
+    }
+    // 两种失败都顺手给自己开一间：人已经到台球页了，
+    // 与其停在一张别人的满桌上，不如就着自己的空桌再拉人。
+    void loadRoom()
+  }
+}
+
+// errorCodeOf 取响应拦截器挂在错误对象上的机读错误码。
+//
+// 拦截器在 reject 之前用 Object.assign 把 error_code 塞进了 error，
+// 类型上还是 Error，所以这里只看可能存在的那个字段。
+function errorCodeOf(error: unknown): string {
+  if (typeof error !== 'object' || error === null) {
+    return ''
+  }
+  const code = (error as { errorCode?: unknown }).errorCode
+  return typeof code === 'string' ? code : ''
+}
+
+// isMobileClient 判断当前是不是手机 / 平板。
+//
+// 电脑上的 Chrome / Edge 也提供 navigator.share（接的是 Windows 系统分享），
+// 但这条通道在桌面基本走不通，点下去只会弹一个「共享失败」，
+// 用户还得再点一次卡片。所以系统分享面板只在触屏设备上试。
+function isMobileClient(): boolean {
+  const ua = navigator.userAgent
+  if (/Android|iPhone|iPad|iPod|HarmonyOS|Mobile/i.test(ua)) {
+    return true
+  }
+  // iPadOS 13 起 UA 与 Mac 完全一样，只能靠触点数区分。
+  return /Macintosh/.test(ua) && navigator.maxTouchPoints > 1
+}
+
+// copyByExecCommand 用老的 execCommand 路径写剪贴板，返回是否成功。
+//
+// 只在 clipboard API 被拒时兜底：textarea 得先挂进文档、选中，
+// copy 才会作用到它身上；透明 + 固定定位是为了不让页面跟着跳一下。
+function copyByExecCommand(text: string): boolean {
+  const area = document.createElement('textarea')
+  area.value = text
+  area.setAttribute('readonly', '')
+  area.style.position = 'fixed'
+  area.style.top = '0'
+  area.style.opacity = '0'
+  document.body.appendChild(area)
+  area.select()
+  let ok = false
+  try {
+    ok = document.execCommand('copy')
+  } catch {
+    // 浏览器已经没有这个命令了（jsdom、部分新内核），当成失败。
+    ok = false
+  }
+  document.body.removeChild(area)
+  return ok
+}
+
+// mobileClient 在挂载时算一次：UA 与触点数不会在会话中途变。
+const mobileClient = isMobileClient()
+
+// onShare 把「点开就能坐进这间房」的链接发出去。
+//
+// 手机走系统分享面板（微信、QQ 直接可选），桌面只做一件事：
+// 复制到剪贴板，然后告诉用户自己粘过去。
+async function onShare() {
+  const link = shareLink.value
+  if (!link) {
+    return
+  }
+  // 连说明一起复制：只给一条网址，粘到群里就是一串光秃秃的字符，
+  // 收链接的人既不知道是什么，也不知道点开会发生什么。
+  const text = SHARE_INTRO + '\n' + link
+
+  if (mobileClient && typeof navigator.share === 'function') {
+    try {
+      await navigator.share({ title: '🎱 台球对战邀请', text: SHARE_INTRO, url: link })
+      return
+    } catch (error) {
+      // 用户自己关掉分享面板不算失败，也不该顺手复制一次：
+      // 他可能只是不想发出去。其它错误（浏览器不给权限）继续往下走剪贴板。
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return
+      }
+    }
+  }
+
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('链接已复制，粘贴给对方就行')
+    return
+  } catch {
+    // clipboard API 要 https + 权限，老版本浏览器和 WebView 里会直接拒绝，
+    // 这种时候还有一条老路：临时塞进 textarea 交给 execCommand。
+  }
+  if (copyByExecCommand(text)) {
+    ElMessage.success('链接已复制，粘贴给对方就行')
+    return
+  }
+
+  // 两条路都不通，就把链接原样摆出来让人手动选中，
+  // 比只报一句「复制失败」有用。
+  try {
+    await ElMessageBox.alert(link, '复制失败，手动选中这条链接发给对方', {
+      confirmButtonText: '知道了',
+    })
+  } catch {
+    // 直接关掉弹窗，不是异常。
+  }
+}
 
 // ── 我的房间 ─────────────────────────────────────────────
 
@@ -285,6 +503,11 @@ const room = ref<PoolRoom | null>(null)
 // roomFailed 只表示「这一次开房请求失败了」，不是「没有房间」：
 // 后者是 room === null 且没在失败态，属于正在加载。
 const roomFailed = ref(false)
+// linkFull 表示「这次是从分享链接进来的，但那间房已经坐满了」。
+//
+// 它只影响页面顶部那条说明，不改变房间本身：下面那张桌子是他自己的，
+// 关掉说明照样能邀请别人。
+const linkFull = ref(false)
 const busyReady = ref(false)
 const leaving = ref(false)
 const reopening = ref(false)
@@ -611,6 +834,28 @@ function onJoinInput(event: Event) {
   const input = event.target as HTMLInputElement
   joinCode.value = input.value.replace(/\D/g, '').slice(0, 6)
   input.value = joinCode.value
+}
+
+// ── 人机对战 ─────────────────────────────────────────────
+
+const botBusy = ref(false)
+
+// onPlayBot 开一局人机并直接进对局页。
+//
+// 服务端可能因为「已经在打」把现有那一局原样还回来，所以这里不新增状态，
+// 一律交给 applyRoom：它看到 status 是 playing 就会自己跳过去。
+async function onPlayBot() {
+  if (botBusy.value) {
+    return
+  }
+  botBusy.value = true
+  try {
+    applyRoom(await startBotMatch())
+  } catch {
+    // 开局失败（服务不可用、限流）的文案由拦截器弹出，这里只要把按钮解开。
+  } finally {
+    botBusy.value = false
+  }
 }
 
 async function onJoin() {
@@ -959,9 +1204,14 @@ watch(
 )
 
 onMounted(() => {
-  // 进大厅先要一间房，再顺手补拉一次待接受邀请
-  // （万一推送在页面还没挂载时就到了，这里能捞回来）。
-  void loadRoom()
+  // 带房号进来就先去坐对面那个座位；不带才给自己开一间。
+  // 顺序不能换：先 loadRoom 会把自己的空房建出来，接着 joinRoom
+  // 又要把它作废，白跑两次请求，房间卡还会闪一下。
+  if (shareCode.value) {
+    void joinByLink()
+  } else {
+    void loadRoom()
+  }
   startRoomTimer()
   void loadOnline()
   startOnlineTimer()
@@ -1007,7 +1257,7 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
-/* 右上角两个入口做成同一种描边按钮：都是「去别处」的次要动作，
+/* 右上角这几个入口做成同一种描边按钮：都是「去别处」的次要动作，
    不该抢走房间卡上「准备」的注意力。 */
 .pl__tool {
   height: 32px;
@@ -1020,6 +1270,30 @@ onBeforeUnmount(() => {
   border: 1px solid var(--fs-line);
   border-radius: var(--fs-radius-sm);
   cursor: pointer;
+}
+
+/* 空房下面那一行「先和机器人练一杆」：整行低调，只有按钮是链接样式，
+   它是对大按钮的补充，不该抢成第二个主按钮。 */
+.pl__also {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--fs-text-3);
+  text-align: center;
+}
+
+.pl__also-btn {
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  color: var(--fs-primary);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.pl__also-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 /* ── 输房号 ── */
@@ -1187,6 +1461,8 @@ onBeforeUnmount(() => {
 .pl__code {
   display: flex;
   align-items: baseline;
+  /* 房号 + 复制在窄屏上也会顶到边，允许换行比挤成一团好读。 */
+  flex-wrap: wrap;
   gap: 6px;
 }
 
@@ -1212,6 +1488,131 @@ onBeforeUnmount(() => {
   background: var(--fs-surface-hover);
   border: none;
   border-radius: var(--fs-radius-sm);
+  cursor: pointer;
+}
+
+/* 分享条：整条做成一块台面。
+   底色用桌呢绿而不是站点主色，是因为这条东西最终要出现在聊天窗口里——
+   收链接的人先看到的是「一张球桌」，然后才读到文字。 */
+.pl__share {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  text-align: left;
+  color: #f2f8f4;
+  background: linear-gradient(135deg, #0f6242 0%, #0b4f36 100%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--fs-radius);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 2px 8px rgba(6, 42, 29, 0.18);
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.pl__share:hover {
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), 0 4px 12px rgba(6, 42, 29, 0.24);
+}
+
+.pl__share:active {
+  transform: translateY(0);
+}
+
+/* 8 号球：黑球白字，左上一点高光。不引图标库，纯 CSS 画，
+   这样任何系统上都是同一个样子。 */
+.pl__share-ball,
+.pl__full-ball {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  background: radial-gradient(circle at 32% 26%, #5b6269 0%, #23272b 52%, #111315 100%);
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px #fff, 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+
+.pl__share-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pl__share-text strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.pl__share-text span {
+  font-size: 12px;
+  color: rgba(242, 248, 244, 0.72);
+}
+
+.pl__share-go {
+  flex: none;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #0b4f36;
+  background: #f2f8f4;
+  border-radius: 999px;
+}
+
+/* 人满提示：贴在内容最上面，用暖色而不是报错红——
+   这不是出错，只是「这张桌子满了」。 */
+.pl__full {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  background: var(--fs-primary-weak);
+  border: 1px solid var(--fs-primary);
+  border-radius: var(--fs-radius);
+}
+
+.pl__full-ball {
+  width: 30px;
+  height: 30px;
+  font-size: 12px;
+}
+
+.pl__full-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pl__full-text strong {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fs-text-1);
+}
+
+.pl__full-text span {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--fs-text-2);
+}
+
+.pl__full-close {
+  flex: none;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--fs-text-2);
+  background: transparent;
+  border: 1px solid var(--fs-line);
+  border-radius: 999px;
   cursor: pointer;
 }
 

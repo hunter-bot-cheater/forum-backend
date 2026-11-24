@@ -4,7 +4,7 @@
 // 顺序错一层就会出现「球被库边压住」或者「袋口被台呢盖住」这种一眼假的画面，
 // 所以整帧一次画完，不做局部重绘——16 颗球的完整重绘在手机上也只有 1ms 左右。
 import type { AimGuides } from './aim'
-import { ballTexture } from './balls'
+import { ballTexture, CUE_DOT_COLOR, CUE_DOT_SCALE } from './balls'
 import { fitTable, metersToPx, worldToScreen, type ViewTransform, type Viewport } from './geometry'
 import {
   BALL_RADIUS,
@@ -42,6 +42,11 @@ const BALL_GROWTH = 0.6
 // 是为了让球更跳，结果整张台子偏青、比标准图亮一档，并排一眼就能看出不是同一张。
 const COLORS = {
   rail: '#35383c',
+  // 木框框面的受光两端。整块单色是「塑料感」最大来源：这么大一片面积上
+  // 没有任何明暗变化，看起来就是一张压平的卡纸。上面这档放在左上，
+  // 下面这档放在右下，一条斜向渐变就足够把框面撑起来。
+  railLit: '#454a50',
+  railDark: '#24272b',
   cloth: '#0c7448',
   clothLight: '#148050',
   // 木框上的颗星：图里那排白色小三角，没有它外框像一块塑料板。
@@ -304,13 +309,48 @@ function railRect(t: ViewTransform): Rect {
 function drawRail(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   const rect = railRect(t)
 
+  // 底色改成斜向渐变。台灯在正上方偏左，框面的左上角最亮、右下角最暗；
+  // 一条 135° 的线性渐变就够，中间那档仍然落在 COLORS.rail 上，
+  // 整张台子的明度与之前一致，只是不再一片死灰。
   ctx.save()
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.5)'
-  ctx.shadowBlur = 16
-  ctx.shadowOffsetY = 6
-  ctx.fillStyle = COLORS.rail
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.55)'
+  ctx.shadowBlur = 18
+  ctx.shadowOffsetY = 7
+  const base = ctx.createLinearGradient(rect.x, rect.y, rect.x + rect.width, rect.y + rect.height)
+  base.addColorStop(0, COLORS.railLit)
+  base.addColorStop(0.45, COLORS.rail)
+  base.addColorStop(1, COLORS.railDark)
+  ctx.fillStyle = base
   roundRectPath(ctx, rect.x, rect.y, rect.width, rect.height, RAIL_RADIUS)
   ctx.fill()
+  ctx.restore()
+
+  // 框面靠库边那一圈压暗：库边是立起来的斜面，会把光挡住，
+  // 紧挨着它的框面永远是暗的。少了这一圈，框就像贴在布上的一张纸——
+  // 亮部只出现在外沿，往里突然变平，就没有「框是抬起来的一层」的感觉。
+  //
+  // 描边位置取 RAIL_WIDTH：那正是库边的外沿。描边有一半落在库边底下，
+  // 后面 drawCushion 会盖掉，框上只剩贴着库边的一窄条暗边。
+  ctx.save()
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.34)'
+  ctx.lineWidth = Math.max(4, metersToPx(t, RAIL_WIDTH) * 0.5)
+  roundRectPath(
+    ctx,
+    rect.x + metersToPx(t, RAIL_WIDTH),
+    rect.y + metersToPx(t, RAIL_WIDTH),
+    rect.width - metersToPx(t, RAIL_WIDTH) * 2,
+    rect.height - metersToPx(t, RAIL_WIDTH) * 2,
+    Math.max(1, RAIL_RADIUS - metersToPx(t, RAIL_WIDTH)),
+  )
+  ctx.stroke()
+
+  // 框面外沿再压一道很淡的内阴影，让「高出来的一层」有个厚度。
+  // 它比上面那道宽、也更淡，两道叠起来才有圆柱倒角的过渡，
+  // 只用一道硬边会像画了个黑框。
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.16)'
+  ctx.lineWidth = Math.max(2, metersToPx(t, RAIL_WIDTH) * 0.9)
+  roundRectPath(ctx, rect.x + 2, rect.y + 2, rect.width - 4, rect.height - 4, Math.max(1, RAIL_RADIUS - 2))
+  ctx.stroke()
   ctx.restore()
 
   drawRailDiamonds(ctx, t)
@@ -446,6 +486,43 @@ function drawCushion(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   ctx.restore()
 }
 
+// clothGrain 生成台呢的织物颗粒瓦片。
+//
+// 纯渐变的台呢看着就是一块塑料绿板：真实的布有极细的经纬颗粒，
+// 受光时碎成一片细密的亮点。这里用 4×4 的瓦片铺满，颗粒本身只有 1 像素，
+// 手机上看起来是「布有质感」而不是「布上画了花纹」。
+//
+// 用的是固定序列而不是 Math.random：同一张台子每次打开长得一样，
+// 不会出现「刷新一下布就换了纹理」的错觉。
+let grainPattern: CanvasPattern | null = null
+
+function clothGrain(ctx: CanvasRenderingContext2D): CanvasPattern | null {
+  if (grainPattern) {
+    return grainPattern
+  }
+  const size = 4
+  const tile = document.createElement('canvas')
+  tile.width = size
+  tile.height = size
+  const pen = tile.getContext('2d')
+  if (!pen) {
+    return null
+  }
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const value = ((x * 7 + y * 13 + x * y * 3) % 16) / 16
+      if (value > 0.5) {
+        pen.fillStyle = 'rgba(255, 255, 255, ' + (0.05 + value * 0.06).toFixed(3) + ')'
+      } else {
+        pen.fillStyle = 'rgba(0, 0, 0, ' + (0.04 + (0.5 - value) * 0.2).toFixed(3) + ')'
+      }
+      pen.fillRect(x, y, 1, 1)
+    }
+  }
+  grainPattern = ctx.createPattern(tile, 'repeat')
+  return grainPattern
+}
+
 // drawCloth 画台呢。矩形范围是库边内侧，也就是世界坐标 0..宽、0..长。
 function drawCloth(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   const rect = worldRect(t, 0, 0, TABLE_WIDTH, TABLE_LENGTH)
@@ -458,21 +535,29 @@ function drawCloth(ctx: CanvasRenderingContext2D, t: ViewTransform): void {
   ctx.fillStyle = COLORS.cloth
   ctx.fillRect(rect.x, rect.y, rect.width, rect.height)
 
+  // 织物颗粒。放在底色之上、光斑之下：亮处能看见细碎的高光，
+  // 暗处也不会被下一层的暗角吃掉。
+  const grain = clothGrain(ctx)
+  if (grain) {
+    ctx.fillStyle = grain
+    ctx.fillRect(rect.x, rect.y, rect.width, rect.height)
+  }
+
   // 中间偏上打一块亮，边缘压暗。整片纯色会像一块绿色卡纸，
   // 有一点受光才有「这张台子铺了布、灯在上面」的感觉。
-  const light = ctx.createRadialGradient(
-    rect.x + rect.width * 0.5,
-    rect.y + rect.height * 0.44,
-    0,
-    rect.x + rect.width * 0.5,
-    rect.y + rect.height * 0.44,
-    Math.max(rect.width, rect.height) * 0.9,
-  )
+  //
+  // 灯罩是长条形，打在台面上是一块横向的椭圆而不是正圆：
+  // 正圆的亮斑会让台面看起来像个倒扣的碗。
+  ctx.save()
+  ctx.translate(rect.x + rect.width * 0.5, rect.y + rect.height * 0.46)
+  ctx.scale(0.72, 1)
+  const light = ctx.createRadialGradient(0, 0, 0, 0, 0, Math.max(rect.width, rect.height) * 0.62)
   light.addColorStop(0, COLORS.clothLight)
-  light.addColorStop(0.5, 'rgba(20, 138, 88, 0.38)')
+  light.addColorStop(0.42, 'rgba(20, 138, 88, 0.34)')
   light.addColorStop(1, 'rgba(20, 138, 88, 0)')
   ctx.fillStyle = light
-  ctx.fillRect(rect.x, rect.y, rect.width, rect.height)
+  ctx.fillRect(-rect.width, -rect.height, rect.width * 2, rect.height * 2)
+  ctx.restore()
 
   // 四周压一圈暗角，球台才有纵深，不会像一张平铺的纸。
   const vignette = ctx.createRadialGradient(
@@ -1586,9 +1671,10 @@ interface SpriteEntry {
 
 const spriteCache = new Map<string, SpriteEntry>()
 
-// 球面位图的边长上限（物理像素）。屏幕上球直径约三十 CSS 像素，
-// 两张图就够清楚；再往上翻倍只会让每帧的采样量涨四倍。
-const SPRITE_MAX_SIDE = 48
+// 球面位图的边长上限（物理像素）。屏幕上球直径三十来 CSS 像素，超采样之后
+// 到一百二三十物理像素，留一档余量；再往上是白算——每多一倍边长，
+// 球面重采样的像素数就翻四倍。
+const SPRITE_MAX_SIDE = 128
 
 // 一帧最多重采样几颗球。超出的先用上一帧的位图，下一帧补上。
 const SPRITE_FRAME_BUDGET = 8
@@ -1806,7 +1892,12 @@ function drawBall(
   const cy = center.y - lift * 0.6
 
   // 朝向按这一帧的位移推进，再用它重采样球面。
-  const sprite = ballSprite(ball, textureSide, rollMatrixOf(ball), rank)
+  const m = rollMatrixOf(ball)
+  const sprite = ballSprite(ball, textureSide, m, rank)
+  // 贴图是按物理像素生成的，多数时候是 1:1 贴上去；只有球刚换尺寸、
+  // 或者超采样倍率变了才会缩放。缩放时用高质量插值，球缘才不会出现
+  // 一圈硬台阶——默认的 'low' 会在号码球的白边上一眼看出锯齿。
+  ctx.imageSmoothingQuality = 'high'
   if (sprite) {
     ctx.drawImage(sprite, center.x - drawRadius, cy - drawRadius, drawRadius * 2, drawRadius * 2)
   } else {
@@ -1819,6 +1910,11 @@ function drawBall(
       drawRadius * 2,
       drawRadius * 2,
     )
+  }
+
+  // 母球的红点画在光影之前：这样它们和球面一样会被压暗，不会像贴纸浮在上面。
+  if (ball.id === 'cue') {
+    drawCueDots(ctx, m, center.x, cy, drawRadius)
   }
 
   // 明暗层贴着球体尺寸取，圆外是透明的，贴上去不会盖住台呢。
@@ -1846,6 +1942,77 @@ function drawBall(
     const px = center.x + contact.dx * drawRadius * 0.98
     const py = cy + contact.dy * drawRadius * 0.98
     ctx.drawImage(blob, px - reach, py - reach, reach * 2, reach * 2)
+  }
+  ctx.restore()
+}
+
+// 母球红点所在的球面方向：三根正交轴的六个极点，也就是上下左右前后。
+//
+// 只有六个，不取立方体的八个角：真实的练习白球就是六个点，八角看着像另一颗球。
+//
+// 这六个方向相对屏幕是「转过的」：球躺在台面上时朝向本来就是任意的，朝哪边
+// 全看上一次怎么滚过来。这里固定取一个立方体对角线的朝向，是为了让它停在
+// 开球点时能看见三颗点而不是一颗——若局部坐标轴与视线重合，四颗赤道点正好
+// 落在轮廓上、一颗在背面，画面上只剩正中一个点，看着像掉了四个。
+// 三根轴与视线的夹角都是 54.7°（nz = 0.577），三颗点落在离圆心 0.82R 处。
+const CUE_DOTS: ReadonlyArray<readonly [number, number, number]> = [
+  [0.8165, 0, 0.5774],
+  [-0.8165, 0, -0.5774],
+  [-0.4082, 0.7071, 0.5774],
+  [0.4082, -0.7071, -0.5774],
+  [-0.4082, -0.7071, 0.5774],
+  [0.4082, 0.7071, -0.5774],
+]
+
+// 红点从哪个角度开始变淡、淡到没有。nz 是这颗点与视线夹角的余弦。
+//
+// 0.30 对应「离球心 0.95 个半径」：再往外这颗圆点就会跨过轮廓，被裁成一个
+// 挂在球缘上的半圆——那正是玩家说的「白球四周一圈红」，只是以前是长弧、
+// 现在换成半圆，一样难看。静止时三颗点都在 0.82R（nz 0.577），不受影响。
+const CUE_DOT_FADE_START = 0.3
+const CUE_DOT_FADE_SPAN = 0.18
+
+// 点越靠近球缘画得越小：球面上的圆点投到屏幕上本来就是越靠边越扁，
+// 这里用「缩小的正圆」近似那点透视，顺带让它不会顶到轮廓上。
+const CUE_DOT_NEAR_SCALE = 0.6
+
+// drawCueDots 在母球表面画那六颗红点。
+//
+// 以前红点是烘焙在贴图里的，跟着球面重采样一起滚。问题是贴图坐标等于球面
+// 法线（u = sinθ）：一颗落在赤道附近的圆点，投到屏幕上会被径向压扁、贴着
+// 球缘摊成一道弧，四颗赤道点连起来就是「母球四周镶了一圈红边」。
+//
+// 现在按球面朝向算出六颗点各自的屏幕位置，一颗一颗画正圆：
+//   - n = M · d 把这颗点在球体坐标里的方向转到屏幕坐标；
+//   - nz 太小的点在球缘那一圈，画出来是半圆，直接不收（见上面的阈值）；
+//   - 越靠边越小，越靠边越淡。
+// 红点仍然是滚动的参照物，但不会再糊成一条边。
+function drawCueDots(
+  ctx: CanvasRenderingContext2D,
+  m: readonly number[],
+  cx: number,
+  cy: number,
+  radius: number,
+): void {
+  const dotRadius = radius * CUE_DOT_SCALE
+  ctx.save()
+  // 裁在球内：贴边的点会被轮廓切掉一块，看起来才像画在球面上。
+  ctx.beginPath()
+  ctx.arc(cx, cy, radius, 0, Math.PI * 2)
+  ctx.clip()
+  ctx.fillStyle = CUE_DOT_COLOR
+  for (const dot of CUE_DOTS) {
+    const nx = m[0] * dot[0] + m[1] * dot[1] + m[2] * dot[2]
+    const ny = m[3] * dot[0] + m[4] * dot[1] + m[5] * dot[2]
+    const nz = m[6] * dot[0] + m[7] * dot[1] + m[8] * dot[2]
+    if (nz <= CUE_DOT_FADE_START) {
+      continue
+    }
+    ctx.globalAlpha = Math.min(1, (nz - CUE_DOT_FADE_START) / CUE_DOT_FADE_SPAN)
+    const shrink = CUE_DOT_NEAR_SCALE + (1 - CUE_DOT_NEAR_SCALE) * nz
+    ctx.beginPath()
+    ctx.arc(cx + nx * radius, cy + ny * radius, dotRadius * shrink, 0, Math.PI * 2)
+    ctx.fill()
   }
   ctx.restore()
 }
@@ -1882,7 +2049,12 @@ function contactShadowSprite(): HTMLCanvasElement | null {
 //
 // 帧里球是一瞬间消失的，直接照抄会看到球「咔」地不见。这里让它按帧里最后
 // 的位置往最近的袋口滚进去，同时缩小变淡，和真实落袋的观感接近。
-const SINK_MS = 340
+//
+// 时长不再是一个固定值：球进袋那一刻还在以多快跑，就用多快走完最后这一段
+// （见 trackPotted 里的估算）。固定 340ms 的问题是把快球硬拖慢——玩家看到的
+// 就是「球到袋口突然被吸进去」。
+const SINK_MS_MAX = 320
+const SINK_MS_MIN = 90
 
 interface SinkState {
   fromX: number
@@ -1890,11 +2062,15 @@ interface SinkState {
   toX: number
   toY: number
   at: number
+  // duration 是按「球消失前的速度」算出来的这一段该走多久。
+  duration: number
 }
 
 const sinking = new Map<string, SinkState>()
 // 上一帧还在台面上的球号。用它判断这一帧谁刚掉袋。
 let visibleIds = new Set<string>()
+// 上一帧每颗球的位置与时刻，用来估「消失前还在以多快跑」。
+const lastSeen = new Map<string, { x: number; y: number; at: number }>()
 
 // nearestPocket 返回离给定点最近的袋口中心（世界坐标）。
 function nearestPocket(x: number, y: number): { x: number; y: number } {
@@ -1932,16 +2108,65 @@ function trackPotted(balls: ReadonlyArray<BallState>): void {
       continue
     }
     const pocket = nearestPocket(ball.x, ball.y)
-    sinking.set(id, { fromX: ball.x, fromY: ball.y, toX: pocket.x, toY: pocket.y, at: now })
+    sinking.set(id, {
+      fromX: ball.x,
+      fromY: ball.y,
+      toX: pocket.x,
+      toY: pocket.y,
+      at: now,
+      duration: sinkDuration(ball, pocket, lastSeen.get(id), now),
+    })
   }
   visibleIds = current
 
+  // 记下这一帧每颗球的位置，下一帧有人消失时才有速度可用。
+  // 只记还在台面上的：球消失之后它停在原地，留着会把速度算成 0。
+  for (const ball of balls) {
+    if (ball.on_table) {
+      lastSeen.set(ball.id, { x: ball.x, y: ball.y, at: now })
+    } else {
+      lastSeen.delete(ball.id)
+    }
+  }
+
   // 播完的一次性清掉，别让这张表跟着一局局对局长下去。
   for (const [id, state] of sinking) {
-    if (now - state.at > SINK_MS) {
+    if (now - state.at > state.duration) {
       sinking.delete(id)
     }
   }
+}
+
+// sinkDuration 按球消失前的速度算落袋动画该走多久。
+//
+// 距离是「最后一帧位置 → 袋口中心」，速度取上一帧到这一帧的位移除以间隔。
+// 两者一除就是「以原来的速度滚完最后这一段」所需的时间：快球几十毫秒就没了，
+// 慢球才在袋口磨一下。估不出速度（只有一帧数据、或者球本来就几乎不动）时
+// 退回一个中速的固定值。
+function sinkDuration(
+  ball: BallState,
+  pocket: { x: number; y: number },
+  prev: { x: number; y: number; at: number } | undefined,
+  now: number,
+): number {
+  const distance = Math.hypot(pocket.x - ball.x, pocket.y - ball.y)
+  if (!prev || now <= prev.at) {
+    return SINK_MS_MAX
+  }
+  const seconds = (now - prev.at) / 1000
+  const moved = Math.hypot(ball.x - prev.x, ball.y - prev.y)
+  if (seconds <= 0 || moved < 0.002) {
+    return SINK_MS_MAX
+  }
+  const speed = moved / seconds
+  const wanted = (distance / speed) * 1000
+  if (wanted < SINK_MS_MIN) {
+    return SINK_MS_MIN
+  }
+  if (wanted > SINK_MS_MAX) {
+    return SINK_MS_MAX
+  }
+  return wanted
 }
 
 // findBallById 不过在台面上与否，按球号找一份状态。
@@ -1963,6 +2188,7 @@ export function resetBallMotion(): void {
   rollState.clear()
   sinking.clear()
   visibleIds = new Set<string>()
+  lastSeen.clear()
   // 球面位图是按「球号 + 朝向」缓存的，朝向表清了它也就没意义了；
   // 不清的话下一局的球会沿用上一局的朝向重新起算，看起来像被谁转过一圈。
   spriteCache.clear()
@@ -1979,7 +2205,9 @@ export function sinkingActive(): boolean {
 
 // drawSinking 画还在往袋口滚的球。
 //
-// 进度用平方曲线：一开始慢、越靠近袋口越快，球的「被吸进去」的感觉就出来了。
+// 进度是线性的，不再用平方曲线。平方曲线就是「越靠近袋口越快」，
+// 也就是玩家说的「像被吸进去」：球明明已经慢下来了，最后那一下却突然加速。
+// 时长既然按消失前的速度算好了，匀速走完这一段才是「沿着原来的方向滑进去」。
 function drawSinking(
   ctx: CanvasRenderingContext2D,
   t: ViewTransform,
@@ -1993,10 +2221,12 @@ function drawSinking(
   const textureSide = Math.min(SPRITE_MAX_SIDE, Math.round(radiusPx * 2 * dpr))
 
   for (const [id, state] of sinking) {
-    const progress = Math.min(1, (now - state.at) / SINK_MS)
+    const progress = Math.min(1, (now - state.at) / state.duration)
+    // 位移线性；缩小与淡出保留一点加速度：球是往下掉进洞里的，
+    // 观感上最后一段确实该「沉」下去，但那靠的是缩放，不是让它横着飞。
     const eased = progress * progress
-    const x = state.fromX + (state.toX - state.fromX) * eased
-    const y = state.fromY + (state.toY - state.fromY) * eased
+    const x = state.fromX + (state.toX - state.fromX) * progress
+    const y = state.fromY + (state.toY - state.fromY) * progress
     const center = worldToScreen(t, x, y)
     const radius = radiusPx * (1 - 0.55 * eased)
 

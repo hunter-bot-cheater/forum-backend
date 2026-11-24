@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"math/rand"
 	"strconv"
 	"time"
 
@@ -115,14 +116,15 @@ type RackBall struct {
 	Y  float64
 }
 
-// StandardRack 是八球开局的 16 颗球。
+// StandardRack 是八球开局的 16 个摆球点：一颗母球加三角形的 15 个槽位。
 //
 // 顶点球在置球点（台长 3/4、台面中线），后面四排按球半径推开：同一排里
 // 相邻球心距 2R、排与排沿台长走 2R·sin60°，R = 0.03429（比标准球大两成，
 // 原因见前端 table.ts 的 BALL_RADIUS）。改半径时这组坐标要重算。
 //
-// 球号是按八球规则自己排的：8 号在三角形中心，顶点球摆在置球点上。
-// pooltool 每次 get_rack 都重新洗牌，所以「逐颗对齐」只可能指坐标，不可能指编号。
+// 这里写的球号只是槽位的占位，不是「这一局谁站在哪」——每局真正摆哪颗球
+// 由 rackBalls 现排。绝不能把这张表直接当棋谱用：坐标固定加上确定性物理，
+// 每一局的开球都会散开得一模一样，玩家看到的就是「每一把都是同一颗球进同一个袋」。
 var StandardRack = []RackBall{
 	{ID: sim.CueBallID, X: 0.594371, Y: 0.455658},
 	{ID: "4", X: 0.4953, Y: 1.4859},
@@ -140,6 +142,78 @@ var StandardRack = []RackBall{
 	{ID: "11", X: 0.4953, Y: 1.723468},
 	{ID: "2", X: 0.56388, Y: 1.723468},
 	{ID: "10", X: 0.63246, Y: 1.723468},
+}
+
+// 三角形里的规则位置，下标是「StandardRack 去掉母球之后」的槽位顺序：
+// 0 是顶点，1~2 是第二排，3~5 是第三排，6~9 是第四排，10~14 是第五排。
+const (
+	// eightBallSlot 是 8 号的位置：第三排中间，也就是三角形的中心。
+	eightBallSlot = 4
+	// 最后一排的两个角，必须一实一花。
+	lastRowLeftSlot  = 10
+	lastRowRightSlot = 14
+)
+
+// rackBalls 按 StandardRack 的槽位摆一局球，球号每局重排。
+//
+// 为什么必须重排：槽位坐标是固定的，而物理是确定性的——母球摆在默认点、
+// 朝同一个方向满力开球，散开路线每次完全相同。玩家说的「几乎每一把
+// 绿球都进右下底袋」，根子就在这里：不是物理坏了，是每一局都是同一张球堆。
+// 真实球桌每次摆球都由人随手放，所以这里也按八球规则重排：
+// 8 号钉在三角形中心，最后一排两个角一实一花，其余位置随机。
+func rackBalls() []sim.ResultBall {
+	solids := []string{"1", "2", "3", "4", "5", "6", "7"}
+	stripes := []string{"9", "10", "11", "12", "13", "14", "15"}
+	shuffleIDs(solids)
+	shuffleIDs(stripes)
+
+	// 先把规则钉死的那三个槽位填上，剩下的十来个位置留给后面随机填。
+	ids := make([]string, len(StandardRack)-1)
+	ids[eightBallSlot] = sim.EightBallID
+	ids[lastRowLeftSlot] = solids[0]
+	ids[lastRowRightSlot] = stripes[0]
+	// 两个底角谁实谁花也换着来：永远左边实心的话，球堆左右两半
+	// 每一局受到的力都一样，散开又回到固定的老路子上。
+	if rand.Intn(2) == 0 {
+		ids[lastRowLeftSlot], ids[lastRowRightSlot] = ids[lastRowRightSlot], ids[lastRowLeftSlot]
+	}
+
+	// 两组各自剩下 6 颗，混在一起洗，再按槽位顺序填进去。
+	// 混洗而不是「第几排放哪一组」：分排会让某个区域总是实心或总是花色，
+	// 开球撞开之后又是可以预期的分布。
+	rest := make([]string, 0, 12)
+	rest = append(rest, solids[1:]...)
+	rest = append(rest, stripes[1:]...)
+	shuffleIDs(rest)
+
+	filled := 0
+	for i := range ids {
+		if ids[i] != "" {
+			continue
+		}
+		ids[i] = rest[filled]
+		filled++
+	}
+
+	// 最后把球号按槽位顺序贴回坐标上。母球没有编号上的变化，原样留着。
+	balls := make([]sim.ResultBall, 0, len(StandardRack))
+	next := 0
+	for _, item := range StandardRack {
+		id := item.ID
+		if item.ID != sim.CueBallID {
+			id = ids[next]
+			next++
+		}
+		balls = append(balls, sim.ResultBall{ID: id, X: item.X, Y: item.Y, OnTable: true})
+	}
+	return balls
+}
+
+// shuffleIDs 就地把一组球号洗乱。
+func shuffleIDs(ids []string) {
+	rand.Shuffle(len(ids), func(i, j int) {
+		ids[i], ids[j] = ids[j], ids[i]
+	})
 }
 
 // PlayerBrief 是一名玩家在快照里的公开信息。
@@ -171,8 +245,14 @@ type Snapshot struct {
 	CuePlaced bool           `json:"cue_placed"`
 	ShotSeq   int            `json:"shot_seq"`
 	Players   [2]PlayerBrief `json:"players"`
-	Winner    *Seat          `json:"winner"`
-	WinReason string         `json:"win_reason"`
+	// Series 是这两个人「这一轮连续对局」的比分，按座位排（不是按 userID）。
+	// 结算时赢家那一位 +1，所以它总是「截至上一局结束」的比分。
+	Series    [2]int `json:"series"`
+	Winner    *Seat  `json:"winner"`
+	WinReason string `json:"win_reason"`
+	// Bot 是人机坐的座位，-1 表示这一局是两个人。前端靠它区分
+	// 「再约一局」该找一个真人还是重开一局人机。
+	Bot Seat `json:"bot"`
 }
 
 // MatchState 是一局对局的全部状态。字段只在 actor 协程里改。
@@ -210,9 +290,20 @@ type MatchState struct {
 	Timeouts [2]int
 
 	// Deadline 是本杆的读秒截止时间，零值表示不计时（房间还没开局）。
+	// Series 是这一轮连续对局里两个人各赢了几局，按座位排。
+	// 开局时从 Series 账本读进来，结算时赢家 +1——界面顶上那个 3:2 就是它。
+	Series [2]int
+
 	Deadline  time.Time
 	Winner    *Seat
 	WinReason string
+
+	// Bot 是人机坐的座位，SeatSpectator（-1）表示这一局没有机器人。
+	//
+	// 放在状态里而不是 Options 里：它是「这一局」的属性，
+	// 同一份 Options 会被几十局共用，放进去等于给所有对局都塞了个机器人。
+	// 机器人的座位没有连接，轮次照常按 Turn 走，出杆由 actor 自己安排。
+	Bot Seat
 }
 
 // newMatchState 按开局摆球造一份初始状态。
@@ -220,10 +311,7 @@ type MatchState struct {
 // 母球也在 Balls 里：把它单独拎出来会让「hand in ball 时母球不在台面上」这类
 // 中间态需要两套表示，而规则与渲染都只需要「一颗在台面上的球」。
 func newMatchState(matchID uint, roomCode string, players [2]PlayerBrief) MatchState {
-	balls := make([]sim.ResultBall, 0, len(StandardRack))
-	for _, item := range StandardRack {
-		balls = append(balls, sim.ResultBall{ID: item.ID, X: item.X, Y: item.Y, OnTable: true})
-	}
+	balls := rackBalls()
 
 	return MatchState{
 		MatchID:   matchID,
@@ -235,7 +323,35 @@ func newMatchState(matchID uint, roomCode string, players [2]PlayerBrief) MatchS
 		Balls:     balls,
 		Ready:     [2]bool{true, true},
 		PlaceZone: PlaceAnywhere,
+		// 零值是 Seat0，不显式写成「没有机器人」的话，每一局都会被当成
+		// 座位 0 由机器人在打。
+		Bot: SeatSpectator,
 	}
+}
+
+// BotPlayer 是机器人占座位时用的那份公开资料。
+//
+// UserID 恒为 0：机器人不是用户。结算那条路正是靠「对手的 UserID 为 0」
+// 跳过 Elo 计算的（见 Store.FinishMatch），随便填一个真用户会给他记上一局败绩。
+//
+// 昵称与头像留空，前端按「空头像 + 固定色块 + 两个字的缩写」画出来，
+// 与真人玩家缺头像时的表现一致，不必为机器人单写一套渲染。
+var BotPlayer = PlayerBrief{Nickname: "练习机器人"}
+
+// newBotState 造一局已经开始的人机对局。
+//
+// 玩家恒坐座位 0 并且先开球：这是「练习」而不是公平对局，让玩家先上手。
+// 开局条件与 handleReady 里那一套逐项对齐——手中球、开球线限制、读秒起点，
+// 差一项就会出现「玩家的开球杆被服务端拒掉」这类只有人机局才有的怪状态。
+func newBotState(matchID uint, roomCode string, player PlayerBrief) MatchState {
+	players := [2]PlayerBrief{player, BotPlayer}
+	state := newMatchState(matchID, roomCode, players)
+	state.Bot = Seat1
+	state.BallInHand = true
+	state.PlaceZone = PlaceBehindHead
+	state.CuePlaced = false
+	state.Deadline = time.Now().Add(DefaultTurnTimeout)
+	return state
 }
 
 // newRoomState 造一个还没开局的房间：双方都没准备，不计时。
@@ -331,8 +447,10 @@ func (s *MatchState) snapshot(viewer Seat, now time.Time) Snapshot {
 		CuePlaced:  s.CuePlaced,
 		ShotSeq:    s.ShotSeq,
 		Players:    s.Players,
+		Series:     s.Series,
 		Winner:     s.Winner,
 		WinReason:  s.WinReason,
+		Bot:        s.Bot,
 	}
 	if !s.Deadline.IsZero() {
 		left := int(s.Deadline.Sub(now) / time.Millisecond)

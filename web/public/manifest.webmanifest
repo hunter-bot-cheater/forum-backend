@@ -1,0 +1,33 @@
+{
+  "name": "楼顶 · 实时社区",
+  "short_name": "楼顶",
+  "description": "实时台球对战与社区讨论。添加到主屏幕后从图标打开，没有地址栏，球台能用满整块屏幕。",
+  "lang": "zh-CN",
+  "start_url": "/pool",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "portrait",
+  "background_color": "#171720",
+  "theme_color": "#171720",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

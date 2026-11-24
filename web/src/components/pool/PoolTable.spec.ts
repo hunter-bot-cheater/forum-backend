@@ -102,14 +102,25 @@ describe('PoolTable', () => {
     mount(PoolTable, { props: { balls: balls() } })
     expect(drawActors).toHaveBeenCalledTimes(1)
     const args = drawActors.mock.calls[0]
-    expect(args[1]).toEqual({ width: 300, height: 600 })
+    // 第二项是 CSS 尺寸（绘制代码全程按 CSS 像素算），超采样倍率是另一项。
+    expect(args[1]).toMatchObject({ width: 300, height: 600 })
+    expect(args[3]).toBeGreaterThanOrEqual(1)
   })
 
-  it('位图尺寸按 CSS 尺寸乘 DPR 设置', () => {
-    const wrapper = mount(PoolTable, { props: { balls: balls() } })
-    const canvas = wrapper.find('canvas').element as HTMLCanvasElement
-    expect(canvas.width).toBe(300)
-    expect(canvas.height).toBe(600)
+  it('位图不小于「CSS 尺寸 × 倍率」，倍率不低于设备像素比', () => {
+    // jsdom 默认 devicePixelRatio 是 1；这里换成 3 倍屏，验证下限。
+    Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 3 })
+    try {
+      const wrapper = mount(PoolTable, { props: { balls: balls() } })
+      const canvas = wrapper.find('canvas').element as HTMLCanvasElement
+      expect(canvas.width).toBeGreaterThanOrEqual(900)
+      expect(canvas.height).toBeGreaterThanOrEqual(1800)
+      // 两个方向必须同一个倍率，否则画面会被拉长。位图边长取整，
+      // 所以只比到小数点后两位。
+      expect(canvas.width / 300).toBeCloseTo(canvas.height / 600, 2)
+    } finally {
+      Object.defineProperty(window, 'devicePixelRatio', { configurable: true, value: 1 })
+    }
   })
 
   it('球位变化会重画', async () => {

@@ -419,6 +419,8 @@ func New(deps Deps) (*gin.Engine, error) {
 			auth.POST("/pool/rooms/join", poolRest.JoinRoom)
 			auth.POST("/pool/rooms/leave", poolRest.LeaveRoom)
 			auth.POST("/pool/rooms/reopen", poolRest.Reopen)
+			// 人机对战：开一局不经过准备的对局，机器人由 actor 自己出杆。
+			auth.POST("/pool/rooms/bot", poolRest.StartBotMatch)
 			auth.GET("/pool/online", poolRest.Online)
 			auth.GET("/pool/rooms/:id", poolRest.Room)
 			auth.POST("/pool/rooms/:id/ready", poolRest.Ready)

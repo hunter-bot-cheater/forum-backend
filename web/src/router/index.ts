@@ -113,6 +113,15 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '台球对战' },
       },
       {
+        // 分享链接：/pool/join/123456。
+        // 落在同一个大厅组件上，挂载时拿 :code 自动进房——从微信里点开的人
+        // 不该再手抄六位数字。没有 :code 时它和 /pool 完全一样。
+        path: 'pool/join/:code',
+        name: 'PoolJoin',
+        component: () => import('@/views/pool/lobby.vue'),
+        meta: { title: '加入球房' },
+      },
+      {
         // 旧的房间页已经并进大厅（大厅就是我的房间）。
         // 这条重定向留着是为了旧链接与旧推送不落到 404 上——
         // 那些链接里带的 match_id 现在也不需要了：房间归属由服务端按人查。

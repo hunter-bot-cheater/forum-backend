@@ -871,7 +871,7 @@ func TestRelayAimReachesOpponentAndSpectators(t *testing.T) {
 		t.Fatalf("观战进房失败：%v", err)
 	}
 
-	match.RelayAim(Seat0, 1.25, 0.42)
+	match.RelayAim(Seat0, 1.25, 0.42, 0.6, -0.35)
 
 	// RelayAim 是异步投递的（不占调用方），这里等它落到 actor 里再断言。
 	deadline := time.Now().Add(2 * time.Second)
@@ -893,6 +893,10 @@ func TestRelayAimReachesOpponentAndSpectators(t *testing.T) {
 	if data.Seat != Seat0 || data.Phi != 1.25 || data.Power != 0.42 {
 		t.Errorf("aim 帧内容不对：%+v", data)
 	}
+	// 击球点要跟角度、力度同帧搬运，否则对面看到的加塞会停在上一帧。
+	if data.A != 0.6 || data.B != -0.35 {
+		t.Errorf("aim 帧的击球点不对：%+v", data)
+	}
 	if _, ok := watcher.last(MsgAim); !ok {
 		t.Error("观战者没收到 aim 帧")
 	}
@@ -906,10 +910,86 @@ func TestRelayAimIgnoredWhenNotYourTurn(t *testing.T) {
 	match, _, conn1 := newTestMatch(t, &fakeSim{shot: quietShot()})
 
 	// 开局是座位 0 的回合，座位 1 发来的帧应当被丢掉。
-	match.RelayAim(Seat1, 0.5, 0.9)
+	match.RelayAim(Seat1, 0.5, 0.9, 0, 0)
 	time.Sleep(80 * time.Millisecond)
 
 	if _, ok := conn1.last(MsgAim); ok {
 		t.Error("对手回合之外的瞄准帧不该被转发")
+	}
+}
+
+// 聊天要转给对面与观战者，但不回显给自己。
+//
+// 发送方那边是本地先落进列表的，再收一份只会让同一句话闪一下。
+func TestRelayChatReachesOpponentNotSender(t *testing.T) {
+	match, conn0, conn1 := newTestMatch(t, &fakeSim{shot: quietShot()})
+	watcher := &fakeConn{}
+	if err := match.Watch(watcher); err != nil {
+		t.Fatalf("观战进房失败：%v", err)
+	}
+
+	match.RelayChat(Seat0, "这杆有点险")
+
+	// RelayChat 与 RelayAim 一样是异步投递，等它落到 actor 里再断言。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := conn1.last(MsgChat); ok {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	msg, ok := conn1.last(MsgChat)
+	if !ok {
+		t.Fatal("对手没收到聊天")
+	}
+	data, ok := msg.Data.(ChatData)
+	if !ok {
+		t.Fatalf("聊天的数据类型 = %T", msg.Data)
+	}
+	if data.Seat != Seat0 || data.Text != "这杆有点险" {
+		t.Errorf("聊天内容不对：%+v", data)
+	}
+	// 编号要递增，客户端拿它当列表 key。
+	if data.ID == 0 {
+		t.Error("聊天没有编号")
+	}
+	if _, ok := watcher.last(MsgChat); !ok {
+		t.Error("观战者没收到聊天")
+	}
+	if _, ok := conn0.last(MsgChat); ok {
+		t.Error("不该把聊天回显给发送方")
+	}
+}
+
+// 同一座位连发要挡掉：按住回车不能刷屏。
+//
+// 间隔是包级常量（700ms），测试里两次调用之间不 sleep，第二条必然被丢。
+func TestRelayChatRateLimited(t *testing.T) {
+	match, _, conn1 := newTestMatch(t, &fakeSim{shot: quietShot()})
+
+	match.RelayChat(Seat0, "第一条")
+	match.RelayChat(Seat0, "第二条")
+	time.Sleep(120 * time.Millisecond)
+
+	msg, ok := conn1.last(MsgChat)
+	if !ok {
+		t.Fatal("第一条聊天没转发")
+	}
+	data := msg.Data.(ChatData)
+	if data.Text != "第一条" {
+		t.Errorf("转发的是 %q，应当是第一条", data.Text)
+	}
+}
+
+// 空消息直接丢：前端也会拦，但客户端不可信。
+func TestRelayChatDroppedWhenEmpty(t *testing.T) {
+	match, _, conn1 := newTestMatch(t, &fakeSim{shot: quietShot()})
+
+	match.RelayChat(Seat0, "")
+	time.Sleep(80 * time.Millisecond)
+
+	if _, ok := conn1.last(MsgChat); ok {
+		t.Error("空的聊天不该被转发")
 	}
 }

@@ -64,8 +64,13 @@ type readyReq struct {
 }
 
 // joinRoomReq 是「按房号进房」的请求体。
+//
+// Ready 只由分享链接带上来：点链接这个动作本身就等于「我要打」，
+// 进房后服务端顺手替他按下准备，房主那边点一次就能开局。
+// 手动输房号的入口不传它——那种场景里两个人常常还要先说两句。
 type joinRoomReq struct {
 	RoomCode string `json:"room_code"`
+	Ready    bool   `json:"ready"`
 }
 
 // roomJoinedResp 是「有人进了我的房间」那条推送。

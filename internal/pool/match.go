@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"math"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,6 +98,10 @@ type Options struct {
 	Sim         Simulator
 	Recorder    Recorder
 	TurnTimeout time.Duration
+	// Series 是「同一对玩家连续对局」的比分账本，由装配层创建后共用一份。
+	// 同一局里它只被读两次（开局读初始比分、结算时记一局胜负），
+	// 所以不需要进 actor 的串行通道——Series 自己带锁。
+	Series *Series
 }
 
 // 一杆的读秒时长。职业比赛常见 30 秒，这里留 40 秒：
@@ -110,12 +115,15 @@ const (
 	cmdShoot
 	cmdPlaceCue
 	cmdAim
+	cmdChat
 	cmdSnapshot
 	cmdReady
 	cmdLeave
 	cmdDisconnect
 	cmdWatch
 	cmdFillSeat
+	// cmdBotShoot 由机器人的定时器自己投进来，不经过任何连接。
+	cmdBotShoot
 	cmdClose
 )
 
@@ -131,7 +139,9 @@ type command struct {
 	params sim.CueParams
 	// shot 是客户端随出杆一起上来的整杆结果，nil 表示这份请求没带
 	// （老客户端），由 handleShoot 退回 pool-sim 现算。
-	shot  *sim.Shot
+	shot *sim.Shot
+	// text 是聊天正文，只有 cmdChat 用。
+	text  string
 	seq   int
 	x, y  float64
 	reply chan error
@@ -184,6 +194,16 @@ type Match struct {
 	// lastActive 是最近一次有人跟这局说话的时刻（UnixNano），给「房间是不是没人理了」用。
 	// 用原子量而不是走命令往返：清扫是后台动作，为一局排一次命令不值得。
 	lastActive int64
+
+	// 聊天：lastChat 按座位记上一次发言的时刻，用来挡连发；chatSeq 是消息编号。
+	// 两者都只在 run() 里读写，不需要锁。
+	lastChat [2]time.Time
+	chatSeq  int64
+
+	// botTimer 是机器人「想一想再出杆」的定时器，没有机器人或不该它走时为空。
+	// 只在 actor 里复位，回调只负责把一条 cmdBotShoot 投回来，
+	// 所以它既不会和玩家抢状态，也不会在 actor 退出后留下一个还在写状态的协程。
+	botTimer *time.Timer
 }
 
 // NewMatch 创建并启动一局。state 里的球位、座位与玩家资料由调用方准备好。
@@ -193,6 +213,11 @@ func NewMatch(state MatchState, opts Options) *Match {
 	}
 	if opts.Recorder == nil {
 		opts.Recorder = NopRecorder{}
+	}
+	// 比分账本缺省补一份空的：单局测试与「只开一局」的调用方不必关心它，
+	// 而装配层给的那一份会让同一对玩家的多局共享同一个账本。
+	if opts.Series == nil {
+		opts.Series = NewSeries()
 	}
 
 	match := &Match{
@@ -281,11 +306,14 @@ func (m *Match) PlaceCue(seat Seat, x, y float64) error {
 // 与 Shoot 不同，它不等回执、也不占用调用方：瞄准是每几十毫秒一帧的连续动作，
 // actor 正在算一杆（开球要一两秒）时宁可丢掉这几帧，也不能让 WS 读循环堵在那里，
 // 那会把对端的 uptime 与心跳一起拖垮。丢帧的代价只是对面看到的杆子顿一下。
-func (m *Match) RelayAim(seat Seat, phi, power float64) {
+//
+// a、b 是击球点（左右塞、高低杆），与角度、力度同帧搬运，对面据此画出
+// 同一颗球面点位——加塞是「这一杆怎么打」的一部分，晚一帧就看不到真动作了。
+func (m *Match) RelayAim(seat Seat, phi, power, a, b float64) {
 	select {
 	case <-m.done:
 		return
-	case m.cmd <- command{kind: cmdAim, seat: seat, params: sim.CueParams{Phi: phi, Power: power}}:
+	case m.cmd <- command{kind: cmdAim, seat: seat, params: sim.CueParams{Phi: phi, Power: power, A: a, B: b}}:
 	default:
 		// actor 正忙，丢掉这一帧。
 	}
@@ -303,6 +331,48 @@ func (m *Match) handleAim(cmd command) {
 		Seat:  cmd.seat,
 		Phi:   cmd.params.Phi,
 		Power: cmd.params.Power,
+		A:     cmd.params.A,
+		B:     cmd.params.B,
+	}))
+}
+
+// RelayChat 把一条聊天投给 actor，由它发号并转给对手与观战者。
+//
+// 与 RelayAim 一样用非阻塞投递：actor 正在算一杆时宁可丢掉这一句，
+// 也不能让 WS 读循环卡在那里。丢一句聊天的代价就是对方没看见，重发即可。
+func (m *Match) RelayChat(seat Seat, text string) {
+	select {
+	case <-m.done:
+		return
+	case m.cmd <- command{kind: cmdChat, seat: seat, text: text}:
+	default:
+	}
+}
+
+// handleChat 广播一条聊天。
+//
+// 只转发给**别人**：发送方在自己那边已经把这条消息落进列表了（本地回显），
+// 再回一份会让同一句话闪一下。观战者照发，他们看的也是这块屏。
+//
+// 两个闸门都在这里：空消息直接丢（前端也会拦，但客户端不可信），
+// 同一座位两条之间至少隔 chatInterval，防止按住回车刷屏。
+// 不满足就静默丢弃——为一句闲聊回一条错误只会让面板上多一行红字。
+func (m *Match) handleChat(cmd command) {
+	if cmd.text == "" {
+		return
+	}
+	now := time.Now()
+	if !m.lastChat[cmd.seat].IsZero() && now.Sub(m.lastChat[cmd.seat]) < chatInterval {
+		return
+	}
+	m.lastChat[cmd.seat] = now
+	m.chatSeq++
+
+	m.broadcastExcept(cmd.seat, m.wrap(MsgChat, ChatData{
+		Seat: cmd.seat,
+		Text: cmd.text,
+		ID:   m.chatSeq,
+		TS:   now.UnixMilli(),
 	}))
 }
 
@@ -463,6 +533,10 @@ func (m *Match) handle(cmd command) {
 	case cmdAim:
 		// 瞄准帧没有回执：进来只为走一遍单写者约束，让广播与状态改动同源。
 		m.handleAim(cmd)
+	case cmdChat:
+		// 聊天同样没有回执：发不出去时（限流、空串）静默丢弃即可，
+		// 为一句闲聊回一条错误只会让面板上多一行红字。
+		m.handleChat(cmd)
 	case cmdSnapshot:
 		cmd.state <- m.state.snapshot(cmd.seat, time.Now())
 	case cmdLeave:
@@ -473,6 +547,9 @@ func (m *Match) handle(cmd command) {
 		cmd.reply <- m.handleFillSeat(cmd)
 	case cmdDisconnect:
 		cmd.reply <- m.handleDisconnect(cmd)
+	case cmdBotShoot:
+		// 机器人没有连接，也就没人等回执；错误只进日志。
+		cmd.reply <- m.handleBotShoot()
 	}
 }
 
@@ -574,27 +651,167 @@ func (m *Match) handleShoot(cmd command) error {
 		shot.SimMS = 0
 	} else {
 		var err error
-		shot, err = m.opts.Sim.Shoot(context.Background(), sim.Request{
-			Balls:    m.state.simBalls(),
-			Cue:      cmd.params,
-			SampleHz: 30,
-		})
+		shot, err = m.simulate(cmd.params)
 		if err != nil {
-			// 这里只记日志并返回错误：错误帧由 WS 层按 error 码统一回一条。
-			// 两处都发的话，玩家会看到两条一模一样的「球桌暂时算不动」。
-			m.log.Error("simulate shot", "error", err)
-			return ErrSimFailed
+			return err
 		}
 	}
 
+	m.playShot(cmd.seat, cmd.params, shot)
+	return nil
+}
+
+// simulate 让物理服务算一杆。
+//
+// 调用方是 actor，所以这里可以阻塞——一次开球要一两秒，
+// 这期间别人的命令排在队列里等着，与玩家出杆时完全一样。
+func (m *Match) simulate(params sim.CueParams) (*sim.Shot, error) {
+	shot, err := m.opts.Sim.Shoot(context.Background(), sim.Request{
+		Balls:    m.state.simBalls(),
+		Cue:      params,
+		SampleHz: 30,
+	})
+	if err != nil {
+		// 这里只记日志并返回错误：错误帧由 WS 层按 error 码统一回一条。
+		// 两处都发的话，玩家会看到两条一模一样的「球桌暂时算不动」。
+		m.log.Error("simulate shot", "error", err)
+		return nil, ErrSimFailed
+	}
+	return shot, nil
+}
+
+// ShotPlayRate 是前端播放一杆轨迹的倍速，必须与 web/src/game/animator.ts
+// 的 SHOT_PLAY_RATE 一致。
+//
+// 服务端算完一杆就把帧发走了，客户端却是按这个倍速（0.8，比物理慢）慢慢放，
+// 所以「这一杆在我们这边还要播多久」= 物理时长 ÷ 这个数。
+const ShotPlayRate = 0.8
+
+// 机器人轮到自己之后「想一想」的时间。
+//
+// 这是**在球停稳之后**再加的一段：不给的话，最后一颗球刚停，对面的杆
+// 就从另一个方向冒出来，看起来像球被瞬移了。
+//
+// 出杆前的等待还必须叠加「上一杆在客户端播了多久」（见 shotPlayDelay）：
+// 只在服务端计时的话，机器人会在玩家屏幕里球还在滚的时候出杆——
+// 那时客户端还有一杆动画没放完，两杆的帧会叠在一起，画面直接错位。
+const (
+	BotThinkDelay  = 1000 * time.Millisecond
+	BotThinkJitter = 300 * time.Millisecond
+)
+
+// shotPlayDelay 把一杆的物理时长换算成客户端播完它需要的真实时间。
+//
+// shot.Duration 是秒（pool-sim 的口径），前端 0.8 倍速播放，
+// 所以真实耗时是它的 1.25 倍。空轨迹返回 0，不额外拖时间。
+func shotPlayDelay(shot *sim.Shot) time.Duration {
+	if shot == nil || shot.Duration <= 0 {
+		return 0
+	}
+	return time.Duration(shot.Duration / ShotPlayRate * float64(time.Second))
+}
+
+// armBot 在轮到机器人时安排一杆，其他时候把定时器撤掉。
+//
+// after 是「刚才那一杆在客户端还要播多久」：playShot 结尾传 shotPlayDelay(shot)，
+// 开局与超时这两种没有新轨迹的情况传 0。机器人真正出杆的时刻 =
+// after + BotThinkDelay + 随机抖动，所以它的杆总是落在玩家看到球停稳之后。
+//
+// 只由 actor 调用。定时器回调只做一件事：把 cmdBotShoot 投回 actor，
+// 所以所有状态改动仍然只发生在 run() 这一条协程里——
+// 让回调直接算杆的话，它读到的球位可能正被别的命令改到一半。
+func (m *Match) armBot(after time.Duration) {
+	if m.botTimer != nil {
+		m.botTimer.Stop()
+		m.botTimer = nil
+	}
+	if m.state.Status != model.PoolStatusPlaying || m.state.Turn != m.state.Bot {
+		return
+	}
+	delay := after + BotThinkDelay + time.Duration(rand.Int63n(int64(BotThinkJitter)))
+	m.botTimer = time.AfterFunc(delay, func() {
+		if err := m.call(command{kind: cmdBotShoot}); err != nil {
+			// 对局已经关掉是正常路径（玩家退出了、被清扫了），不值得记一条告警。
+			if !errors.Is(err, ErrMatchClosed) {
+				m.log.Warn("bot shoot", "error", err)
+			}
+		}
+	})
+}
+
+// handleBotShoot 让机器人出一杆。
+//
+// 流程与玩家出杆一致：先校验轮次，必要时落位母球，然后算参数、交给物理服务、
+// 走同一套规则与应用。唯一的区别是物理结果由服务端算，因为机器人没有客户端。
+func (m *Match) handleBotShoot() error {
+	if m.state.Status != model.PoolStatusPlaying || m.state.Turn != m.state.Bot {
+		return nil
+	}
+
+	// 母球不在台上（上一杆摔袋）时必须先落位：那颗球的坐标还在袋里、z 为负，
+	// 直接送进物理会算不出结果。
+	if !m.state.cueOnTable() {
+		x, y, ok := m.botCueSpot()
+		if !ok {
+			m.log.Warn("bot has nowhere to place the cue ball")
+			return nil
+		}
+		if err := m.handlePlaceCue(command{seat: m.state.Bot, x: x, y: y}); err != nil {
+			m.log.Warn("bot place cue", "error", err)
+			return nil
+		}
+	}
+
+	plans := m.botPlans()
+	if len(plans) == 0 {
+		// 一颗能打的球都没有（比如台面上只剩对手的球）：等读秒判超时，
+		// 总比硬打一杆空杆、白白送自由球给玩家强。
+		m.log.Warn("bot has no plan", "match_id", m.state.MatchID)
+		return nil
+	}
+
+	// 逐套试。算出来的线看着能进，物理上仍可能因为切得太薄、球挤在一起
+	// 而先碰到别的球；这时换下一套，比直接把自由球送给玩家体面。
+	var (
+		fallback       *sim.Shot
+		fallbackParams sim.CueParams
+	)
+	for _, plan := range plans {
+		shot, err := m.simulate(plan.params)
+		if err != nil {
+			return err
+		}
+		if fallback == nil {
+			fallback, fallbackParams = shot, plan.params
+		}
+		if JudgeShot(m.state.ruleState(), shot).Foul {
+			continue
+		}
+		m.playShot(m.state.Bot, plan.params, shot)
+		return nil
+	}
+
+	// 每套都犯规：认罚打完第一套。停在这里的话这一杆就永远打不出去，
+	// 玩家会对着一个不动的球桌等四十秒。
+	m.log.Warn("bot falls back to a foul shot", "match_id", m.state.MatchID)
+	m.playShot(m.state.Bot, fallbackParams, fallback)
+	return nil
+}
+
+// playShot 把一杆的结果与规则结论落到状态上，再广播出去。
+//
+// 玩家出杆与机器人出杆共用这一段：两边唯一的差别是「谁算的物理」，
+// 而从「一杆结果」往后的一切（规则、换人、落库、下一杆归谁）必须一模一样，
+// 否则人机对局会跑出一条真人局没有的路径。
+func (m *Match) playShot(seat Seat, params sim.CueParams, shot *sim.Shot) {
 	verdict := JudgeShot(m.state.ruleState(), shot)
 	m.applyShot(shot, verdict)
 
 	// 广播结果：轨迹给所有人，犯规与结算各自带一条，前端按顺序播。
 	shotData := ShotData{
 		Seq:      m.state.ShotSeq,
-		Seat:     cmd.seat,
-		Params:   cmd.params,
+		Seat:     seat,
+		Params:   params,
 		Duration: shot.Duration,
 		Events:   shot.Events,
 		Frames:   shot.Frames,
@@ -608,12 +825,16 @@ func (m *Match) handleShoot(cmd command) error {
 			Code:       verdict.ReasonCode,
 			Reason:     verdict.Reason,
 			BallInHand: verdict.BallInHand,
-			Seat:       cmd.seat,
+			Seat:       seat,
 		}))
 	}
 
 	if verdict.Winner != nil {
-		m.broadcast(m.wrap(MsgResult, ResultData{Winner: *verdict.Winner, Reason: verdict.WinReason}))
+		m.broadcast(m.wrap(MsgResult, ResultData{
+			Winner: *verdict.Winner,
+			Reason: verdict.WinReason,
+			Series: m.state.Series,
+		}))
 	} else {
 		m.broadcast(m.wrap(MsgTurn, TurnData{
 			Seat:       m.state.Turn,
@@ -637,9 +858,9 @@ func (m *Match) handleShoot(cmd command) error {
 	if err := m.opts.Recorder.SaveShot(context.Background(), ShotRecord{
 		MatchID:   m.state.MatchID,
 		Seq:       m.state.ShotSeq,
-		ShooterID: m.state.Players[cmd.seat].UserID,
-		Seat:      cmd.seat,
-		Params:    cmd.params,
+		ShooterID: m.state.Players[seat].UserID,
+		Seat:      seat,
+		Params:    params,
 		Events:    shot.Events,
 		Frames:    shot.Frames,
 		Duration:  shot.Duration,
@@ -647,7 +868,14 @@ func (m *Match) handleShoot(cmd command) error {
 	}); err != nil {
 		m.log.Error("save shot", "seq", m.state.ShotSeq, "error", err)
 	}
-	return nil
+
+	// 这一杆打完，轮次可能已经交到机器人手上，就在这里把它的定时器装上。
+	// 放在 playShot 而不是各个调用点：玩家出杆、机器人出杆、超时换人
+	// 三条路都会走到这里，漏掉任何一条，机器人都会停在那儿等到超时。
+	//
+	// 等这一杆在我们这边播完再起算：客户端是 0.8 倍速放的，
+	// 服务端早就算完了，不加这段延迟机器人会在球还在滚的时候出杆。
+	m.armBot(shotPlayDelay(shot))
 }
 
 // applyShot 把一杆的物理结果与规则结论落到状态上。
@@ -660,13 +888,12 @@ func (m *Match) applyShot(shot *sim.Shot, verdict Verdict) {
 		m.state.setBall(ball)
 	}
 
-	// 开球把 8 号打进要重摆，位置用开局时的坐标。
+	// 开球把 8 号打进要重摆，放回三角形中心那个槽位。
+	// 按槽位取坐标而不是按球号去 StandardRack 里找：那张表里的球号只是占位，
+	// 每局真正的球号是 rackBalls 排的，只有槽位坐标是恒定的。
 	if verdict.ReSpotEight {
-		for _, item := range StandardRack {
-			if item.ID == sim.EightBallID {
-				m.state.setBall(sim.ResultBall{ID: item.ID, X: item.X, Y: item.Y, OnTable: true})
-			}
-		}
+		slot := StandardRack[eightBallSlot+1] // +1：第一项是母球
+		m.state.setBall(sim.ResultBall{ID: sim.EightBallID, X: slot.X, Y: slot.Y, OnTable: true})
 	}
 
 	// 定组：击球方得到本杆第一颗落袋球所属的组，对手自动拿另一组。
@@ -756,7 +983,7 @@ func (m *Match) handleLeave(cmd command) error {
 	m.state.WinReason = WinLeave
 	m.state.Deadline = time.Time{}
 	m.finish(WinLeave)
-	m.broadcast(m.wrap(MsgResult, ResultData{Winner: winner, Reason: WinLeave}))
+	m.broadcast(m.wrap(MsgResult, ResultData{Winner: winner, Reason: WinLeave, Series: m.state.Series}))
 	return nil
 }
 
@@ -790,6 +1017,12 @@ func (m *Match) handleReady(cmd command) error {
 
 	// 双方都准备：开局。读秒从现在开始算，不是从进房开始。
 	m.state.Status = model.PoolStatusPlaying
+	// 连续约战的大比分在真正开局这一刻读：进房时对手可能还没来，
+	// 那时候两个人是谁都不确定，比分无从查起。
+	m.state.Series = m.opts.Series.SeatScores(
+		m.state.Players[Seat0].UserID,
+		m.state.Players[Seat1].UserID,
+	)
 	// 开球方就是此刻该出杆的一方。记下来是为了结算之后「再约」能轮换开球：
 	// Turn 每杆都会变，只有 Breaker 能回答「这一局是谁先开的」。
 	m.state.Breaker = m.state.Turn
@@ -802,6 +1035,9 @@ func (m *Match) handleReady(cmd command) error {
 	m.state.Deadline = time.Now().Add(m.opts.TurnTimeout)
 	m.broadcastState()
 	m.broadcast(m.wrap(MsgTurn, TurnData{Seat: m.state.Turn, DeadlineMS: m.remainingMS()}))
+	// 机器人坐开球位时，开局这一刻就该它想杆了。
+	// 没有新轨迹要播，只算「想一想」那一段。
+	m.armBot(0)
 	return nil
 }
 
@@ -847,7 +1083,7 @@ func (m *Match) handleTimeout() {
 		m.state.WinReason = WinTimeout
 		m.state.Deadline = time.Time{}
 		m.finish(WinTimeout)
-		m.broadcast(m.wrap(MsgResult, ResultData{Winner: winner, Reason: WinTimeout}))
+		m.broadcast(m.wrap(MsgResult, ResultData{Winner: winner, Reason: WinTimeout, Series: m.state.Series}))
 		return
 	}
 
@@ -871,6 +1107,9 @@ func (m *Match) handleTimeout() {
 	// 不补快照的话，接手那方的界面看不到「手中球」，直接出杆会被 ErrMustPlaceCue 拒，
 	// 而拒绝之后状态没有任何变化，于是他会一直撞在同一句提示上——对局卡死。
 	m.broadcastState()
+	// 超时换人之后可能轮到机器人：不重新装定时器，它会一直站到下一轮超时。
+	// 超时没有新轨迹，只要「想一想」那一段。
+	m.armBot(0)
 }
 
 // finish 结算落库，并把结果记进日志。
@@ -891,6 +1130,12 @@ func (m *Match) finish(reason string) {
 		record.Winner = *m.state.Winner
 		record.WinnerID = m.state.Players[*m.state.Winner].UserID
 		record.LoserID = m.state.Players[m.state.Winner.Other()].UserID
+
+		// 连着打的比分：赢的人 +1。同时改状态里的那一份，
+		// 这样结算之后前端再拉快照，顶上显示的就是刚打完的新比分。
+		winner := *m.state.Winner
+		m.state.Series[winner] += 1
+		m.opts.Series.AddWin(record.WinnerID, record.LoserID)
 	}
 	if err := m.opts.Recorder.FinishMatch(context.Background(), record); err != nil {
 		m.log.Error("finish match", "error", err)
@@ -899,6 +1144,12 @@ func (m *Match) finish(reason string) {
 
 // shutdown 关掉所有连接，由 Close 触发。
 func (m *Match) shutdown() {
+	// 定时器先停：它的回调会往 actor 的通道里投命令，
+	// 而 run() 马上就要返回了，那条命令等不到人处理。
+	if m.botTimer != nil {
+		m.botTimer.Stop()
+		m.botTimer = nil
+	}
 	for index := range m.conns {
 		if m.conns[index] != nil {
 			m.conns[index].Close()

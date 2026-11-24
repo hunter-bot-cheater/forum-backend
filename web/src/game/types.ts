@@ -100,11 +100,17 @@ export interface MatchSnapshot {
   shot_seq: number
   // players 是定长两项：没进房的那一侧 user_id 为 0，昵称与头像为空串。
   players: [PlayerBrief, PlayerBrief]
+  // series 是这两个人「这一轮连续对局」各赢了几局，按座位排。
+  // 它是截至上一局结束的比分：本局还没打完，所以赢家那一分要等结算。
+  series: [number, number]
   // winner 只有结算后才有值，进行中的快照是 null。
   winner: Seat | null
   // win_reason 是赢法的机读码（eight_legal / eight_early / timeout / leave），
   // 中文文案在前端定，这样服务端改文案不会影响前端的样式分支。
   win_reason: string
+  // bot 是人机坐的座位号，-1 表示这一局是两个人打。
+  // 结算界面靠它把「再约一局」换成「再打一局」——人机那边没有第二个人可以再约。
+  bot: Viewer
 }
 
 // RoomSnapshot 是房间页轮询到的状态，比对局快照少一半字段。

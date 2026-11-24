@@ -85,6 +85,7 @@ func newEngine(t *testing.T, db *gorm.DB, manager *Manager, names map[uint]strin
 	engine.POST("/api/pool/rooms/join", handler.JoinRoom)
 	engine.POST("/api/pool/rooms/leave", handler.LeaveRoom)
 	engine.POST("/api/pool/rooms/reopen", handler.Reopen)
+	engine.POST("/api/pool/rooms/bot", handler.StartBotMatch)
 	engine.GET("/api/pool/online", handler.Online)
 	engine.POST("/api/pool/invites", handler.CreateInvite)
 	engine.GET("/api/pool/invites/pending", handler.PendingInvites)

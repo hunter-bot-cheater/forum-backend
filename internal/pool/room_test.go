@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"forum-backend/internal/model"
 	"forum-backend/internal/realtime"
 	"forum-backend/internal/testutil"
+	"forum-backend/pkg/response"
 )
 
 // 这个文件覆盖「我的房间」这一整套流程：
@@ -209,6 +211,65 @@ func TestJoinRoomSeatsGuestAndNotifiesOwner(t *testing.T) {
 	}
 }
 
+// 点分享链接进来的客人由服务端替他按下准备：房主那边点一次就能开局，
+// 不必再教他先去找准备按钮。
+func TestJoinRoomWithReadyMarksGuestReady(t *testing.T) {
+	db := testutil.NewDB(t)
+	engine := newEngine(t, db, newRoomManager(t), map[uint]string{7: "甲", 8: "乙"}, &fakeHub{})
+
+	room := openRoomFor(t, engine, 7)
+
+	status, body := postJSON(t, engine, "/api/pool/rooms/join", 8,
+		joinRoomReq{RoomCode: room.RoomCode, Ready: true})
+	if status != http.StatusOK {
+		t.Fatalf("进房失败 %d：%s", status, body)
+	}
+	var joined roomResp
+	decodeData(t, body, &joined)
+	if joined.Ready != [2]bool{false, true} {
+		t.Errorf("准备状态 = %v，期望客人已经准备好、房主还没", joined.Ready)
+	}
+	// 房主没点准备，两个人不能自己开打。
+	if joined.Status != model.PoolStatusWaiting {
+		t.Errorf("状态 = %q，期望还在等房主准备", joined.Status)
+	}
+}
+
+// 房主已经点了准备、客人点分享链接进来：两边凑齐就立刻开局，谁都不用再点。
+func TestJoinRoomWithReadyStartsWhenOwnerReady(t *testing.T) {
+	db := testutil.NewDB(t)
+	engine := newEngine(t, db, newRoomManager(t), map[uint]string{7: "甲", 8: "乙"}, &fakeHub{})
+
+	room := openRoomFor(t, engine, 7)
+	// 房主先点准备：这时对面还空着，服务端允许先准备自己那一侧。
+	readyPath := fmt.Sprintf("/api/pool/rooms/%d/ready", room.MatchID)
+	if status, body := postJSON(t, engine, readyPath, 7, readyReq{Ready: true}); status != http.StatusOK {
+		t.Fatalf("房主准备失败 %d：%s", status, body)
+	}
+
+	status, body := postJSON(t, engine, "/api/pool/rooms/join", 8,
+		joinRoomReq{RoomCode: room.RoomCode, Ready: true})
+	if status != http.StatusOK {
+		t.Fatalf("进房失败 %d：%s", status, body)
+	}
+	var joined roomResp
+	decodeData(t, body, &joined)
+	if joined.Status != model.PoolStatusPlaying {
+		t.Fatalf("状态 = %q，期望两个人凑齐就开局", joined.Status)
+	}
+	if joined.Ready != [2]bool{true, true} {
+		t.Errorf("准备状态 = %v，期望两边都准备好", joined.Ready)
+	}
+	// 库里那行要跟着推进，否则刷新之后这局还在「等待中」。
+	var row model.PoolMatch
+	if err := db.First(&row, room.MatchID).Error; err != nil {
+		t.Fatalf("读回房间失败：%v", err)
+	}
+	if row.Status != model.PoolStatusPlaying {
+		t.Errorf("库里状态 = %q，期望 playing", row.Status)
+	}
+}
+
 // 房号输错、格式不对、房间已开局：三种拒绝要各说各的，状态码也不能混。
 func TestJoinRoomRejectsBadCode(t *testing.T) {
 	db := testutil.NewDB(t)
@@ -265,6 +326,22 @@ func TestJoinRoomRejectsTakenSeat(t *testing.T) {
 	status, body := postJSON(t, engine, "/api/pool/rooms/join", 9, joinRoomReq{RoomCode: room.RoomCode})
 	if status != http.StatusConflict {
 		t.Fatalf("座位被占应当 409，实际 %d：%s", status, body)
+	}
+
+	// 分享链接是发给一群人的，来晚的那个要靠这两个字段知道「是满员，不是链接坏了」：
+	// error_code 给前端分支用，message 直接给人看，必须写着「人满」。
+	var refusal struct {
+		Message   string `json:"message"`
+		ErrorCode string `json:"error_code"`
+	}
+	if err := json.Unmarshal(body, &refusal); err != nil {
+		t.Fatalf("409 响应不是 JSON：%s", body)
+	}
+	if refusal.ErrorCode != response.ErrCodeRoomFull {
+		t.Errorf("error_code = %q，期望 %q", refusal.ErrorCode, response.ErrCodeRoomFull)
+	}
+	if !strings.Contains(refusal.Message, "人满") {
+		t.Errorf("文案应当说清人满，实际 %q", refusal.Message)
 	}
 
 	// 座位 1 上还是乙，不能被后来的人顶掉。

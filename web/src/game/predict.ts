@@ -18,11 +18,20 @@ import type { BallState, ShotParams } from './types'
 // 三个碰撞参数（e_b、e_c、f_c）原本也是 pooltool 默认，后来按用户要求把
 // 碰撞损耗减半，改成了下面那组——详见常量定义处的推导。
 //
-// u_r 当前 0.005，另外还叠了一份跟速度成正比的阻尼（见 ROLL_VISCOUS）。
+// u_r 当前 0.0025，另外还叠了一份跟速度成正比的阻尼（见 ROLL_VISCOUS）。
 //
 // 视频标定值是 0.012（下面那段推导），用户先要求「阻尼再小一倍」，于是按字面
 // 减半到 0.006；后来「中段太快、末段又 abrupt」的问题改由速度项去解决，
-// 常数项再让一档到 0.005——末段的减速因此更绵，但不至于变成匀速爬行。
+// 常数项让到 0.005。用户仍然觉得「末尾有急停感」，再减半到 0.0025。
+//
+// 为什么急停感出在常数项：屏幕上台长 2.24 米只映射到三百多像素，1 像素约 6 毫米。
+// 常数项 0.049 m/s² 时，球从 0.3 m/s 滚到停只用 4.3 秒、走 58 厘米——
+// 折算到屏幕上不到 9 个像素，整条尾巴被压成"几乎不动然后停住"。
+// 减半之后同一段变成 6.9 秒、86 厘米（13 像素），看得见"越滚越慢地化掉"。
+//
+// 代价是满力空杆的总时长从 16.4 秒涨到 20.7 秒，MAX_DURATION 24 秒只剩 3 秒余量，
+// 而真实对局里球撞库、撞球都会按比例掉速，到不了这个上限。再想更绵就往
+// ROLL_VISCOUS 上找，不要继续压这一项。
 //
 // 视频 592×1280 / 29.97fps，球直径 25px（横穿球心一行量出边缘 −12.5/+12.5px），
 // 开球后母球在 (264.9, 641.8) 停住，从 11.45s 到 13.65s 的轨迹做二次拟合，
@@ -38,7 +47,7 @@ import type { BallState, ShotParams } from './types'
 // 「滚动比滑动还费劲」，物理上讲不通，手感上会变成球一落稳就急刹。
 const GRAVITY = 9.81
 const SLIDE_FRICTION = 0.2
-const ROLL_FRICTION = 0.005
+const ROLL_FRICTION = 0.0025
 
 // 滑动阶段球心减速度，以及转动让它提前进入纯滚动的比例。
 // 球是实心球，转动惯量 2/5 mR²：滑动摩擦让球心减速 μg 的同时，
@@ -55,6 +64,43 @@ const SPIN_GAIN = 2.5
 // 高速段掉得快（3 m/s 时合计 0.5 m/s²，是常数项的十倍），低速段几乎只剩常数项，
 // 整条速度曲线是平滑的指数衰减，没有「匀速巡航」也没有「突然刹车」。
 const ROLL_VISCOUS = 0.15
+
+// 低速段的额外阻尼：模拟台呢的绒被球压出一个浅坑，越慢越陷得住。
+//
+// 上面两个系数合起来是纯指数收尾：球从 0.1 m/s 到静止要三秒多，而这三秒只走
+// 一两厘米——屏幕上不到 2 个像素，等于「看着停了、其实还在爬」，玩家反馈的
+// 「突然停下」就是这段看不见的尾巴。加一段只在低速起作用的阻尼之后，收尾
+// 有了几厘米可见位移，问题从「看不见」变成了「不均匀」：
+//
+// 第一版让额外阻尼随速度线性增大（v→0 时最大 0.45 m/s²），结果减速度全堆在
+// 最后半秒——前 1 秒每 0.1 秒只掉 3 px/s（几乎匀速），最后 0.6 秒从 57 px/s
+// 直落 6 px/s。玩家看到的正是「匀速滚，然后啪一下刹住」。这是**形状**问题，
+// 光加位移量治不好：把系数调大只是把那一跤摔得更狠。
+//
+// 现在改成「平滑升到恒定减速度」：进 TAIL_SPEED 时额外阻尼是 0，在 TAIL_RAMP
+// 这段速度区间里用 smoothstep 升满，之后一直保持 TAIL_DECEL。于是低速段是
+// 恒定减速度——速度线性趋零，每 0.1 秒的位移均匀地少一点点，收尾两秒多，
+// 全程都在减速，没有「先匀速后急刹」的分界。
+//
+// 实测（单球自由滚，手机竖屏约 294 px/m。VISIBLE 指人眼在 60fps 下还能看出
+// 「在动」的速度，约 1 像素/帧 = 60 px/s）：
+//
+//   方案                    收尾时长   看得见在动   最后 1 秒位移   末段总位移
+//   旧（阻尼随速度增大）    1.61s      约 1.0s      49px            108px
+//   恒减速 0.45/0.26        2.06s      1.37s        44px            165px
+//   恒减速 0.50/0.22（现在）2.49s      1.70s        38px            215px
+//
+// 旧方案「最后 1 秒位移」看着不小，但那 49 像素里有 40 像素集中在头 0.4 秒，
+// 后 0.6 秒从 57 px/s 直落 6 px/s——玩家看到的正是「匀速滚完，啪一下刹住」。
+// 换成恒减速之后，看得见在动的时长从 1.0 秒拉到 1.7 秒，越往后每帧走得越少，
+// 最后 0.4 秒仍在以 20~40 px/s 挪。
+//
+// 末段位移 215 像素听着多，但它摊在 2.5 秒里，不是一下子多滑出去半张台。
+// 代价是低速段的滚距被吃掉一点（两成力度 1.82m → 1.68m），量级远小于
+// 力度条本身的刻度。
+const TAIL_SPEED = 0.4
+const TAIL_DECEL = 0.16
+const TAIL_RAMP = 0.2
 
 // 球与球、球与库边的恢复系数，以及库边的切向摩擦。
 //
@@ -107,6 +153,32 @@ const CUSHION_SPIN_GRIP = 0.5
 const CUSHION_SPIN_DECAY = 0.55
 const FOLLOW_GAIN = 0.45
 
+// 塞在「撞到球」那一刻干的活：甩球、外传、自己留一点。
+//
+// 之前塞只在撞库时兑现（反弹角变大变小），撞球时完全不起作用，
+// 玩家把塞拉满正碰一杆，看到的是和空杆一模一样——那不是加塞，那是装饰。
+//
+// 真实台球里母球带塞撞上目标球时，接触点有侧向相对滑动，摩擦力把目标球
+// 从球心连线推开几度，这就是甩球（throw）。Dr. Dave 的实测数据：
+//   - 最大约每英尺 1 英寸，合 5°；
+//   - 直球、慢速、中杆（stun）、约一半塞时最大，塞再大反而变小
+//     （接触点从「抓得住」变成「打滑」）；
+//   - 高杆低杆各把甩球压掉大约四分之三；
+//   - 球速越快甩得越少，2 m/s 以上基本只剩几十分之一度。
+// 方向：右塞把目标球往连线左侧甩，左塞反之（资料里写的是
+// "right english throws it left"，指的都是相对连线的那一侧）。
+//
+// 另外两件事也一起做：
+//   - 目标球被搓出一点反向侧旋（两颗球像齿轮那样咬合），它撞库时能看出来；
+//   - 母球自己留下大部分侧旋——撞完它还要接着跑、接着撞库。
+//
+// 不做「偏杆」（squirt/deflection）：真实里加塞会让母球出射方向偏离球杆
+// 指向 2~3°，但那样一来引导线画的就不是球实际走的方向，玩家会立刻
+// 反馈「线在骗人」。这是有意省略，不是漏了。
+const THROW_MAX_DEG = 5
+const SHOT_SPIN_TRANSFER = 0.25
+const SHOT_SPIN_KEEP = 0.75
+
 // spinAfterImpact 算碰撞后这颗球该带多少滚动速度。
 //
 // spin 是标量，语义是「沿当前运动方向已经建立起来的滚动线速度」，
@@ -120,10 +192,65 @@ function spinAfterImpact(vx: number, vy: number): number {
 // 除以球直径 25px 得 76 D/s，换成我们 57.15mm 的球就是 4.34 m/s，取 4.4。
 //
 // 下限保留 0.05（pooltool 的 min_stroke_speed）：那是「轻碰一下」的量，
-// 视频里没有对应镜头，没有实测依据就不动它。力度条线性插值，
-// 中间档位自然落在两者之间。
+// 视频里没有对应镜头，没有实测依据就不动它。
 const SPEED_MIN = 0.05
 const SPEED_MAX = 4.4
+
+// 力度与球速是**线性**的：拉一半，出速就是一半。
+//
+// 这里曾经改成平方（想让低端更细腻，把力气让给轻碰与常规杆），实机被否掉了。
+// 原因在于「玩家心里的力度」其实是距离，不是初速：
+//
+//   力度：   10%    20%    30%    40%    50%    70%   100%
+//   平方： 0.06m  0.33m  0.94m  1.91m  3.18m  6.09m  12.0m
+//   线性： 1.10m  2.43m  3.82m  5.06m  6.23m  8.38m  12.0m
+//
+// 平方之后 50% 只有 1.14 m/s、滚 3.2 米，而一杆正常的球要拉到 60% 以上才够，
+// 条子下半截等于不存在。
+//
+// 线性之所以正好对上直觉，是因为滚动段几乎全是与速度成正比的阻尼
+// （ROLL_VISCOUS，见上文），速度是指数衰减的，总路程 d ≈ v0 / k，
+// 也就是距离几乎正比于初速。初速正比于力度，距离就正比于力度：
+// 上表 50% 滚 6.23 米，恰好是满力 12.0 米的一半多一点。
+// 若以后要动这条曲线，先按「距离」量一遍，不要按 m/s 判断。
+//
+// 上限仍是 4.4：开球不能因为改曲线变软。
+//
+// 上表的测法：单颗母球放在长边中线上自由滚（phi 指向长边），
+// 把 120Hz 关键帧之间的位移累加成总路程，含库边反弹的损耗。
+//
+// speedOfPower 把 0 到 1 的力度换成母球出射速度。
+//
+// 引导线那边也要用它：甩球角按球速算，不按力度算，两处必须同一个映射，
+// 否则「线把目标球画歪 2°」和「实际歪 1.5°」又会变成两张皮。
+// power 由力度条给出（0~1），服务端也按这个区间校验。
+export function speedOfPower(power: number): number {
+  return SPEED_MIN + (SPEED_MAX - SPEED_MIN) * power
+}
+
+// spinThrowDeg 算一颗带塞的球撞上去时把目标球甩偏多少度（带符号，右塞为负）。
+//
+// a 是击球点左右比例（-1 到 1），speed 是撞前球速（m/s），b 是高低杆。
+// 三条曲线都按上面那组实测数据标定，见 THROW_MAX_DEG 的注释。
+export function spinThrowDeg(a: number, speed: number, b: number): number {
+  const mag = Math.abs(a)
+  if (mag < 1e-6 || speed <= 0) {
+    return 0
+  }
+  // 半颗塞最甩：0 → 0，0.5 → 1，满塞 → 0.6。
+  let spinFactor = 1
+  if (mag <= 0.5) {
+    spinFactor = mag / 0.5
+  } else {
+    spinFactor = 1 - 0.4 * ((mag - 0.5) / 0.5)
+  }
+  // 慢球甩得多：0.5 m/s 时 0.9，2 m/s 时 0.39，4 m/s 时 0.14。
+  const speedFactor = 1 / (1 + (speed / 1.6) ** 2)
+  // 高杆低杆压掉四分之三。
+  const stunFactor = 1 - 0.75 * Math.abs(b)
+  const deg = THROW_MAX_DEG * spinFactor * speedFactor * stunFactor
+  return a > 0 ? -deg : deg
+}
 
 // 停球阈值。给到 0.1 mm/s——实际上等于「不设阈值」：
 //
@@ -201,6 +328,10 @@ interface SimBall {
   spin: number
   side: number
   bias: number
+  // english 是击球点左右比例（-1 到 1），只在母球上非零。
+  // 与 side 分开是因为两者量纲不同：side 是 m/s 的侧向速度，会随塞衰减；
+  // english 是「打在球面哪个位置」，撞球时算甩球角要用它。
+  english: number
   onTable: boolean
 }
 
@@ -250,6 +381,7 @@ export function predictShot(
       spin: 0,
       side: 0,
       bias: 0,
+      english: 0,
       onTable: true,
     })
   }
@@ -263,12 +395,13 @@ export function predictShot(
   //
   // 现在建模了：b 不给初始速度（那一份要等撞球才体现），只挂在母球身上；
   // a 直接按球速折算成侧旋。两者都在 ±1 里，服务端也按这个范围校验。
-  const speed = SPEED_MIN + params.power * (SPEED_MAX - SPEED_MIN)
+  const speed = speedOfPower(params.power)
   cue.vx = Math.cos(params.phi) * speed
   cue.vy = Math.sin(params.phi) * speed
   cue.spin = 0
   cue.side = params.a * speed * SIDE_SPIN_GAIN
   cue.bias = params.b
+  cue.english = params.a
 
   const trace: SimTrace = { events: [{ t: 0, type: 'stick_ball', a: 'cue', b: 'cue' }], t: 0 }
   const frames: ShotFrame[] = [snapshot(sim, 0)]
@@ -464,6 +597,11 @@ function separate(a: SimBall, b: SimBall, exact: boolean): boolean {
     const aIn = { vx: a.vx, vy: a.vy }
     const bIn = { vx: b.vx, vy: b.vy }
 
+    // 高低杆在这两步里都要用，而 applyFollow 会把 bias 清零，
+    // 所以先把撞前的值取出来。
+    const aBias = a.bias
+    const bBias = b.bias
+
     const impulse = (-(1 + BALL_RESTITUTION) * relative) / 2
     a.vx -= impulse * nx
     a.vy -= impulse * ny
@@ -472,6 +610,12 @@ function separate(a: SimBall, b: SimBall, exact: boolean): boolean {
     // 撞击后接触点重新打滑，但分离时已带着一部分滚动（见 COLLISION_SPIN_CARRY）。
     a.spin = spinAfterImpact(a.vx, a.vy)
     b.spin = spinAfterImpact(b.vx, b.vy)
+
+    // 塞的效果要在换完速度之后、结算高低杆之前做：
+    // 甩球是「把目标球已经拿到的速度方向拧一下」，高低杆是「沿来球方向补一脚」，
+    // 反过来做的话母球那一脚会被当成塞的一部分。
+    applyEnglish(a, b, aIn.vx, aIn.vy, aBias)
+    applyEnglish(b, a, bIn.vx, bIn.vy, bBias)
 
     applyFollow(a, aIn.vx, aIn.vy)
     applyFollow(b, bIn.vx, bIn.vy)
@@ -485,6 +629,42 @@ function separate(a: SimBall, b: SimBall, exact: boolean): boolean {
     b.y += b.vy * rest
   }
   return true
+}
+
+// applyEnglish 结算「母球上的塞在撞到球那一刻做了什么」。
+//
+// 三件事，量都按 THROW_MAX_DEG 那组实测数据标定：
+//   1. 甩球：把目标球的速度方向拧偏几度，右塞往连线左侧甩；
+//   2. 外传：目标球被搓出一点反向侧旋（齿轮咬合），它撞库时看得出来；
+//   3. 母球留旋：塞不会凭空消失，撞完它还带着四分之三，接着去撞库。
+//
+// 只在 shooter 带着塞时生效；english 用一次就清零——一颗球只有一次「第一碰」。
+// 动量在这里不守恒（只改目标球方向、没给母球反作用），这一点是有意忽略的：
+// 甩球的反作用在真实台球里也只有母球速度的百分之几，画不出来。
+function applyEnglish(
+  shooter: SimBall,
+  target: SimBall,
+  inVx: number,
+  inVy: number,
+  bias: number,
+): void {
+  if (shooter.english === 0) {
+    return
+  }
+  const before = Math.sqrt(inVx * inVx + inVy * inVy)
+  const deg = spinThrowDeg(shooter.english, before, bias)
+  if (deg !== 0) {
+    const rad = (deg * Math.PI) / 180
+    const cos = Math.cos(rad)
+    const sin = Math.sin(rad)
+    const vx = target.vx * cos - target.vy * sin
+    const vy = target.vx * sin + target.vy * cos
+    target.vx = vx
+    target.vy = vy
+  }
+  target.side += -SHOT_SPIN_TRANSFER * shooter.side
+  shooter.side *= SHOT_SPIN_KEEP
+  shooter.english = 0
 }
 
 // applyFollow 结算母球的高低杆：撞完给一份沿「来球方向」的残留速度。
@@ -680,11 +860,9 @@ function reflect(ball: SimBall, nx: number, ny: number): void {
 // 出杆瞬间完全不打转，要滑到 5/7 初速才滚起来；碰撞后已经带着一半滚动
 // （见 COLLISION_SPIN_CARRY），滑到 6/7 左右就接上了。
 //
-// 末段不做任何特殊处理：减速度从头到尾一个值，速度线性掉到零。
-//
-// 曾经在低速段加过一段「按速度比例收减速度」的柔软收尾，结果每一杆的尾巴
-// 都有一下明显的减速停顿——那一段比真实球台慢太多，反而成了刹车点。
-// 现在就是匀速减速，0.25 mm/s 一步掉完，看不出在哪一帧停的。
+// 滚动段的减速度由三份组成：台呢的常数项（ROLL_DECEL）、与速度成正比的粘性项
+// （ROLL_VISCOUS），以及只在低速段出现的末段项（tailDecel）。前两份负责中高速
+// 的指数式衰减，第三份把最后这一截从「看不见的爬行」改成「匀速地一点点停」。
 function applyFriction(ball: SimBall, dt: number): void {
   const speed = Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy)
   if (speed <= STOP_SPEED) {
@@ -705,9 +883,10 @@ function applyFriction(ball: SimBall, dt: number): void {
       ball.spin = next
     }
   } else {
-    // 滚动：阻尼 = 常数项 + 速度项（见 ROLL_VISCOUS）。速度项让高速段掉得快，
-    // 低速段几乎只剩台呢那点常数阻力，末段于是是「慢慢化掉」而不是「刹住」。
-    const decel = ROLL_DECEL + ROLL_VISCOUS * speed
+    // 滚动：常数项 + 粘性项 + 低速段的末段项（见 tailDecel）。
+    // 末段项让低速段变成恒定减速度，速度因此线性趋零，位移每 0.1 秒均匀地少一点。
+    const tail = tailDecel(speed)
+    const decel = ROLL_DECEL + ROLL_VISCOUS * speed + tail
     next = speed - decel * dt
     ball.spin = next
   }
@@ -726,6 +905,27 @@ function applyFriction(ball: SimBall, dt: number): void {
   const scale = next / speed
   ball.vx *= scale
   ball.vy *= scale
+}
+
+// tailDecel 返回低速段的额外减速度（单位 m/s²）。
+//
+// 速度高于 TAIL_SPEED 时返回 0，中高速完全不受影响。进末段之后，在 TAIL_RAMP
+// 这段速度区间里用 smoothstep 从 0 升到 TAIL_DECEL，再往下一直保持 TAIL_DECEL。
+// 用 smoothstep 而不是线性插值，是为了两端的一阶导都为零：减速度曲线自身没有
+// 折点，速度曲线上就看不出「从哪一刻开始刹车」的接缝。
+//
+// 结果是低速段恒定减速度、速度线性趋零。这一点是「一点点停」的关键：
+// 如果像第一版那样让额外阻尼随速度增大（v 越小阻尼越大），减速度会全堆在
+// 最后半秒，前段接近匀速，观感就是「匀速滚完啪一下刹住」。
+function tailDecel(speed: number): number {
+  if (speed >= TAIL_SPEED) {
+    return 0
+  }
+  let k = (TAIL_SPEED - speed) / TAIL_RAMP
+  if (k > 1) {
+    k = 1
+  }
+  return TAIL_DECEL * k * k * (3 - 2 * k)
 }
 
 // allStopped 表示台面上已经没有球在动了。落袋的球不算。
